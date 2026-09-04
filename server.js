@@ -35,7 +35,7 @@ const client = new OpenAI({
 // Supabase 客户端
 // ========================================
 
-// 这里不要填写真实 URL 和 Secret Key
+// 不要在这里填写真实 URL 和 Secret Key
 // 它们已经保存在 Render Environment Variables 中
 let supabase = null;
 
@@ -74,7 +74,6 @@ app.get("/health", (req, res) => {
 app.get("/api/db-test", async (req, res) => {
     try {
 
-        // 检查 Render 中是否配置了 Supabase 环境变量
         if (
             !process.env.SUPABASE_URL ||
             !process.env.SUPABASE_SECRET_KEY
@@ -125,6 +124,74 @@ app.get("/api/db-test", async (req, res) => {
         res.status(500).json({
             ok: false,
             error: "Supabase 数据库连接失败",
+            detail: error.message,
+        });
+
+    }
+});
+
+
+// ========================================
+// 创建新会话
+// POST /api/sessions
+// ========================================
+
+app.post("/api/sessions", async (req, res) => {
+    try {
+
+        // 检查 Supabase 是否正常初始化
+        if (!supabase) {
+            return res.status(500).json({
+                ok: false,
+                error: "Supabase 客户端没有正确初始化",
+            });
+        }
+
+
+        // 获取前端传来的会话名称
+        const name =
+            typeof req.body.name === "string"
+                ? req.body.name.trim()
+                : "";
+
+
+        // 创建新会话
+        const { data, error } = await supabase
+            .from("sessions")
+            .insert([
+                {
+                    name: name || "新对话",
+                },
+            ])
+            .select(
+                "id, name, created_at, updated_at"
+            )
+            .single();
+
+
+        if (error) {
+            throw error;
+        }
+
+
+        // 返回新建的会话
+        res.status(201).json({
+            ok: true,
+            message: "会话创建成功",
+            session: data,
+        });
+
+    } catch (error) {
+
+        console.error(
+            "创建会话失败：",
+            error
+        );
+
+
+        res.status(500).json({
+            ok: false,
+            error: "创建会话失败",
             detail: error.message,
         });
 
