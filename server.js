@@ -283,7 +283,6 @@ app.patch("/api/sessions/:id", async (req, res) => {
         const { name } = req.body;
 
 
-        // 检查会话 ID
         if (
             !Number.isInteger(sessionId) ||
             sessionId <= 0
@@ -295,7 +294,6 @@ app.patch("/api/sessions/:id", async (req, res) => {
         }
 
 
-        // 检查新名称
         if (
             typeof name !== "string" ||
             !name.trim()
@@ -380,7 +378,6 @@ app.delete("/api/sessions/:id", async (req, res) => {
         const sessionId = Number(req.params.id);
 
 
-        // 检查会话 ID
         if (
             !Number.isInteger(sessionId) ||
             sessionId <= 0
@@ -422,8 +419,8 @@ app.delete("/api/sessions/:id", async (req, res) => {
 
 
         // 删除会话
-        // messages 表使用 ON DELETE CASCADE，
-        // 所以属于该会话的消息会一起删除
+        // messages.session_id 已设置 ON DELETE CASCADE
+        // 所以该会话下面的消息也会一起删除
         const { error: deleteError } = await supabase
             .from("sessions")
             .delete()
@@ -465,8 +462,138 @@ app.delete("/api/sessions/:id", async (req, res) => {
 
 
 // ========================================
+// 获取指定会话的历史消息
+// GET /api/sessions/:id/messages
+// ========================================
+
+app.get("/api/sessions/:id/messages", async (req, res) => {
+
+    try {
+
+        if (!supabase) {
+            return res.status(500).json({
+                ok: false,
+                error: "Supabase 客户端没有初始化",
+            });
+        }
+
+
+        const sessionId = Number(req.params.id);
+
+
+        // 检查会话 ID
+        if (
+            !Number.isInteger(sessionId) ||
+            sessionId <= 0
+        ) {
+            return res.status(400).json({
+                ok: false,
+                error: "无效的会话 ID",
+            });
+        }
+
+
+        // ========================================
+        // 先确认会话存在
+        // ========================================
+
+        const {
+            data: session,
+            error: sessionError
+        } = await supabase
+            .from("sessions")
+            .select(
+                "id, name, created_at, updated_at"
+            )
+            .eq(
+                "id",
+                sessionId
+            )
+            .maybeSingle();
+
+
+        if (sessionError) {
+            throw sessionError;
+        }
+
+
+        if (!session) {
+            return res.status(404).json({
+                ok: false,
+                error: "会话不存在",
+            });
+        }
+
+
+        // ========================================
+        // 获取该会话中的可见消息
+        // ========================================
+
+        const {
+            data: messages,
+            error: messagesError
+        } = await supabase
+            .from("messages")
+            .select(
+                "id, session_id, role, content, created_at, visible"
+            )
+            .eq(
+                "session_id",
+                sessionId
+            )
+            .eq(
+                "visible",
+                true
+            )
+            .order(
+                "created_at",
+                {
+                    ascending: true,
+                }
+            );
+
+
+        if (messagesError) {
+            throw messagesError;
+        }
+
+
+        res.status(200).json({
+            ok: true,
+            session: session,
+            messages: messages,
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "获取历史消息失败：",
+            error
+        );
+
+
+        res.status(500).json({
+            ok: false,
+            error: "获取历史消息失败",
+            detail: error.message,
+        });
+
+    }
+
+});
+
+
+// ========================================
 // AI 对话接口
 // POST /api/chat
+//
+// 目前仍然是最简单的一问一答。
+// 下一步我们会改这里，让它：
+// 1. 保存用户消息
+// 2. 加载历史消息
+// 3. 调用 AI
+// 4. 保存 AI 回复
 // ========================================
 
 app.post("/api/chat", async (req, res) => {
