@@ -307,7 +307,6 @@ app.patch("/api/sessions/:id", async (req, res) => {
         }
 
 
-        // 更新会话名称
         const { data, error } = await supabase
             .from("sessions")
             .update({
@@ -328,7 +327,6 @@ app.patch("/api/sessions/:id", async (req, res) => {
         }
 
 
-        // 找不到该会话
         if (!data) {
             return res.status(404).json({
                 ok: false,
@@ -363,6 +361,110 @@ app.patch("/api/sessions/:id", async (req, res) => {
 
 
 // ========================================
+// 删除会话
+// DELETE /api/sessions/:id
+// ========================================
+
+app.delete("/api/sessions/:id", async (req, res) => {
+
+    try {
+
+        if (!supabase) {
+            return res.status(500).json({
+                ok: false,
+                error: "Supabase 客户端没有初始化",
+            });
+        }
+
+
+        const sessionId = Number(req.params.id);
+
+
+        // 检查会话 ID
+        if (
+            !Number.isInteger(sessionId) ||
+            sessionId <= 0
+        ) {
+            return res.status(400).json({
+                ok: false,
+                error: "无效的会话 ID",
+            });
+        }
+
+
+        // 先检查会话是否存在
+        const {
+            data: existingSession,
+            error: findError
+        } = await supabase
+            .from("sessions")
+            .select(
+                "id, name, created_at, updated_at"
+            )
+            .eq(
+                "id",
+                sessionId
+            )
+            .maybeSingle();
+
+
+        if (findError) {
+            throw findError;
+        }
+
+
+        if (!existingSession) {
+            return res.status(404).json({
+                ok: false,
+                error: "会话不存在",
+            });
+        }
+
+
+        // 删除会话
+        // messages 表使用 ON DELETE CASCADE，
+        // 所以属于该会话的消息会一起删除
+        const { error: deleteError } = await supabase
+            .from("sessions")
+            .delete()
+            .eq(
+                "id",
+                sessionId
+            );
+
+
+        if (deleteError) {
+            throw deleteError;
+        }
+
+
+        res.status(200).json({
+            ok: true,
+            message: "会话删除成功",
+            deletedSession: existingSession,
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "删除会话失败：",
+            error
+        );
+
+
+        res.status(500).json({
+            ok: false,
+            error: "删除会话失败",
+            detail: error.message,
+        });
+
+    }
+
+});
+
+
+// ========================================
 // AI 对话接口
 // POST /api/chat
 // ========================================
@@ -374,7 +476,6 @@ app.post("/api/chat", async (req, res) => {
         const { message } = req.body;
 
 
-        // 检查消息
         if (
             typeof message !== "string" ||
             !message.trim()
@@ -385,7 +486,6 @@ app.post("/api/chat", async (req, res) => {
         }
 
 
-        // 检查 AI 环境变量
         if (
             !process.env.AI_API_KEY ||
             !process.env.AI_BASE_URL
@@ -396,14 +496,12 @@ app.post("/api/chat", async (req, res) => {
         }
 
 
-        // 调用 AI
         const response = await client.responses.create({
             model: "gpt-5.6-sol",
             input: message.trim(),
         });
 
 
-        // 返回 AI 回复
         res.status(200).json({
             reply: response.output_text,
         });
