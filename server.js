@@ -13,11 +13,11 @@ const PORT = process.env.PORT || 3000;
 // 中间件
 // ========================================
 
-// 暂时允许前端跨域访问
-// 等项目完全稳定后，再限制成你的 Vercel 前端域名
+// 暂时允许所有前端访问
+// 项目稳定以后再限制成你的 Vercel 域名
 app.use(cors());
 
-// 让后端能够读取前端发来的 JSON
+// 让后端能够读取 JSON
 app.use(express.json());
 
 
@@ -35,8 +35,8 @@ const client = new OpenAI({
 // Supabase 客户端
 // ========================================
 
-// 不要在这里填写真实 URL 和 Secret Key
-// 它们已经保存在 Render Environment Variables 中
+// URL 和 Secret Key 都从 Render 环境变量读取
+// 不要把真实 Key 写进代码
 let supabase = null;
 
 if (
@@ -58,20 +58,25 @@ if (
 
 // ========================================
 // 健康检查
+// GET /health
 // ========================================
 
 app.get("/health", (req, res) => {
+
     res.status(200).json({
         message: "服务正常",
     });
+
 });
 
 
 // ========================================
 // Supabase 数据库连接测试
+// GET /api/db-test
 // ========================================
 
 app.get("/api/db-test", async (req, res) => {
+
     try {
 
         if (
@@ -93,7 +98,6 @@ app.get("/api/db-test", async (req, res) => {
         }
 
 
-        // 从 settings 表读取一条数据
         const { data, error } = await supabase
             .from("settings")
             .select(
@@ -113,6 +117,7 @@ app.get("/api/db-test", async (req, res) => {
             data: data,
         });
 
+
     } catch (error) {
 
         console.error(
@@ -128,6 +133,7 @@ app.get("/api/db-test", async (req, res) => {
         });
 
     }
+
 });
 
 
@@ -137,30 +143,31 @@ app.get("/api/db-test", async (req, res) => {
 // ========================================
 
 app.post("/api/sessions", async (req, res) => {
+
     try {
 
-        // 检查 Supabase 是否正常初始化
         if (!supabase) {
             return res.status(500).json({
                 ok: false,
-                error: "Supabase 客户端没有正确初始化",
+                error: "Supabase 客户端没有初始化",
             });
         }
 
 
-        // 获取前端传来的会话名称
-        const name =
-            typeof req.body.name === "string"
-                ? req.body.name.trim()
-                : "";
+        const { name } = req.body;
 
 
-        // 创建新会话
+        const sessionName =
+            typeof name === "string" && name.trim()
+                ? name.trim()
+                : "新对话";
+
+
         const { data, error } = await supabase
             .from("sessions")
             .insert([
                 {
-                    name: name || "新对话",
+                    name: sessionName,
                 },
             ])
             .select(
@@ -174,12 +181,11 @@ app.post("/api/sessions", async (req, res) => {
         }
 
 
-        // 返回新建的会话
         res.status(201).json({
             ok: true,
-            message: "会话创建成功",
             session: data,
         });
+
 
     } catch (error) {
 
@@ -196,21 +202,87 @@ app.post("/api/sessions", async (req, res) => {
         });
 
     }
+
+});
+
+
+// ========================================
+// 获取会话列表
+// GET /api/sessions
+// ========================================
+
+app.get("/api/sessions", async (req, res) => {
+
+    try {
+
+        if (!supabase) {
+            return res.status(500).json({
+                ok: false,
+                error: "Supabase 客户端没有初始化",
+            });
+        }
+
+
+        const { data, error } = await supabase
+            .from("sessions")
+            .select(
+                "id, name, created_at, updated_at"
+            )
+            .order(
+                "updated_at",
+                {
+                    ascending: false,
+                }
+            );
+
+
+        if (error) {
+            throw error;
+        }
+
+
+        res.status(200).json({
+            ok: true,
+            sessions: data,
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "获取会话列表失败：",
+            error
+        );
+
+
+        res.status(500).json({
+            ok: false,
+            error: "获取会话列表失败",
+            detail: error.message,
+        });
+
+    }
+
 });
 
 
 // ========================================
 // AI 对话接口
+// POST /api/chat
 // ========================================
 
 app.post("/api/chat", async (req, res) => {
+
     try {
 
         const { message } = req.body;
 
 
         // 检查消息
-        if (!message) {
+        if (
+            typeof message !== "string" ||
+            !message.trim()
+        ) {
             return res.status(400).json({
                 error: "message 不能为空",
             });
@@ -231,7 +303,7 @@ app.post("/api/chat", async (req, res) => {
         // 调用 AI
         const response = await client.responses.create({
             model: "gpt-5.6-sol",
-            input: message,
+            input: message.trim(),
         });
 
 
@@ -239,6 +311,7 @@ app.post("/api/chat", async (req, res) => {
         res.status(200).json({
             reply: response.output_text,
         });
+
 
     } catch (error) {
 
@@ -254,6 +327,7 @@ app.post("/api/chat", async (req, res) => {
         });
 
     }
+
 });
 
 
@@ -265,8 +339,10 @@ app.listen(
     PORT,
     "0.0.0.0",
     () => {
+
         console.log(
             `Server is running on port ${PORT}`
         );
+
     }
 );
