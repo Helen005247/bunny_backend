@@ -10,54 +10,17 @@ const PORT = process.env.PORT || 3000;
 
 
 // ======================================================
-// Token 粗略估算
-// ======================================================
-
-function estimateTokens(text) {
-
-    if (
-        typeof text !== "string" ||
-        !text
-    ) {
-        return 0;
-    }
-
-
-    // 中文字符粗略按 1 个字符 ≈ 1 token
-    const chineseCharacters =
-        text.match(/[\u4e00-\u9fff]/g) || [];
-
-
-    const chineseCount =
-        chineseCharacters.length;
-
-
-    // 去掉中文以后，
-    // 其它英文、数字、符号粗略按 4 个字符 ≈ 1 token
-    const otherText =
-        text.replace(
-            /[\u4e00-\u9fff]/g,
-            ""
-        );
-
-
-    const otherTokens =
-        Math.ceil(
-            otherText.length / 4
-        );
-
-
-    return chineseCount + otherTokens;
-}
-
-
-// ======================================================
 // 中间件
 // ======================================================
 
 app.use(cors());
 
-app.use(express.json());
+// character_context 以后可能比较长
+app.use(
+    express.json({
+        limit: "1mb",
+    })
+);
 
 
 // ======================================================
@@ -80,7 +43,6 @@ if (
     process.env.SUPABASE_URL &&
     process.env.SUPABASE_SECRET_KEY
 ) {
-
     supabase = createClient(
         process.env.SUPABASE_URL,
         process.env.SUPABASE_SECRET_KEY,
@@ -91,7 +53,135 @@ if (
             },
         }
     );
+}
 
+
+// ======================================================
+// Token 粗略估算
+// ======================================================
+
+function estimateTokens(text) {
+
+    if (
+        typeof text !== "string" ||
+        !text
+    ) {
+        return 0;
+    }
+
+
+    // 中文字符粗略按 1 个字符 ≈ 1 token
+    const chineseCharacters =
+        text.match(/[\u4e00-\u9fff]/g) || [];
+
+
+    const chineseCount =
+        chineseCharacters.length;
+
+
+    // 英文、数字和符号粗略按 4 字符 ≈ 1 token
+    const otherText =
+        text.replace(
+            /[\u4e00-\u9fff]/g,
+            ""
+        );
+
+
+    const otherTokens =
+        Math.ceil(
+            otherText.length / 4
+        );
+
+
+    return chineseCount + otherTokens;
+}
+
+
+// ======================================================
+// 获取全局 settings
+// ======================================================
+
+async function getGlobalSettings() {
+
+    const {
+        data,
+        error
+    } = await supabase
+        .from("settings")
+        .select(
+            `
+            id,
+            session_id,
+            system_prompt,
+            character_context,
+            temperature,
+            max_context_rounds,
+            max_context_tokens,
+            compress_threshold,
+            compress_keep_rounds,
+            max_reply_tokens,
+            updated_at
+            `
+        )
+        .eq(
+            "session_id",
+            "global"
+        )
+        .maybeSingle();
+
+
+    if (error) {
+        throw error;
+    }
+
+
+    return data;
+}
+
+
+// ======================================================
+// 获取最新一条长期记忆
+// ======================================================
+
+async function getLatestMemorySummary() {
+
+    const {
+        data,
+        error
+    } = await supabase
+        .from("memories")
+        .select(
+            "id, summary, timestamp"
+        )
+        .eq(
+            "session_id",
+            "global"
+        )
+        .order(
+            "timestamp",
+            {
+                ascending: false,
+            }
+        )
+        .limit(1);
+
+
+    if (error) {
+        throw error;
+    }
+
+
+    if (
+        !data ||
+        data.length === 0
+    ) {
+        return "";
+    }
+
+
+    return typeof data[0].summary === "string"
+        ? data[0].summary.trim()
+        : "";
 }
 
 
@@ -122,22 +212,18 @@ app.get("/api/db-test", async (req, res) => {
             !process.env.SUPABASE_URL ||
             !process.env.SUPABASE_SECRET_KEY
         ) {
-
             return res.status(500).json({
                 ok: false,
                 error: "服务器没有正确配置 SUPABASE_URL 或 SUPABASE_SECRET_KEY",
             });
-
         }
 
 
         if (!supabase) {
-
             return res.status(500).json({
                 ok: false,
                 error: "Supabase 客户端初始化失败",
             });
-
         }
 
 
@@ -162,7 +248,7 @@ app.get("/api/db-test", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "Supabase 数据库连接测试失败：",
+            "数据库连接测试失败：",
             error
         );
 
@@ -179,7 +265,7 @@ app.get("/api/db-test", async (req, res) => {
 
 
 // ======================================================
-// 创建新会话
+// 创建会话
 // POST /api/sessions
 // ======================================================
 
@@ -188,12 +274,10 @@ app.post("/api/sessions", async (req, res) => {
     try {
 
         if (!supabase) {
-
             return res.status(500).json({
                 ok: false,
                 error: "Supabase 客户端没有初始化",
             });
-
         }
 
 
@@ -207,7 +291,10 @@ app.post("/api/sessions", async (req, res) => {
                 : "新对话";
 
 
-        const { data, error } = await supabase
+        const {
+            data,
+            error
+        } = await supabase
             .from("sessions")
             .insert([
                 {
@@ -260,16 +347,17 @@ app.get("/api/sessions", async (req, res) => {
     try {
 
         if (!supabase) {
-
             return res.status(500).json({
                 ok: false,
                 error: "Supabase 客户端没有初始化",
             });
-
         }
 
 
-        const { data, error } = await supabase
+        const {
+            data,
+            error
+        } = await supabase
             .from("sessions")
             .select(
                 "id, name, created_at, updated_at"
@@ -322,12 +410,10 @@ app.patch("/api/sessions/:id", async (req, res) => {
     try {
 
         if (!supabase) {
-
             return res.status(500).json({
                 ok: false,
                 error: "Supabase 客户端没有初始化",
             });
-
         }
 
 
@@ -342,12 +428,10 @@ app.patch("/api/sessions/:id", async (req, res) => {
             !Number.isInteger(sessionId) ||
             sessionId <= 0
         ) {
-
             return res.status(400).json({
                 ok: false,
                 error: "无效的会话 ID",
             });
-
         }
 
 
@@ -355,16 +439,17 @@ app.patch("/api/sessions/:id", async (req, res) => {
             typeof name !== "string" ||
             !name.trim()
         ) {
-
             return res.status(400).json({
                 ok: false,
                 error: "会话名称不能为空",
             });
-
         }
 
 
-        const { data, error } = await supabase
+        const {
+            data,
+            error
+        } = await supabase
             .from("sessions")
             .update({
                 name: name.trim(),
@@ -385,12 +470,10 @@ app.patch("/api/sessions/:id", async (req, res) => {
 
 
         if (!data) {
-
             return res.status(404).json({
                 ok: false,
                 error: "会话不存在",
             });
-
         }
 
 
@@ -429,12 +512,10 @@ app.delete("/api/sessions/:id", async (req, res) => {
     try {
 
         if (!supabase) {
-
             return res.status(500).json({
                 ok: false,
                 error: "Supabase 客户端没有初始化",
             });
-
         }
 
 
@@ -446,12 +527,10 @@ app.delete("/api/sessions/:id", async (req, res) => {
             !Number.isInteger(sessionId) ||
             sessionId <= 0
         ) {
-
             return res.status(400).json({
                 ok: false,
                 error: "无效的会话 ID",
             });
-
         }
 
 
@@ -476,23 +555,22 @@ app.delete("/api/sessions/:id", async (req, res) => {
 
 
         if (!existingSession) {
-
             return res.status(404).json({
                 ok: false,
                 error: "会话不存在",
             });
-
         }
 
 
-        const { error: deleteError } =
-            await supabase
-                .from("sessions")
-                .delete()
-                .eq(
-                    "id",
-                    sessionId
-                );
+        const {
+            error: deleteError
+        } = await supabase
+            .from("sessions")
+            .delete()
+            .eq(
+                "id",
+                sessionId
+            );
 
 
         if (deleteError) {
@@ -527,7 +605,7 @@ app.delete("/api/sessions/:id", async (req, res) => {
 
 
 // ======================================================
-// 获取指定会话历史消息
+// 获取历史消息
 // GET /api/sessions/:id/messages
 // ======================================================
 
@@ -538,12 +616,10 @@ app.get(
         try {
 
             if (!supabase) {
-
                 return res.status(500).json({
                     ok: false,
                     error: "Supabase 客户端没有初始化",
                 });
-
             }
 
 
@@ -555,12 +631,10 @@ app.get(
                 !Number.isInteger(sessionId) ||
                 sessionId <= 0
             ) {
-
                 return res.status(400).json({
                     ok: false,
                     error: "无效的会话 ID",
                 });
-
             }
 
 
@@ -585,12 +659,10 @@ app.get(
 
 
             if (!session) {
-
                 return res.status(404).json({
                     ok: false,
                     error: "会话不存在",
                 });
-
             }
 
 
@@ -666,45 +738,28 @@ app.get("/api/settings", async (req, res) => {
     try {
 
         if (!supabase) {
-
             return res.status(500).json({
                 ok: false,
                 error: "Supabase 客户端没有初始化",
             });
-
         }
 
 
-        const { data, error } = await supabase
-            .from("settings")
-            .select(
-                "id, session_id, system_prompt, temperature, max_context_rounds, max_context_tokens, compress_threshold, compress_keep_rounds, max_reply_tokens, updated_at"
-            )
-            .eq(
-                "session_id",
-                "global"
-            )
-            .maybeSingle();
+        const settings =
+            await getGlobalSettings();
 
 
-        if (error) {
-            throw error;
-        }
-
-
-        if (!data) {
-
+        if (!settings) {
             return res.status(404).json({
                 ok: false,
                 error: "没有找到全局设置",
             });
-
         }
 
 
         res.status(200).json({
             ok: true,
-            settings: data,
+            settings: settings,
         });
 
 
@@ -728,7 +783,7 @@ app.get("/api/settings", async (req, res) => {
 
 
 // ======================================================
-// 更新全局设置
+// 修改全局设置
 // PATCH /api/settings
 // ======================================================
 
@@ -737,17 +792,16 @@ app.patch("/api/settings", async (req, res) => {
     try {
 
         if (!supabase) {
-
             return res.status(500).json({
                 ok: false,
                 error: "Supabase 客户端没有初始化",
             });
-
         }
 
 
         const {
             system_prompt,
+            character_context,
             temperature,
             max_context_rounds,
             max_context_tokens,
@@ -760,18 +814,21 @@ app.patch("/api/settings", async (req, res) => {
         const updates = {};
 
 
+        // ------------------------------------------------------
         // system_prompt
-        if (system_prompt !== undefined) {
+        // ------------------------------------------------------
+
+        if (
+            system_prompt !== undefined
+        ) {
 
             if (
                 typeof system_prompt !== "string"
             ) {
-
                 return res.status(400).json({
                     ok: false,
                     error: "system_prompt 必须是字符串",
                 });
-
             }
 
 
@@ -781,8 +838,37 @@ app.patch("/api/settings", async (req, res) => {
         }
 
 
+        // ------------------------------------------------------
+        // character_context
+        // ------------------------------------------------------
+
+        if (
+            character_context !== undefined
+        ) {
+
+            if (
+                typeof character_context !== "string"
+            ) {
+                return res.status(400).json({
+                    ok: false,
+                    error: "character_context 必须是字符串",
+                });
+            }
+
+
+            updates.character_context =
+                character_context;
+
+        }
+
+
+        // ------------------------------------------------------
         // temperature
-        if (temperature !== undefined) {
+        // ------------------------------------------------------
+
+        if (
+            temperature !== undefined
+        ) {
 
             const value =
                 Number(temperature);
@@ -793,12 +879,10 @@ app.patch("/api/settings", async (req, res) => {
                 value < 0 ||
                 value > 2
             ) {
-
                 return res.status(400).json({
                     ok: false,
                     error: "temperature 必须在 0 到 2 之间",
                 });
-
             }
 
 
@@ -808,7 +892,10 @@ app.patch("/api/settings", async (req, res) => {
         }
 
 
-        // 整数类型设置
+        // ------------------------------------------------------
+        // 整数参数
+        // ------------------------------------------------------
+
         const integerFields = {
             max_context_rounds,
             max_context_tokens,
@@ -838,12 +925,10 @@ app.patch("/api/settings", async (req, res) => {
                 !Number.isInteger(numberValue) ||
                 numberValue <= 0
             ) {
-
                 return res.status(400).json({
                     ok: false,
                     error: `${key} 必须是大于 0 的整数`,
                 });
-
             }
 
 
@@ -856,16 +941,17 @@ app.patch("/api/settings", async (req, res) => {
         if (
             Object.keys(updates).length === 0
         ) {
-
             return res.status(400).json({
                 ok: false,
                 error: "没有提供需要修改的设置",
             });
-
         }
 
 
-        const { data, error } = await supabase
+        const {
+            data,
+            error
+        } = await supabase
             .from("settings")
             .update(updates)
             .eq(
@@ -873,7 +959,19 @@ app.patch("/api/settings", async (req, res) => {
                 "global"
             )
             .select(
-                "id, session_id, system_prompt, temperature, max_context_rounds, max_context_tokens, compress_threshold, compress_keep_rounds, max_reply_tokens, updated_at"
+                `
+                id,
+                session_id,
+                system_prompt,
+                character_context,
+                temperature,
+                max_context_rounds,
+                max_context_tokens,
+                compress_threshold,
+                compress_keep_rounds,
+                max_reply_tokens,
+                updated_at
+                `
             )
             .maybeSingle();
 
@@ -884,12 +982,10 @@ app.patch("/api/settings", async (req, res) => {
 
 
         if (!data) {
-
             return res.status(404).json({
                 ok: false,
                 error: "没有找到全局设置",
             });
-
         }
 
 
@@ -919,7 +1015,7 @@ app.patch("/api/settings", async (req, res) => {
 
 
 // ======================================================
-// 查看某个会话当前上下文 Token 状态
+// 上下文 Token 状态
 // GET /api/sessions/:id/context-stats
 // ======================================================
 
@@ -930,12 +1026,10 @@ app.get(
         try {
 
             if (!supabase) {
-
                 return res.status(500).json({
                     ok: false,
                     error: "Supabase 客户端没有初始化",
                 });
-
             }
 
 
@@ -947,18 +1041,12 @@ app.get(
                 !Number.isInteger(sessionId) ||
                 sessionId <= 0
             ) {
-
                 return res.status(400).json({
                     ok: false,
                     error: "无效的会话 ID",
                 });
-
             }
 
-
-            // ==========================================
-            // 确认会话存在
-            // ==========================================
 
             const {
                 data: session,
@@ -981,79 +1069,20 @@ app.get(
 
 
             if (!session) {
-
                 return res.status(404).json({
                     ok: false,
                     error: "会话不存在",
                 });
-
             }
 
 
-            // ==========================================
-            // 读取 settings
-            // ==========================================
-
-            const {
-                data: settings,
-                error: settingsError
-            } = await supabase
-                .from("settings")
-                .select(
-                    "system_prompt, max_context_tokens, compress_threshold, compress_keep_rounds"
-                )
-                .eq(
-                    "session_id",
-                    "global"
-                )
-                .maybeSingle();
-
-
-            if (settingsError) {
-                throw settingsError;
-            }
-
-
-            // ==========================================
-            // 读取最新长期记忆
-            // ==========================================
-
-            const {
-                data: memories,
-                error: memoryError
-            } = await supabase
-                .from("memories")
-                .select(
-                    "summary"
-                )
-                .eq(
-                    "session_id",
-                    "global"
-                )
-                .order(
-                    "timestamp",
-                    {
-                        ascending: false,
-                    }
-                )
-                .limit(1);
-
-
-            if (memoryError) {
-                throw memoryError;
-            }
+            const settings =
+                await getGlobalSettings();
 
 
             const memorySummary =
-                memories &&
-                    memories.length > 0
-                    ? memories[0].summary || ""
-                    : "";
+                await getLatestMemorySummary();
 
-
-            // ==========================================
-            // 读取当前会话全部可见消息
-            // ==========================================
 
             const {
                 data: messages,
@@ -1090,9 +1119,13 @@ app.get(
             }
 
 
-            // ==========================================
-            // 组装用于估算的上下文
-            // ==========================================
+            const systemPrompt =
+                settings?.system_prompt || "";
+
+
+            const characterContext =
+                settings?.character_context || "";
+
 
             const historyText =
                 (messages || [])
@@ -1110,11 +1143,34 @@ app.get(
                     .join("\n");
 
 
-            const fullContext = [
-                settings?.system_prompt || "",
+            const fixedContext = [
+                systemPrompt,
+                characterContext,
+            ].join("\n\n");
+
+
+            const conversationContext = [
                 memorySummary,
                 historyText,
             ].join("\n\n");
+
+
+            const fullContext = [
+                fixedContext,
+                conversationContext,
+            ].join("\n\n");
+
+
+            const fixedContextTokens =
+                estimateTokens(
+                    fixedContext
+                );
+
+
+            const conversationTokens =
+                estimateTokens(
+                    conversationContext
+                );
 
 
             const estimatedTokens =
@@ -1141,10 +1197,6 @@ app.get(
                 ) || 6;
 
 
-            // ==========================================
-            // 返回统计结果
-            // ==========================================
-
             res.status(200).json({
 
                 ok: true,
@@ -1156,6 +1208,12 @@ app.get(
 
                 message_count:
                     messages?.length || 0,
+
+                fixed_context_tokens:
+                    fixedContextTokens,
+
+                conversation_tokens:
+                    conversationTokens,
 
                 estimated_tokens:
                     estimatedTokens,
@@ -1197,31 +1255,23 @@ app.get(
 
 
 // ======================================================
-// 核心 AI 对话接口
+// 核心 AI 对话
 // POST /api/chat
-//
-// 请求：
-// {
-//     "session_id": 1,
-//     "message": "你好"
-// }
 // ======================================================
 
 app.post("/api/chat", async (req, res) => {
 
     try {
 
-        // ==================================================
-        // 1. 基础检查
-        // ==================================================
+        // --------------------------------------------------
+        // 基础检查
+        // --------------------------------------------------
 
         if (!supabase) {
-
             return res.status(500).json({
                 ok: false,
                 error: "Supabase 客户端没有初始化",
             });
-
         }
 
 
@@ -1229,12 +1279,10 @@ app.post("/api/chat", async (req, res) => {
             !process.env.AI_API_KEY ||
             !process.env.AI_BASE_URL
         ) {
-
             return res.status(500).json({
                 ok: false,
                 error: "服务器没有正确配置 AI_API_KEY 或 AI_BASE_URL",
             });
-
         }
 
 
@@ -1248,12 +1296,10 @@ app.post("/api/chat", async (req, res) => {
             typeof message !== "string" ||
             !message.trim()
         ) {
-
             return res.status(400).json({
                 ok: false,
                 error: "message 不能为空",
             });
-
         }
 
 
@@ -1264,9 +1310,9 @@ app.post("/api/chat", async (req, res) => {
         let sessionId = null;
 
 
-        // ==================================================
-        // 2. 确定当前 session
-        // ==================================================
+        // ======================================================
+        // 1. 确定当前 session
+        // ======================================================
 
         const hasSessionId =
             session_id !== undefined &&
@@ -1284,12 +1330,10 @@ app.post("/api/chat", async (req, res) => {
                 !Number.isInteger(parsedSessionId) ||
                 parsedSessionId <= 0
             ) {
-
                 return res.status(400).json({
                     ok: false,
                     error: "无效的 session_id",
                 });
-
             }
 
 
@@ -1299,7 +1343,7 @@ app.post("/api/chat", async (req, res) => {
             } = await supabase
                 .from("sessions")
                 .select(
-                    "id, name, created_at, updated_at"
+                    "id, name"
                 )
                 .eq(
                     "id",
@@ -1314,12 +1358,10 @@ app.post("/api/chat", async (req, res) => {
 
 
             if (!session) {
-
                 return res.status(404).json({
                     ok: false,
                     error: "会话不存在",
                 });
-
             }
 
 
@@ -1328,16 +1370,13 @@ app.post("/api/chat", async (req, res) => {
 
         } else {
 
-            // 当前前端未传 session_id 时
-            // 使用最近更新的会话
-
             const {
                 data: recentSessions,
                 error: recentSessionError
             } = await supabase
                 .from("sessions")
                 .select(
-                    "id, name, created_at, updated_at"
+                    "id, name, updated_at"
                 )
                 .order(
                     "updated_at",
@@ -1374,7 +1413,7 @@ app.post("/api/chat", async (req, res) => {
                         },
                     ])
                     .select(
-                        "id, name, created_at, updated_at"
+                        "id"
                     )
                     .single();
 
@@ -1392,9 +1431,9 @@ app.post("/api/chat", async (req, res) => {
         }
 
 
-        // ==================================================
-        // 3. 保存用户消息
-        // ==================================================
+        // ======================================================
+        // 2. 保存用户消息
+        // ======================================================
 
         const {
             data: userMessage,
@@ -1427,34 +1466,23 @@ app.post("/api/chat", async (req, res) => {
         }
 
 
-        // ==================================================
-        // 4. 读取全局 settings
-        // ==================================================
+        // ======================================================
+        // 3. 读取 settings
+        // ======================================================
 
-        const {
-            data: settings,
-            error: settingsError
-        } = await supabase
-            .from("settings")
-            .select(
-                "system_prompt, temperature, max_context_rounds, max_context_tokens, compress_threshold, compress_keep_rounds, max_reply_tokens"
-            )
-            .eq(
-                "session_id",
-                "global"
-            )
-            .maybeSingle();
-
-
-        if (settingsError) {
-            throw settingsError;
-        }
+        const settings =
+            await getGlobalSettings();
 
 
         const systemPrompt =
-            typeof settings?.system_prompt ===
-                "string"
+            typeof settings?.system_prompt === "string"
                 ? settings.system_prompt.trim()
+                : "";
+
+
+        const characterContext =
+            typeof settings?.character_context === "string"
+                ? settings.character_context.trim()
                 : "";
 
 
@@ -1482,55 +1510,17 @@ app.post("/api/chat", async (req, res) => {
             );
 
 
-        // ==================================================
-        // 5. 读取最近长期记忆
-        // ==================================================
+        // ======================================================
+        // 4. 读取长期记忆
+        // ======================================================
 
-        const {
-            data: memoryRows,
-            error: memoryError
-        } = await supabase
-            .from("memories")
-            .select(
-                "id, summary, timestamp"
-            )
-            .eq(
-                "session_id",
-                "global"
-            )
-            .order(
-                "timestamp",
-                {
-                    ascending: false,
-                }
-            )
-            .limit(1);
+        const memorySummary =
+            await getLatestMemorySummary();
 
 
-        if (memoryError) {
-            throw memoryError;
-        }
-
-
-        let memorySummary = "";
-
-
-        if (
-            memoryRows &&
-            memoryRows.length > 0 &&
-            typeof memoryRows[0].summary ===
-            "string"
-        ) {
-
-            memorySummary =
-                memoryRows[0].summary.trim();
-
-        }
-
-
-        // ==================================================
-        // 6. 读取最近历史消息
-        // ==================================================
+        // ======================================================
+        // 5. 读取最近历史消息
+        // ======================================================
 
         const {
             data: historyNewestFirst,
@@ -1587,9 +1577,9 @@ app.post("/api/chat", async (req, res) => {
                 : [];
 
 
-        // ==================================================
-        // 7. 组装上下文
-        // ==================================================
+        // ======================================================
+        // 6. 组装近期聊天
+        // ======================================================
 
         const historyText =
             history
@@ -1607,14 +1597,40 @@ app.post("/api/chat", async (req, res) => {
                 .join("\n");
 
 
+        // ======================================================
+        // 7. 组装完整上下文
+        //
+        // 顺序：
+        // 系统规则
+        // ↓
+        // 固定人物与共同故事
+        // ↓
+        // 动态长期记忆
+        // ↓
+        // 最近聊天
+        // ======================================================
+
         const contextSections = [];
 
 
         if (systemPrompt) {
 
             contextSections.push(
-                `【系统提示词】
+                `【最高优先级：角色行为规则】
 ${systemPrompt}`
+            );
+
+        }
+
+
+        if (characterContext) {
+
+            contextSections.push(
+                `【固定人物设定、关系背景与共同经历】
+以下内容属于角色和用户之间已经确定的背景事实与共同经历。
+请把这些内容视为真实且稳定的既有背景，在回复时自然体现，但不要生硬复述。
+
+${characterContext}`
             );
 
         }
@@ -1623,7 +1639,7 @@ ${systemPrompt}`
         if (memorySummary) {
 
             contextSections.push(
-                `【长期记忆摘要】
+                `【聊天过程中形成的长期记忆】
 ${memorySummary}`
             );
 
@@ -1633,7 +1649,7 @@ ${memorySummary}`
         if (historyText) {
 
             contextSections.push(
-                `【最近对话】
+                `【当前会话的最近聊天】
 ${historyText}`
             );
 
@@ -1641,10 +1657,15 @@ ${historyText}`
 
 
         contextSections.push(
-            `【回复要求】
-请根据以上信息直接回复最近一条用户消息。
-保持自然、连贯的连续对话。
-不要复述“系统提示词”“长期记忆摘要”“最近对话”等内部标签。`
+            `【当前回复要求】
+请直接回复最近一条用户消息。
+
+回答时：
+1. 遵守角色行为规则。
+2. 与固定人物背景和共同经历保持一致。
+3. 在相关时自然运用长期记忆，不要无缘无故主动罗列记忆。
+4. 保持当前对话连贯自然。
+5. 不要向用户复述或暴露这些内部上下文标签。`
         );
 
 
@@ -1654,12 +1675,9 @@ ${historyText}`
             );
 
 
-        // ==================================================
-        // 8. 计算本次上下文 Token
-        //
-        // 目前只计算并记录，
-        // 暂时还不自动压缩。
-        // ==================================================
+        // ======================================================
+        // 8. Token 状态
+        // ======================================================
 
         const estimatedTokens =
             estimateTokens(
@@ -1683,9 +1701,12 @@ ${historyText}`
         );
 
 
-        // ==================================================
+        // ======================================================
         // 9. 调用 AI
-        // ==================================================
+        //
+        // 暂时继续使用已经验证成功的参数。
+        // 下一步做记忆压缩时再继续扩展。
+        // ======================================================
 
         const response =
             await client.responses.create({
@@ -1698,24 +1719,21 @@ ${historyText}`
 
 
         const reply =
-            typeof response.output_text ===
-                "string"
+            typeof response.output_text === "string"
                 ? response.output_text.trim()
                 : "";
 
 
         if (!reply) {
-
             throw new Error(
                 "AI 没有返回有效的文本回复"
             );
-
         }
 
 
-        // ==================================================
+        // ======================================================
         // 10. 保存 AI 回复
-        // ==================================================
+        // ======================================================
 
         const {
             data: assistantMessage,
@@ -1748,9 +1766,9 @@ ${historyText}`
         }
 
 
-        // ==================================================
+        // ======================================================
         // 11. 更新会话时间
-        // ==================================================
+        // ======================================================
 
         const {
             error: sessionUpdateError
@@ -1776,9 +1794,9 @@ ${historyText}`
         }
 
 
-        // ==================================================
-        // 12. 返回结果
-        // ==================================================
+        // ======================================================
+        // 12. 返回前端
+        // ======================================================
 
         res.status(200).json({
 
