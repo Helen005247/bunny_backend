@@ -13,11 +13,8 @@ const PORT = process.env.PORT || 3000;
 // 中间件
 // ========================================
 
-// 暂时允许所有前端访问
-// 项目稳定以后再限制成你的 Vercel 域名
 app.use(cors());
 
-// 让后端能够读取 JSON
 app.use(express.json());
 
 
@@ -35,8 +32,6 @@ const client = new OpenAI({
 // Supabase 客户端
 // ========================================
 
-// URL 和 Secret Key 都从 Render 环境变量读取
-// 不要把真实 Key 写进代码
 let supabase = null;
 
 if (
@@ -258,6 +253,107 @@ app.get("/api/sessions", async (req, res) => {
         res.status(500).json({
             ok: false,
             error: "获取会话列表失败",
+            detail: error.message,
+        });
+
+    }
+
+});
+
+
+// ========================================
+// 重命名会话
+// PATCH /api/sessions/:id
+// ========================================
+
+app.patch("/api/sessions/:id", async (req, res) => {
+
+    try {
+
+        if (!supabase) {
+            return res.status(500).json({
+                ok: false,
+                error: "Supabase 客户端没有初始化",
+            });
+        }
+
+
+        const sessionId = Number(req.params.id);
+
+        const { name } = req.body;
+
+
+        // 检查会话 ID
+        if (
+            !Number.isInteger(sessionId) ||
+            sessionId <= 0
+        ) {
+            return res.status(400).json({
+                ok: false,
+                error: "无效的会话 ID",
+            });
+        }
+
+
+        // 检查新名称
+        if (
+            typeof name !== "string" ||
+            !name.trim()
+        ) {
+            return res.status(400).json({
+                ok: false,
+                error: "会话名称不能为空",
+            });
+        }
+
+
+        // 更新会话名称
+        const { data, error } = await supabase
+            .from("sessions")
+            .update({
+                name: name.trim(),
+            })
+            .eq(
+                "id",
+                sessionId
+            )
+            .select(
+                "id, name, created_at, updated_at"
+            )
+            .maybeSingle();
+
+
+        if (error) {
+            throw error;
+        }
+
+
+        // 找不到该会话
+        if (!data) {
+            return res.status(404).json({
+                ok: false,
+                error: "会话不存在",
+            });
+        }
+
+
+        res.status(200).json({
+            ok: true,
+            session: data,
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "重命名会话失败：",
+            error
+        );
+
+
+        res.status(500).json({
+            ok: false,
+            error: "重命名会话失败",
             detail: error.message,
         });
 
