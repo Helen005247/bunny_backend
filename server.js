@@ -8,33 +8,13 @@ const { createClient } = require('@supabase/supabase-js')
 const app = express()
 const PORT = process.env.PORT || 3000
 
-
-// ======================================================
-// 中间件
-// ======================================================
-
 app.use(cors())
-
-app.use(
-    express.json({
-        limit: '1mb',
-    })
-)
-
-
-// ======================================================
-// AI 客户端
-// ======================================================
+app.use(express.json({ limit: '1mb' }))
 
 const client = new OpenAI({
     apiKey: process.env.AI_API_KEY,
     baseURL: process.env.AI_BASE_URL,
 })
-
-
-// ======================================================
-// Supabase 客户端
-// ======================================================
 
 let supabase = null
 
@@ -56,7 +36,7 @@ if (
 
 
 // ======================================================
-// Token 粗略估算
+// 基础工具
 // ======================================================
 
 function estimateTokens(text) {
@@ -68,16 +48,10 @@ function estimateTokens(text) {
         return 0
     }
 
-
     const chineseCharacters =
         text.match(
             /[\u4e00-\u9fff]/g
         ) || []
-
-
-    const chineseCount =
-        chineseCharacters.length
-
 
     const otherText =
         text.replace(
@@ -85,23 +59,14 @@ function estimateTokens(text) {
             ''
         )
 
-
-    const otherTokens =
+    return (
+        chineseCharacters.length +
         Math.ceil(
             otherText.length / 4
         )
-
-
-    return (
-        chineseCount +
-        otherTokens
     )
 }
 
-
-// ======================================================
-// Session ID 检查
-// ======================================================
 
 function parsePositiveSessionId(
     value
@@ -110,7 +75,6 @@ function parsePositiveSessionId(
     const id =
         Number(value)
 
-
     if (
         !Number.isInteger(id) ||
         id <= 0
@@ -118,8 +82,42 @@ function parsePositiveSessionId(
         return null
     }
 
-
     return id
+}
+
+
+function requireSupabase(res) {
+
+    if (supabase) {
+        return true
+    }
+
+    res.status(500).json({
+        ok: false,
+        error:
+            'Supabase 客户端没有初始化',
+    })
+
+    return false
+}
+
+
+function requireAIConfig(res) {
+
+    if (
+        process.env.AI_API_KEY &&
+        process.env.AI_BASE_URL
+    ) {
+        return true
+    }
+
+    res.status(500).json({
+        ok: false,
+        error:
+            '服务器没有正确配置 AI_API_KEY 或 AI_BASE_URL',
+    })
+
+    return false
 }
 
 
@@ -153,18 +151,15 @@ async function getGlobalSettings() {
         )
         .maybeSingle()
 
-
     if (error) {
         throw error
     }
-
 
     if (!data) {
         throw new Error(
             '没有找到 global settings'
         )
     }
-
 
     return data
 }
@@ -196,11 +191,9 @@ async function getLatestMemory() {
         )
         .limit(1)
 
-
     if (error) {
         throw error
     }
-
 
     if (
         !data ||
@@ -208,7 +201,6 @@ async function getLatestMemory() {
     ) {
         return null
     }
-
 
     return data[0]
 }
@@ -236,11 +228,9 @@ async function getSessionById(
         )
         .maybeSingle()
 
-
     if (error) {
         throw error
     }
-
 
     return data
 }
@@ -290,11 +280,9 @@ async function getVisibleMessages(
             }
         )
 
-
     if (error) {
         throw error
     }
-
 
     return data || []
 }
@@ -319,7 +307,6 @@ function messagesToText(
                         ? '用户'
                         : '助手'
 
-
                 return (
                     `${speaker}：${item.content}`
                 )
@@ -340,7 +327,6 @@ function splitMessagesForCompression(
 
     const userIndexes = []
 
-
     messages.forEach(
         (
             message,
@@ -359,29 +345,27 @@ function splitMessagesForCompression(
         }
     )
 
-
     if (
         userIndexes.length <=
         keepRounds
     ) {
 
         return {
+
             compressibleMessages:
                 [],
 
             keptMessages:
                 messages,
+
         }
-
     }
-
 
     const keepStartIndex =
         userIndexes[
         userIndexes.length -
         keepRounds
         ]
-
 
     return {
 
@@ -419,7 +403,6 @@ function buildModelContext({
                 .trim()
             : ''
 
-
     const characterContext =
         typeof settings
             ?.character_context ===
@@ -429,15 +412,12 @@ function buildModelContext({
                 .trim()
             : ''
 
-
     const historyText =
         messagesToText(
             messages
         )
 
-
     const sections = []
-
 
     if (systemPrompt) {
 
@@ -447,7 +427,6 @@ ${systemPrompt}`
         )
 
     }
-
 
     if (characterContext) {
 
@@ -461,7 +440,6 @@ ${characterContext}`
 
     }
 
-
     if (memorySummary) {
 
         sections.push(
@@ -471,7 +449,6 @@ ${memorySummary}`
 
     }
 
-
     if (historyText) {
 
         sections.push(
@@ -480,7 +457,6 @@ ${historyText}`
         )
 
     }
-
 
     sections.push(
         `【当前回复要求】
@@ -493,7 +469,6 @@ ${historyText}`
 4. 保持当前对话自然连贯。
 5. 不要向用户暴露这些内部上下文标签。`
     )
-
 
     return sections.join(
         '\n\n'
@@ -515,13 +490,11 @@ function getMaxHistoryMessages(
                 ?.max_context_rounds
         )
 
-
     const rounds =
         Number.isFinite(raw) &&
             raw > 0
             ? Math.floor(raw)
             : 20
-
 
     return Math.max(
         2,
@@ -543,7 +516,6 @@ async function getRecentVisibleMessages(
         getMaxHistoryMessages(
             settings
         )
-
 
     const {
         data,
@@ -584,11 +556,9 @@ async function getRecentVisibleMessages(
             maxHistoryMessages
         )
 
-
     if (error) {
         throw error
     }
-
 
     return Array.isArray(
         data
@@ -609,13 +579,8 @@ async function compressMemoryIfNeeded(
     settings
 ) {
 
-    // --------------------------------------------------
-    // 1. 读取已有长期记忆
-    // --------------------------------------------------
-
     const previousMemory =
         await getLatestMemory()
-
 
     const previousMemorySummary =
         typeof previousMemory
@@ -626,23 +591,14 @@ async function compressMemoryIfNeeded(
                 .trim()
             : ''
 
-
-    // --------------------------------------------------
-    // 2. 当前可见消息
-    // --------------------------------------------------
-
     const visibleMessages =
         await getVisibleMessages(
             sessionId
         )
 
-
-    // --------------------------------------------------
-    // 3. 计算压缩前 Token
-    // --------------------------------------------------
-
     const fullContextBefore =
         buildModelContext({
+
             settings,
 
             memorySummary:
@@ -650,14 +606,13 @@ async function compressMemoryIfNeeded(
 
             messages:
                 visibleMessages,
-        })
 
+        })
 
     const beforeTokens =
         estimateTokens(
             fullContextBefore
         )
-
 
     const compressThreshold =
         Number(
@@ -665,21 +620,14 @@ async function compressMemoryIfNeeded(
                 ?.compress_threshold
         ) || 10000
 
-
     const keepRounds =
         Math.max(
             1,
-
             Number(
                 settings
                     ?.compress_keep_rounds
             ) || 6
         )
-
-
-    // --------------------------------------------------
-    // 4. 没达到压缩阈值
-    // --------------------------------------------------
 
     if (
         beforeTokens <
@@ -709,13 +657,7 @@ async function compressMemoryIfNeeded(
                 null,
 
         }
-
     }
-
-
-    // --------------------------------------------------
-    // 5. 获取需要压缩的旧消息
-    // --------------------------------------------------
 
     const {
         compressibleMessages,
@@ -725,7 +667,6 @@ async function compressMemoryIfNeeded(
             visibleMessages,
             keepRounds
         )
-
 
     if (
         compressibleMessages
@@ -755,23 +696,12 @@ async function compressMemoryIfNeeded(
                 null,
 
         }
-
     }
-
-
-    // --------------------------------------------------
-    // 6. 转成文本
-    // --------------------------------------------------
 
     const oldConversationText =
         messagesToText(
             compressibleMessages
         )
-
-
-    // --------------------------------------------------
-    // 7. 调用模型压缩记忆
-    // --------------------------------------------------
 
     const compressionInput =
         `你是一个长期记忆整理器。
@@ -801,7 +731,6 @@ ${oldConversationText}
 10. 请保持信息密度高、结构清楚，尽量控制在约 2000 个中文字符以内。
 11. 只输出整理后的长期记忆正文，不要输出解释、标题说明或 JSON。`
 
-
     const compressionResponse =
         await client
             .responses
@@ -815,7 +744,6 @@ ${oldConversationText}
 
             })
 
-
     const newSummary =
         typeof compressionResponse
             .output_text ===
@@ -825,7 +753,6 @@ ${oldConversationText}
                 .trim()
             : ''
 
-
     if (!newSummary) {
 
         throw new Error(
@@ -833,11 +760,6 @@ ${oldConversationText}
         )
 
     }
-
-
-    // --------------------------------------------------
-    // 8. 保存 memory
-    // --------------------------------------------------
 
     const compressedMessageIds =
         compressibleMessages
@@ -847,7 +769,6 @@ ${oldConversationText}
                 ) =>
                     message.id
             )
-
 
     const {
         data:
@@ -907,17 +828,11 @@ ${oldConversationText}
             )
             .single()
 
-
     if (
         memoryInsertError
     ) {
         throw memoryInsertError
     }
-
-
-    // --------------------------------------------------
-    // 9. 隐藏已经压缩的旧消息
-    // --------------------------------------------------
 
     const {
         error:
@@ -936,17 +851,11 @@ ${oldConversationText}
                 compressedMessageIds
             )
 
-
     if (
         hideMessagesError
     ) {
         throw hideMessagesError
     }
-
-
-    // --------------------------------------------------
-    // 10. 计算压缩后的 Token
-    // --------------------------------------------------
 
     const fullContextAfter =
         buildModelContext({
@@ -961,17 +870,14 @@ ${oldConversationText}
 
         })
 
-
     const afterTokens =
         estimateTokens(
             fullContextAfter
         )
 
-
     console.log(
         `Session ${sessionId} 已执行记忆压缩：${compressedMessageIds.length} 条消息，Token ${beforeTokens} → ${afterTokens}`
     )
-
 
     return {
 
@@ -996,6 +902,231 @@ ${oldConversationText}
 
         memory_id:
             newMemory.id,
+
+    }
+}
+
+
+// ======================================================
+// 主动消息上下文
+// ======================================================
+
+async function buildProactiveInput(
+    sessionId,
+    settings,
+    mode = 'manual'
+) {
+
+    const latestMemory =
+        await getLatestMemory()
+
+    const memorySummary =
+        typeof latestMemory
+            ?.summary ===
+            'string'
+            ? latestMemory
+                .summary
+                .trim()
+            : ''
+
+    const recentMessages =
+        await getRecentVisibleMessages(
+            sessionId,
+            settings
+        )
+
+    const systemPrompt =
+        typeof settings
+            ?.system_prompt ===
+            'string'
+            ? settings
+                .system_prompt
+                .trim()
+            : ''
+
+    const characterContext =
+        typeof settings
+            ?.character_context ===
+            'string'
+            ? settings
+                .character_context
+                .trim()
+            : ''
+
+    const historyText =
+        messagesToText(
+            recentMessages
+        )
+
+    const sections = []
+
+    if (systemPrompt) {
+
+        sections.push(
+            `【最高优先级：角色行为规则】
+${systemPrompt}`
+        )
+
+    }
+
+    if (characterContext) {
+
+        sections.push(
+            `【固定人物设定、关系背景与共同经历】
+以下内容属于角色和用户之间已经确定的稳定背景。
+请把它们视为既有事实，但不要为了表现记忆而机械复述。
+
+${characterContext}`
+        )
+
+    }
+
+    if (memorySummary) {
+
+        sections.push(
+            `【长期记忆】
+${memorySummary}`
+        )
+
+    }
+
+    if (historyText) {
+
+        sections.push(
+            `【当前会话最近聊天】
+${historyText}`
+        )
+
+    }
+
+    const opening =
+        mode === 'automatic'
+            ? '用户已经有一段时间没有继续聊天。现在由你自然地主动联系用户。'
+            : '现在不是用户向你提出了新问题，而是你准备主动联系用户。'
+
+    sections.push(
+        `【本次任务：主动发消息】
+
+${opening}
+
+请严格遵守：
+
+1. 像即时通讯软件里的真人一样自然地先开口。
+2. 不要假装用户刚刚说了什么，也不要回答一个不存在的问题。
+3. 根据角色身份、关系背景、长期记忆以及最近聊天，自然决定此刻想说什么。
+4. 可以问候、关心用户、分享一个突然想到的念头，也可以自然延续之前尚未结束的话题。
+5. 只有当长期记忆与当前话题自然相关时才能提起，不要强行展示“你记得”。
+6. 普通情况下生成 1～3 条简短消息，不要一次写一大段。
+7. 每条独立消息之间必须使用一个空行分隔。
+8. 不要使用编号、项目符号、标题、JSON 或“消息1/消息2”之类的标记。
+9. 不要解释为什么你主动发消息。
+10. 不要说“作为 AI”“系统让我联系你”等破坏角色沉浸感的话。
+11. 不要显得催促、责怪，也不要要求用户必须回复。
+12. 输出内容必须可以直接作为角色发给用户的聊天消息。`
+    )
+
+    return sections.join(
+        '\n\n'
+    )
+}
+
+
+// ======================================================
+// 生成并保存主动消息
+// ======================================================
+
+async function generateAndSaveProactiveMessage(
+    sessionId,
+    mode = 'manual'
+) {
+
+    const settings =
+        await getGlobalSettings()
+
+    const proactiveInput =
+        await buildProactiveInput(
+            sessionId,
+            settings,
+            mode
+        )
+
+    const response =
+        await client
+            .responses
+            .create({
+
+                model:
+                    'gpt-5.6-sol',
+
+                input:
+                    proactiveInput,
+
+            })
+
+    const reply =
+        typeof response
+            .output_text ===
+            'string'
+            ? response
+                .output_text
+                .trim()
+            : ''
+
+    if (!reply) {
+
+        throw new Error(
+            '主动消息模型没有返回有效文本'
+        )
+
+    }
+
+    const {
+        data:
+        assistantMessage,
+
+        error:
+        assistantMessageError,
+    } =
+        await supabase
+            .from(
+                'messages'
+            )
+            .insert([
+                {
+
+                    session_id:
+                        sessionId,
+
+                    role:
+                        'assistant',
+
+                    content:
+                        reply,
+
+                    visible:
+                        true,
+
+                    reasoning_content:
+                        'proactive',
+
+                },
+            ])
+            .select(
+                'id, session_id, role, content, created_at, visible, reasoning_content'
+            )
+            .single()
+
+    if (
+        assistantMessageError
+    ) {
+        throw assistantMessageError
+    }
+
+    return {
+
+        reply,
+
+        assistantMessage,
 
     }
 }
@@ -1058,23 +1189,13 @@ app.get(
 
             }
 
-
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端初始化失败',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             const {
                 data,
@@ -1087,11 +1208,9 @@ app.get(
                     .select('*')
                     .limit(1)
 
-
             if (error) {
                 throw error
             }
-
 
             res
                 .status(200)
@@ -1115,7 +1234,6 @@ app.get(
                 '数据库连接测试失败：',
                 error
             )
-
 
             res
                 .status(500)
@@ -1152,28 +1270,18 @@ app.post(
 
         try {
 
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端没有初始化',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             const {
                 name,
             } =
                 req.body
-
 
             const sessionName =
                 typeof name ===
@@ -1181,7 +1289,6 @@ app.post(
                     name.trim()
                     ? name.trim()
                     : '新对话'
-
 
             const {
                 data,
@@ -1193,8 +1300,10 @@ app.post(
                     )
                     .insert([
                         {
+
                             name:
                                 sessionName,
+
                         },
                     ])
                     .select(
@@ -1202,11 +1311,9 @@ app.post(
                     )
                     .single()
 
-
             if (error) {
                 throw error
             }
-
 
             res
                 .status(201)
@@ -1228,7 +1335,6 @@ app.post(
                 '创建会话失败：',
                 error
             )
-
 
             res
                 .status(500)
@@ -1265,22 +1371,13 @@ app.get(
 
         try {
 
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端没有初始化',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             const {
                 data,
@@ -1301,11 +1398,9 @@ app.get(
                         }
                     )
 
-
             if (error) {
                 throw error
             }
-
 
             res
                 .status(200)
@@ -1327,7 +1422,6 @@ app.get(
                 '获取会话列表失败：',
                 error
             )
-
 
             res
                 .status(500)
@@ -1364,34 +1458,23 @@ app.patch(
 
         try {
 
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端没有初始化',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             const sessionId =
                 parsePositiveSessionId(
                     req.params.id
                 )
 
-
             const {
                 name,
             } =
                 req.body
-
 
             if (!sessionId) {
 
@@ -1408,7 +1491,6 @@ app.patch(
                     })
 
             }
-
 
             if (
                 typeof name !==
@@ -1430,7 +1512,6 @@ app.patch(
 
             }
 
-
             const {
                 data,
                 error,
@@ -1440,8 +1521,10 @@ app.patch(
                         'sessions'
                     )
                     .update({
+
                         name:
                             name.trim(),
+
                     })
                     .eq(
                         'id',
@@ -1452,11 +1535,9 @@ app.patch(
                     )
                     .maybeSingle()
 
-
             if (error) {
                 throw error
             }
-
 
             if (!data) {
 
@@ -1473,7 +1554,6 @@ app.patch(
                     })
 
             }
-
 
             res
                 .status(200)
@@ -1495,7 +1575,6 @@ app.patch(
                 '重命名会话失败：',
                 error
             )
-
 
             res
                 .status(500)
@@ -1532,28 +1611,18 @@ app.delete(
 
         try {
 
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端没有初始化',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             const sessionId =
                 parsePositiveSessionId(
                     req.params.id
                 )
-
 
             if (!sessionId) {
 
@@ -1570,7 +1639,6 @@ app.delete(
                     })
 
             }
-
 
             const {
                 data:
@@ -1592,11 +1660,11 @@ app.delete(
                     )
                     .maybeSingle()
 
-
-            if (findError) {
+            if (
+                findError
+            ) {
                 throw findError
             }
-
 
             if (
                 !existingSession
@@ -1616,7 +1684,6 @@ app.delete(
 
             }
 
-
             const {
                 error:
                 deleteError,
@@ -1631,11 +1698,11 @@ app.delete(
                         sessionId
                     )
 
-
-            if (deleteError) {
+            if (
+                deleteError
+            ) {
                 throw deleteError
             }
-
 
             res
                 .status(200)
@@ -1660,7 +1727,6 @@ app.delete(
                 '删除会话失败：',
                 error
             )
-
 
             res
                 .status(500)
@@ -1696,33 +1762,24 @@ app.get(
     ) => {
 
         try {
+
             res.set(
                 'Cache-Control',
                 'no-store, no-cache, must-revalidate, proxy-revalidate'
             )
 
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端没有初始化',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             const sessionId =
                 parsePositiveSessionId(
                     req.params.id
                 )
-
 
             if (!sessionId) {
 
@@ -1740,12 +1797,10 @@ app.get(
 
             }
 
-
             const session =
                 await getSessionById(
                     sessionId
                 )
-
 
             if (!session) {
 
@@ -1762,7 +1817,6 @@ app.get(
                     })
 
             }
-
 
             const {
                 data:
@@ -1801,13 +1855,11 @@ app.get(
                         }
                     )
 
-
             if (
                 messagesError
             ) {
                 throw messagesError
             }
-
 
             res
                 .status(200)
@@ -1831,7 +1883,6 @@ app.get(
                 '获取历史消息失败：',
                 error
             )
-
 
             res
                 .status(500)
@@ -1868,26 +1919,16 @@ app.get(
 
         try {
 
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端没有初始化',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             const settings =
                 await getGlobalSettings()
-
 
             res
                 .status(200)
@@ -1908,7 +1949,6 @@ app.get(
                 '读取设置失败：',
                 error
             )
-
 
             res
                 .status(500)
@@ -1945,22 +1985,13 @@ app.patch(
 
         try {
 
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端没有初始化',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             const {
 
@@ -1983,13 +2014,7 @@ app.patch(
             } =
                 req.body
 
-
             const updates = {}
-
-
-            // ==================================================
-            // system_prompt
-            // ==================================================
 
             if (
                 system_prompt !==
@@ -2015,16 +2040,10 @@ app.patch(
 
                 }
 
-
                 updates.system_prompt =
                     system_prompt
 
             }
-
-
-            // ==================================================
-            // character_context
-            // ==================================================
 
             if (
                 character_context !==
@@ -2050,16 +2069,10 @@ app.patch(
 
                 }
 
-
                 updates.character_context =
                     character_context
 
             }
-
-
-            // ==================================================
-            // temperature
-            // ==================================================
 
             if (
                 temperature !==
@@ -2070,7 +2083,6 @@ app.patch(
                     Number(
                         temperature
                     )
-
 
                 if (
                     !Number.isFinite(
@@ -2094,16 +2106,10 @@ app.patch(
 
                 }
 
-
                 updates.temperature =
                     value
 
             }
-
-
-            // ==================================================
-            // 整数参数
-            // ==================================================
 
             const integerFields = {
 
@@ -2118,7 +2124,6 @@ app.patch(
                 max_reply_tokens,
 
             }
-
 
             for (
                 const [
@@ -2137,12 +2142,10 @@ app.patch(
                     continue
                 }
 
-
                 const numberValue =
                     Number(
                         value
                     )
-
 
                 if (
                     !Number.isInteger(
@@ -2165,12 +2168,10 @@ app.patch(
 
                 }
 
-
                 updates[key] =
                     numberValue
 
             }
-
 
             if (
                 Object.keys(
@@ -2191,7 +2192,6 @@ app.patch(
                     })
 
             }
-
 
             const {
                 data,
@@ -2223,11 +2223,9 @@ app.patch(
                     `)
                     .maybeSingle()
 
-
             if (error) {
                 throw error
             }
-
 
             if (!data) {
 
@@ -2244,7 +2242,6 @@ app.patch(
                     })
 
             }
-
 
             res
                 .status(200)
@@ -2266,7 +2263,6 @@ app.patch(
                 '更新设置失败：',
                 error
             )
-
 
             res
                 .status(500)
@@ -2303,28 +2299,18 @@ app.get(
 
         try {
 
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端没有初始化',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             const sessionId =
                 parsePositiveSessionId(
                     req.params.id
                 )
-
 
             if (!sessionId) {
 
@@ -2342,12 +2328,10 @@ app.get(
 
             }
 
-
             const session =
                 await getSessionById(
                     sessionId
                 )
-
 
             if (!session) {
 
@@ -2365,14 +2349,11 @@ app.get(
 
             }
 
-
             const settings =
                 await getGlobalSettings()
 
-
             const memory =
                 await getLatestMemory()
-
 
             const memorySummary =
                 typeof memory
@@ -2383,12 +2364,10 @@ app.get(
                         .trim()
                     : ''
 
-
             const messages =
                 await getVisibleMessages(
                     sessionId
                 )
-
 
             const fullContext =
                 buildModelContext({
@@ -2401,12 +2380,10 @@ app.get(
 
                 })
 
-
             const estimatedTokens =
                 estimateTokens(
                     fullContext
                 )
-
 
             const compressThreshold =
                 Number(
@@ -2414,19 +2391,14 @@ app.get(
                         .compress_threshold
                 ) || 10000
 
-
             const keepRounds =
                 Math.max(
-
                     1,
-
                     Number(
                         settings
                             .compress_keep_rounds
                     ) || 6
-
                 )
-
 
             const {
                 compressibleMessages,
@@ -2436,11 +2408,9 @@ app.get(
                     keepRounds
                 )
 
-
             const thresholdReached =
                 estimatedTokens >=
                 compressThreshold
-
 
             res
                 .status(200)
@@ -2500,7 +2470,6 @@ app.get(
                 error
             )
 
-
             res
                 .status(500)
                 .json({
@@ -2536,55 +2505,30 @@ app.post(
 
         try {
 
-            // --------------------------------------------------
-            // 基础检查
-            // --------------------------------------------------
-
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端没有初始化',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             if (
-                !process.env
-                    .AI_API_KEY ||
-                !process.env
-                    .AI_BASE_URL
+                !requireAIConfig(
+                    res
+                )
             ) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            '服务器没有正确配置 AI_API_KEY 或 AI_BASE_URL',
-
-                    })
-
+                return
             }
 
-
             const {
+
                 message,
+
                 session_id,
+
             } =
                 req.body
-
 
             if (
                 typeof message !==
@@ -2606,18 +2550,11 @@ app.post(
 
             }
 
-
             const cleanMessage =
                 message.trim()
 
-
             let sessionId =
                 null
-
-
-            // ==================================================
-            // 1. 确定当前会话
-            // ==================================================
 
             const hasSessionId =
                 session_id !==
@@ -2627,7 +2564,6 @@ app.post(
                 session_id !==
                 ''
 
-
             if (
                 hasSessionId
             ) {
@@ -2636,7 +2572,6 @@ app.post(
                     parsePositiveSessionId(
                         session_id
                     )
-
 
                 if (
                     !parsedSessionId
@@ -2656,12 +2591,10 @@ app.post(
 
                 }
 
-
                 const session =
                     await getSessionById(
                         parsedSessionId
                     )
-
 
                 if (!session) {
 
@@ -2679,16 +2612,10 @@ app.post(
 
                 }
 
-
                 sessionId =
                     session.id
 
             } else {
-
-                // ------------------------------------------
-                // 没传 session_id 时兼容旧逻辑：
-                // 使用最近会话
-                // ------------------------------------------
 
                 const {
                     data:
@@ -2713,13 +2640,11 @@ app.post(
                         )
                         .limit(1)
 
-
                 if (
                     recentSessionError
                 ) {
                     throw recentSessionError
                 }
-
 
                 if (
                     recentSessions &&
@@ -2746,8 +2671,10 @@ app.post(
                             )
                             .insert([
                                 {
+
                                     name:
                                         '新对话',
+
                                 },
                             ])
                             .select(
@@ -2755,13 +2682,11 @@ app.post(
                             )
                             .single()
 
-
                     if (
                         newSessionError
                     ) {
                         throw newSessionError
                     }
-
 
                     sessionId =
                         newSession.id
@@ -2772,7 +2697,7 @@ app.post(
 
 
             // ==================================================
-            // 2. 保存用户消息
+            // 保存真正的用户消息
             // ==================================================
 
             const {
@@ -2808,7 +2733,6 @@ app.post(
                     )
                     .single()
 
-
             if (
                 userMessageError
             ) {
@@ -2816,17 +2740,9 @@ app.post(
             }
 
 
-            // ==================================================
-            // 3. 读取 Settings
-            // ==================================================
-
             const settings =
                 await getGlobalSettings()
 
-
-            // ==================================================
-            // 4. 自动压缩
-            // ==================================================
 
             const compression =
                 await compressMemoryIfNeeded(
@@ -2834,10 +2750,6 @@ app.post(
                     settings
                 )
 
-
-            // ==================================================
-            // 5. 最新长期记忆
-            // ==================================================
 
             const latestMemory =
                 await getLatestMemory()
@@ -2853,20 +2765,12 @@ app.post(
                     : ''
 
 
-            // ==================================================
-            // 6. 最近可见消息
-            // ==================================================
-
             const history =
                 await getRecentVisibleMessages(
                     sessionId,
                     settings
                 )
 
-
-            // ==================================================
-            // 7. 组装模型上下文
-            // ==================================================
 
             const modelInput =
                 buildModelContext({
@@ -2886,10 +2790,6 @@ app.post(
                     modelInput
                 )
 
-
-            // ==================================================
-            // 8. 请求模型
-            // ==================================================
 
             const response =
                 await client
@@ -2924,10 +2824,6 @@ app.post(
             }
 
 
-            // ==================================================
-            // 9. 保存 Assistant 回复
-            // ==================================================
-
             const {
                 data:
                 assistantMessage,
@@ -2968,10 +2864,6 @@ app.post(
                 throw assistantMessageError
             }
 
-
-            // ==================================================
-            // 10. 普通聊天更新 session 时间
-            // ==================================================
 
             const {
                 error:
@@ -3006,10 +2898,6 @@ app.post(
             }
 
 
-            // ==================================================
-            // 11. 返回
-            // ==================================================
-
             res
                 .status(200)
                 .json({
@@ -3035,6 +2923,7 @@ app.post(
 
                 })
 
+
         } catch (
         error
         ) {
@@ -3043,7 +2932,6 @@ app.post(
                 'AI 对话处理失败：',
                 error
             )
-
 
             res
                 .status(500)
@@ -3067,21 +2955,13 @@ app.post(
 
 
 // ======================================================
-// 星星主动发消息
+// 手动触发星星主动发消息
 // POST /api/proactive-message
 //
-// 请求：
+// Body：
 // {
 //     "session_id": 1
 // }
-//
-// 这个接口：
-// 1. 不创建 user 消息
-// 2. 不创建新 session
-// 3. 不删除 session
-// 4. 不重命名 session
-// 5. 不修改 sessions.updated_at
-// 6. 不触发记忆压缩
 // ======================================================
 
 app.post(
@@ -3093,59 +2973,27 @@ app.post(
 
         try {
 
-            // --------------------------------------------------
-            // 1. 基础检查
-            // --------------------------------------------------
-
-            if (!supabase) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            'Supabase 客户端没有初始化',
-
-                    })
-
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
             }
-
 
             if (
-                !process.env
-                    .AI_API_KEY ||
-                !process.env
-                    .AI_BASE_URL
+                !requireAIConfig(
+                    res
+                )
             ) {
-
-                return res
-                    .status(500)
-                    .json({
-
-                        ok:
-                            false,
-
-                        error:
-                            '服务器没有正确配置 AI_API_KEY 或 AI_BASE_URL',
-
-                    })
-
+                return
             }
-
-
-            // --------------------------------------------------
-            // 2. 必须明确传入现有 session_id
-            // --------------------------------------------------
 
             const sessionId =
                 parsePositiveSessionId(
                     req.body
                         ?.session_id
                 )
-
 
             if (!sessionId) {
 
@@ -3163,17 +3011,10 @@ app.post(
 
             }
 
-
-            // --------------------------------------------------
-            // 3. 只允许已有会话
-            // 不会创建新会话
-            // --------------------------------------------------
-
             const session =
                 await getSessionById(
                     sessionId
                 )
-
 
             if (!session) {
 
@@ -3191,258 +3032,17 @@ app.post(
 
             }
 
-
-            // --------------------------------------------------
-            // 4. Settings
-            // --------------------------------------------------
-
-            const settings =
-                await getGlobalSettings()
-
-
-            // --------------------------------------------------
-            // 5. 长期记忆
-            // --------------------------------------------------
-
-            const latestMemory =
-                await getLatestMemory()
-
-
-            const memorySummary =
-                typeof latestMemory
-                    ?.summary ===
-                    'string'
-                    ? latestMemory
-                        .summary
-                        .trim()
-                    : ''
-
-
-            // --------------------------------------------------
-            // 6. 当前 session 最近聊天
-            // --------------------------------------------------
-
-            const recentMessages =
-                await getRecentVisibleMessages(
-                    sessionId,
-                    settings
-                )
-
-
-            // --------------------------------------------------
-            // 7. 固定人物设定
-            // --------------------------------------------------
-
-            const systemPrompt =
-                typeof settings
-                    ?.system_prompt ===
-                    'string'
-                    ? settings
-                        .system_prompt
-                        .trim()
-                    : ''
-
-
-            const characterContext =
-                typeof settings
-                    ?.character_context ===
-                    'string'
-                    ? settings
-                        .character_context
-                        .trim()
-                    : ''
-
-
-            const historyText =
-                messagesToText(
-                    recentMessages
-                )
-
-
-            // --------------------------------------------------
-            // 8. 构建主动消息上下文
-            // --------------------------------------------------
-
-            const sections = []
-
-
-            if (
-                systemPrompt
-            ) {
-
-                sections.push(
-                    `【最高优先级：角色行为规则】
-${systemPrompt}`
-                )
-
-            }
-
-
-            if (
-                characterContext
-            ) {
-
-                sections.push(
-                    `【固定人物设定、关系背景与共同经历】
-以下内容属于角色和用户之间已经确定的稳定背景。
-请把它们视为既有事实，但不要为了表现记忆而机械复述。
-
-${characterContext}`
-                )
-
-            }
-
-
-            if (
-                memorySummary
-            ) {
-
-                sections.push(
-                    `【长期记忆】
-${memorySummary}`
-                )
-
-            }
-
-
-            if (
-                historyText
-            ) {
-
-                sections.push(
-                    `【当前会话最近聊天】
-${historyText}`
-                )
-
-            }
-
-
-            sections.push(
-                `【本次任务：主动发消息】
-
-现在不是用户向你提出了新问题。
-
-而是你准备主动联系用户，像即时通讯软件里的真人一样，自然地先开口。
-
-请严格遵守：
-
-1. 不要假装用户刚刚说了什么，也不要回答一个不存在的问题。
-2. 根据角色身份、关系背景、长期记忆以及最近聊天，自然决定此刻想说什么。
-3. 可以问候、关心用户、分享一个突然想到的念头，也可以自然延续之前尚未结束的话题。
-4. 只有当长期记忆与此刻的话题自然相关时才能提起，不要强行展示“你记得”。
-5. 普通情况下生成 1～3 条简短消息，不要一次写一大段。
-6. 每条独立消息之间必须使用一个空行分隔。
-7. 不要使用编号、项目符号、标题、JSON 或“消息1/消息2”之类的标记。
-8. 不要解释“为什么你会主动发消息”。
-9. 不要说“作为 AI”“系统让我联系你”等破坏角色沉浸感的话。
-10. 如果最近聊天已经自然结束，可以重新开启一个轻松而符合角色关系的话题。
-11. 输出内容必须可以直接作为角色发给用户的聊天消息。`
-            )
-
-
-            const proactiveInput =
-                sections.join(
-                    '\n\n'
-                )
-
-
-            // --------------------------------------------------
-            // 9. 调用模型
-            // --------------------------------------------------
-
-            const response =
-                await client
-                    .responses
-                    .create({
-
-                        model:
-                            'gpt-5.6-sol',
-
-                        input:
-                            proactiveInput,
-
-                    })
-
-
-            const reply =
-                typeof response
-                    .output_text ===
-                    'string'
-                    ? response
-                        .output_text
-                        .trim()
-                    : ''
-
-
-            if (!reply) {
-
-                throw new Error(
-                    '主动消息模型没有返回有效文本'
-                )
-
-            }
-
-
-            // --------------------------------------------------
-            // 10. 只保存 assistant 消息
-            //
-            // 注意：
-            // 不会产生 user 消息
-            // --------------------------------------------------
-
             const {
-                data:
+                reply,
                 assistantMessage,
-
-                error:
-                assistantMessageError,
             } =
-                await supabase
-                    .from(
-                        'messages'
-                    )
-                    .insert([
-                        {
+                await generateAndSaveProactiveMessage(
+                    sessionId,
+                    'manual'
+                )
 
-                            session_id:
-                                sessionId,
-
-                            role:
-                                'assistant',
-
-                            content:
-                                reply,
-
-                            visible:
-                                true,
-
-                        },
-                    ])
-                    .select(
-                        'id, session_id, role, content, created_at, visible'
-                    )
-                    .single()
-
-
-            if (
-                assistantMessageError
-            ) {
-                throw assistantMessageError
-            }
-
-
-            // --------------------------------------------------
-            // 特别注意：
-            //
-            // 这里故意没有：
-            //
-            // supabase
-            //   .from("sessions")
-            //   .update({ updated_at: ... })
-            //
-            // 所以主动消息不会改变会话卡排序。
-            // --------------------------------------------------
-
+            // 主动消息故意不修改 sessions.updated_at，
+            // 避免改变会话卡顺序。
 
             res
                 .status(200)
@@ -3470,7 +3070,6 @@ ${historyText}`
                 error
             )
 
-
             res
                 .status(500)
                 .json({
@@ -3480,6 +3079,436 @@ ${historyText}`
 
                     error:
                         '生成主动消息失败',
+
+                    detail:
+                        error.message,
+
+                })
+
+        }
+
+    }
+)
+
+
+// ======================================================
+// 自动检查是否应该主动联系用户
+// POST /api/proactive-check
+//
+// Render 环境变量：
+//
+// PROACTIVE_CRON_SECRET=你的随机安全密钥
+//
+// 测试：
+// PROACTIVE_IDLE_MINUTES=1
+//
+// 正式：
+// PROACTIVE_IDLE_MINUTES=360
+//
+// 360 分钟 = 6 小时
+// ======================================================
+
+app.post(
+    '/api/proactive-check',
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+            if (
+                !requireAIConfig(
+                    res
+                )
+            ) {
+                return
+            }
+
+
+            // ==================================================
+            // 安全密钥
+            // ==================================================
+
+            const expectedSecret =
+                process.env
+                    .PROACTIVE_CRON_SECRET
+
+            if (
+                expectedSecret
+            ) {
+
+                const receivedSecret =
+                    req.headers[
+                    'x-proactive-secret'
+                    ]
+
+                if (
+                    receivedSecret !==
+                    expectedSecret
+                ) {
+
+                    return res
+                        .status(401)
+                        .json({
+
+                            ok:
+                                false,
+
+                            error:
+                                'Unauthorized',
+
+                        })
+
+                }
+
+            }
+
+
+            // ==================================================
+            // 找最近使用的会话
+            // ==================================================
+
+            const {
+                data:
+                recentSessions,
+
+                error:
+                sessionsError,
+            } =
+                await supabase
+                    .from(
+                        'sessions'
+                    )
+                    .select(
+                        'id, name, created_at, updated_at'
+                    )
+                    .order(
+                        'updated_at',
+                        {
+                            ascending:
+                                false,
+                        }
+                    )
+                    .limit(1)
+
+
+            if (
+                sessionsError
+            ) {
+                throw sessionsError
+            }
+
+
+            if (
+                !recentSessions ||
+                recentSessions
+                    .length === 0
+            ) {
+
+                return res
+                    .status(200)
+                    .json({
+
+                        ok:
+                            true,
+
+                        sent:
+                            false,
+
+                        reason:
+                            'no_session',
+
+                    })
+
+            }
+
+
+            const sessionId =
+                recentSessions[0]
+                    .id
+
+
+            // ==================================================
+            // 查当前会话最后一条消息
+            // ==================================================
+
+            const {
+                data:
+                latestMessages,
+
+                error:
+                latestMessageError,
+            } =
+                await supabase
+                    .from(
+                        'messages'
+                    )
+                    .select(
+                        'id, role, content, created_at, reasoning_content'
+                    )
+                    .eq(
+                        'session_id',
+                        sessionId
+                    )
+                    .eq(
+                        'visible',
+                        true
+                    )
+                    .in(
+                        'role',
+                        [
+                            'user',
+                            'assistant',
+                        ]
+                    )
+                    .order(
+                        'created_at',
+                        {
+                            ascending:
+                                false,
+                        }
+                    )
+                    .order(
+                        'id',
+                        {
+                            ascending:
+                                false,
+                        }
+                    )
+                    .limit(1)
+
+
+            if (
+                latestMessageError
+            ) {
+                throw latestMessageError
+            }
+
+
+            if (
+                !latestMessages ||
+                latestMessages
+                    .length === 0
+            ) {
+
+                return res
+                    .status(200)
+                    .json({
+
+                        ok:
+                            true,
+
+                        sent:
+                            false,
+
+                        reason:
+                            'no_messages',
+
+                        session_id:
+                            sessionId,
+
+                    })
+
+            }
+
+
+            const latestMessage =
+                latestMessages[0]
+
+
+            // ==================================================
+            // 如果最后一条已经是主动消息，
+            // 并且用户还没回复，不连续发送。
+            // ==================================================
+
+            if (
+                latestMessage
+                    .reasoning_content ===
+                'proactive'
+            ) {
+
+                return res
+                    .status(200)
+                    .json({
+
+                        ok:
+                            true,
+
+                        sent:
+                            false,
+
+                        reason:
+                            'waiting_for_user_reply',
+
+                        session_id:
+                            sessionId,
+
+                    })
+
+            }
+
+
+            // ==================================================
+            // 空闲时间
+            //
+            // 默认 360 分钟。
+            // Render 设置 PROACTIVE_IDLE_MINUTES=1
+            // 可以临时测试一分钟。
+            // ==================================================
+
+            const configuredIdleMinutes =
+                Number(
+                    process.env
+                        .PROACTIVE_IDLE_MINUTES
+                )
+
+
+            const idleMinutesRequired =
+                Number.isFinite(
+                    configuredIdleMinutes
+                ) &&
+                    configuredIdleMinutes > 0
+
+                    ? configuredIdleMinutes
+
+                    : 360
+
+
+            const lastMessageTime =
+                new Date(
+                    latestMessage
+                        .created_at
+                ).getTime()
+
+
+            if (
+                !Number.isFinite(
+                    lastMessageTime
+                )
+            ) {
+
+                throw new Error(
+                    '最后一条消息的 created_at 无效'
+                )
+
+            }
+
+
+            const idleMinutes =
+                Math.floor(
+
+                    (
+                        Date.now() -
+                        lastMessageTime
+                    ) /
+
+                    60000
+
+                )
+
+
+            if (
+                idleMinutes <
+                idleMinutesRequired
+            ) {
+
+                return res
+                    .status(200)
+                    .json({
+
+                        ok:
+                            true,
+
+                        sent:
+                            false,
+
+                        reason:
+                            'not_idle_long_enough',
+
+                        session_id:
+                            sessionId,
+
+                        idle_minutes:
+                            idleMinutes,
+
+                        required_idle_minutes:
+                            idleMinutesRequired,
+
+                    })
+
+            }
+
+
+            // ==================================================
+            // 满足条件，生成主动消息
+            // ==================================================
+
+            const {
+                reply,
+                assistantMessage,
+            } =
+                await generateAndSaveProactiveMessage(
+                    sessionId,
+                    'automatic'
+                )
+
+
+            // 同样不修改 sessions.updated_at。
+
+            return res
+                .status(200)
+                .json({
+
+                    ok:
+                        true,
+
+                    sent:
+                        true,
+
+                    session_id:
+                        sessionId,
+
+                    idle_minutes:
+                        idleMinutes,
+
+                    required_idle_minutes:
+                        idleMinutesRequired,
+
+                    reply,
+
+                    assistant_message:
+                        assistantMessage,
+
+                })
+
+
+        } catch (
+        error
+        ) {
+
+            console.error(
+                '自动主动消息检查失败：',
+                error
+            )
+
+            return res
+                .status(500)
+                .json({
+
+                    ok:
+                        false,
+
+                    error:
+                        '自动主动消息检查失败',
 
                     detail:
                         error.message,
