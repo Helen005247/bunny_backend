@@ -4,6 +4,7 @@ const express = require('express')
 const cors = require('cors')
 const OpenAI = require('openai')
 const { createClient } = require('@supabase/supabase-js')
+const webpush = require('web-push')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -15,6 +16,43 @@ const client = new OpenAI({
     apiKey: process.env.AI_API_KEY,
     baseURL: process.env.AI_BASE_URL,
 })
+// ======================================================
+// Web Push / VAPID
+// ======================================================
+
+const VAPID_PUBLIC_KEY =
+    process.env.VAPID_PUBLIC_KEY || ''
+
+const VAPID_PRIVATE_KEY =
+    process.env.VAPID_PRIVATE_KEY || ''
+
+const VAPID_SUBJECT =
+    process.env.VAPID_SUBJECT || ''
+
+
+const pushConfigured =
+    Boolean(
+        VAPID_PUBLIC_KEY &&
+        VAPID_PRIVATE_KEY &&
+        VAPID_SUBJECT
+    )
+
+
+if (pushConfigured) {
+
+    webpush.setVapidDetails(
+        VAPID_SUBJECT,
+        VAPID_PUBLIC_KEY,
+        VAPID_PRIVATE_KEY
+    )
+
+} else {
+
+    console.warn(
+        'Web Push 尚未完整配置：请检查 VAPID_PUBLIC_KEY、VAPID_PRIVATE_KEY、VAPID_SUBJECT'
+    )
+
+}
 
 let supabase = null
 
@@ -1030,6 +1068,227 @@ ${opening}
     )
 }
 
+// ======================================================
+// 给所有已订阅设备发送 Push
+//
+// 重要：
+// Push payload 不包含星星真正的聊天内容。
+// 手机只会知道“有一条新消息”和 session_id。
+// 真正正文仍然保存在 messages 表。
+// ======================================================
+
+async function sendPushNotification(
+    sessionId
+) {
+
+    if (!pushConfigured) {
+
+        console.log(
+            'Web Push 未配置，跳过通知'
+        )
+
+        return {
+            sent: 0,
+            failed: 0,
+            removed: 0,
+            reason:
+                'push_not_configured',
+        }
+    }
+
+
+    if (!supabase) {
+
+        return {
+            sent: 0,
+            failed: 0,
+            removed: 0,
+            reason:
+                'supabase_not_configured',
+        }
+    }
+
+
+    const {
+        data:
+        subscriptions,
+
+        error:
+        subscriptionsError,
+    } =
+        await supabase
+            .from(
+                'push_subscriptions'
+            )
+            .select(
+                'id, endpoint, p256dh, auth'
+            )
+
+
+    if (
+        subscriptionsError
+    ) {
+        throw subscriptionsError
+    }
+
+
+    if (
+        !subscriptions ||
+        subscriptions.length === 0
+    ) {
+
+        console.log(
+            '当前没有 Push 订阅设备'
+        )
+
+        return {
+            sent: 0,
+            failed: 0,
+            removed: 0,
+            reason:
+                'no_subscriptions',
+        }
+    }
+
+
+    // ----------------------------------------------
+    // 这里只传新消息事件和会话 ID。
+    // 不传聊天正文。
+    // ----------------------------------------------
+
+    const payload =
+        JSON.stringify({
+
+            type:
+                'new_message',
+
+            session_id:
+                sessionId,
+
+        })
+
+
+    let sent = 0
+    let failed = 0
+    let removed = 0
+
+
+    for (
+        const subscription
+        of subscriptions
+    ) {
+
+        try {
+
+            await webpush
+                .sendNotification(
+                    {
+                        endpoint:
+                            subscription.endpoint,
+
+                        keys: {
+                            p256dh:
+                                subscription.p256dh,
+
+                            auth:
+                                subscription.auth,
+                        },
+                    },
+
+                    payload,
+
+                    {
+                        TTL:
+                            60 * 60,
+                    }
+                )
+
+
+            sent += 1
+
+
+        } catch (error) {
+
+            const statusCode =
+                error?.statusCode ||
+                    error?.statusCode === 0
+                    ? error.statusCode
+                    : null
+
+
+            // --------------------------------------
+            // 404 / 410 代表这个设备订阅已经失效。
+            // 自动从数据库删除。
+            // --------------------------------------
+
+            if (
+                statusCode === 404 ||
+                statusCode === 410
+            ) {
+
+                console.log(
+                    `Push 订阅已失效，删除 subscription id=${subscription.id}`
+                )
+
+
+                const {
+                    error:
+                    deleteError,
+                } =
+                    await supabase
+                        .from(
+                            'push_subscriptions'
+                        )
+                        .delete()
+                        .eq(
+                            'id',
+                            subscription.id
+                        )
+
+
+                if (deleteError) {
+
+                    console.error(
+                        '删除失效 Push 订阅失败：',
+                        deleteError
+                    )
+
+                } else {
+
+                    removed += 1
+
+                }
+
+
+            } else {
+
+                failed += 1
+
+                console.error(
+                    '发送 Web Push 失败：',
+                    error
+                )
+
+            }
+
+        }
+
+    }
+
+
+    return {
+
+        sent,
+
+        failed,
+
+        removed,
+
+        reason:
+            'finished',
+
+    }
+}
 
 // ======================================================
 // 生成并保存主动消息
@@ -1122,15 +1381,411 @@ async function generateAndSaveProactiveMessage(
         throw assistantMessageError
     }
 
+
+    // ======================================================
+    // 主动消息成功写入数据库以后发送 Push
+    //
+    // 即使 Push 失败，也不能把已经生成的聊天消息判定为失败。
+    // ======================================================
+
+    let pushResult = {
+        sent: 0,
+        failed: 0,
+        removed: 0,
+        reason:
+            'not_attempted',
+    }
+
+
+    try {
+
+        pushResult =
+            await sendPushNotification(
+                sessionId
+            )
+
+    } catch (error) {
+
+        console.error(
+            '主动消息已经保存，但 Push 发送失败：',
+            error
+        )
+
+        pushResult = {
+            sent: 0,
+            failed: 1,
+            removed: 0,
+            reason:
+                'push_error',
+        }
+
+    }
+
+
     return {
 
         reply,
 
         assistantMessage,
 
+        pushResult,
+
     }
 }
+// ======================================================
+// 获取 VAPID Public Key
+// GET /api/push/public-key
+//
+// Public Key 可以公开。
+// Private Key 永远不会通过这个接口返回。
+// ======================================================
 
+app.get(
+    '/api/push/public-key',
+    (
+        req,
+        res
+    ) => {
+
+        if (
+            !VAPID_PUBLIC_KEY
+        ) {
+
+            return res
+                .status(500)
+                .json({
+
+                    ok:
+                        false,
+
+                    error:
+                        '服务器没有配置 VAPID_PUBLIC_KEY',
+
+                })
+
+        }
+
+
+        return res
+            .status(200)
+            .json({
+
+                ok:
+                    true,
+
+                publicKey:
+                    VAPID_PUBLIC_KEY,
+
+            })
+
+    }
+)
+
+
+// ======================================================
+// 保存手机 / 浏览器 Push Subscription
+// POST /api/push/subscribe
+//
+// 前端发送：
+//
+// {
+//   "endpoint": "...",
+//   "keys": {
+//       "p256dh": "...",
+//       "auth": "..."
+//   }
+// }
+// ======================================================
+
+app.post(
+    '/api/push/subscribe',
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+
+            const {
+                endpoint,
+                keys,
+            } =
+                req.body || {}
+
+
+            const p256dh =
+                keys?.p256dh
+
+            const auth =
+                keys?.auth
+
+
+            if (
+                typeof endpoint !==
+                'string' ||
+                !endpoint.trim() ||
+
+                typeof p256dh !==
+                'string' ||
+                !p256dh.trim() ||
+
+                typeof auth !==
+                'string' ||
+                !auth.trim()
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+
+                        ok:
+                            false,
+
+                        error:
+                            'Push Subscription 数据不完整',
+
+                    })
+
+            }
+
+
+            if (
+                !endpoint.startsWith(
+                    'https://'
+                )
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+
+                        ok:
+                            false,
+
+                        error:
+                            'Push endpoint 必须使用 HTTPS',
+
+                    })
+
+            }
+
+
+            const now =
+                new Date()
+                    .toISOString()
+
+
+            // endpoint 在表里是 unique，
+            // 同一台设备重新订阅时直接更新 keys。
+            const {
+                error:
+                upsertError,
+            } =
+                await supabase
+                    .from(
+                        'push_subscriptions'
+                    )
+                    .upsert(
+                        {
+
+                            endpoint:
+                                endpoint.trim(),
+
+                            p256dh:
+                                p256dh.trim(),
+
+                            auth:
+                                auth.trim(),
+
+                            updated_at:
+                                now,
+
+                        },
+                        {
+                            onConflict:
+                                'endpoint',
+                        }
+                    )
+
+
+            if (
+                upsertError
+            ) {
+                throw upsertError
+            }
+
+
+            return res
+                .status(200)
+                .json({
+
+                    ok:
+                        true,
+
+                    message:
+                        'Push Subscription 保存成功',
+
+                })
+
+
+        } catch (
+        error
+        ) {
+
+            console.error(
+                '保存 Push Subscription 失败：',
+                error
+            )
+
+
+            return res
+                .status(500)
+                .json({
+
+                    ok:
+                        false,
+
+                    error:
+                        '保存 Push Subscription 失败',
+
+                    detail:
+                        error.message,
+
+                })
+
+        }
+
+    }
+)
+
+
+// ======================================================
+// 删除当前设备 Push Subscription
+// POST /api/push/unsubscribe
+//
+// Body：
+// {
+//     "endpoint": "..."
+// }
+// ======================================================
+
+app.post(
+    '/api/push/unsubscribe',
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+
+            const endpoint =
+                req.body
+                    ?.endpoint
+
+
+            if (
+                typeof endpoint !==
+                'string' ||
+                !endpoint.trim()
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+
+                        ok:
+                            false,
+
+                        error:
+                            'endpoint 不能为空',
+
+                    })
+
+            }
+
+
+            const {
+                error:
+                deleteError,
+            } =
+                await supabase
+                    .from(
+                        'push_subscriptions'
+                    )
+                    .delete()
+                    .eq(
+                        'endpoint',
+                        endpoint.trim()
+                    )
+
+
+            if (
+                deleteError
+            ) {
+                throw deleteError
+            }
+
+
+            return res
+                .status(200)
+                .json({
+
+                    ok:
+                        true,
+
+                    message:
+                        'Push Subscription 已删除',
+
+                })
+
+
+        } catch (
+        error
+        ) {
+
+            console.error(
+                '删除 Push Subscription 失败：',
+                error
+            )
+
+
+            return res
+                .status(500)
+                .json({
+
+                    ok:
+                        false,
+
+                    error:
+                        '删除 Push Subscription 失败',
+
+                    detail:
+                        error.message,
+
+                })
+
+        }
+
+    }
+)
 
 // ======================================================
 // 健康检查
@@ -3035,11 +3690,13 @@ app.post(
             const {
                 reply,
                 assistantMessage,
+                pushResult,
             } =
                 await generateAndSaveProactiveMessage(
                     sessionId,
                     'manual'
                 )
+
 
             // 主动消息故意不修改 sessions.updated_at，
             // 避免改变会话卡顺序。
@@ -3058,6 +3715,10 @@ app.post(
 
                     assistant_message:
                         assistantMessage,
+
+                    push_result:
+                        pushResult,
+
 
                 })
 
@@ -3455,6 +4116,7 @@ app.post(
             const {
                 reply,
                 assistantMessage,
+                pushResult,
             } =
                 await generateAndSaveProactiveMessage(
                     sessionId,
@@ -3487,6 +4149,10 @@ app.post(
 
                     assistant_message:
                         assistantMessage,
+
+                    push_result:
+                        pushResult,
+
 
                 })
 
