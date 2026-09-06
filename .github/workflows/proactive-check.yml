@@ -1,0 +1,19 @@
+name: Hermit Proactive Check
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "*/5 * * * *"
+
+jobs:
+  proactive-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check whether Xingxing should send a message
+        run: |
+          curl --fail-with-body \
+            -X POST \
+            "https://bunny-backend-19g1.onrender.com/api/proactive-check" \
+            -H "x-proactive-secret: ${{ secrets.PROACTIVE_CRON_SECRET }}"
