@@ -4,16 +4,20 @@ on:
   workflow_dispatch:
 
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "2-59/5 * * * *"
 
 jobs:
   proactive-check:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Show trigger type
+        run: echo "Trigger type = ${{ github.event_name }}"
+
       - name: Check whether Xingxing should send a message
         run: |
           curl --fail-with-body \
+            --max-time 120 \
             -X POST \
             "https://bunny-backend-19g1.onrender.com/api/proactive-check" \
             -H "x-proactive-secret: ${{ secrets.PROACTIVE_CRON_SECRET }}"
