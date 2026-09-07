@@ -158,6 +158,199 @@ function requireAIConfig(res) {
     return false
 }
 
+// ======================================================
+// 模型请求自动重试
+// ======================================================
+
+function waitForRetry(ms) {
+    return new Promise(
+        (resolve) => {
+            setTimeout(
+                resolve,
+                ms
+            )
+        }
+    )
+}
+
+
+function getModelErrorStatus(error) {
+
+    const rawStatus =
+        error?.status ??
+        error?.statusCode ??
+        error?.response?.status ??
+        null
+
+    const status =
+        Number(rawStatus)
+
+    return Number.isFinite(status)
+        ? status
+        : null
+}
+
+
+function getModelErrorCode(error) {
+
+    return String(
+        error?.code ??
+        error?.cause?.code ??
+        error?.error?.code ??
+        ''
+    ).toUpperCase()
+}
+
+
+function isRetryableModelError(error) {
+
+    if (
+        error?.retryable ===
+        true
+    ) {
+        return true
+    }
+
+    const status =
+        getModelErrorStatus(
+            error
+        )
+
+    if (
+        status !== null
+    ) {
+
+        if (
+            [
+                408,
+                429,
+                500,
+                502,
+                503,
+                504,
+            ].includes(
+                status
+            )
+        ) {
+            return true
+        }
+
+        return status >= 500
+    }
+
+    const code =
+        getModelErrorCode(
+            error
+        )
+
+    return [
+        'ETIMEDOUT',
+        'ECONNRESET',
+        'ECONNREFUSED',
+        'EAI_AGAIN',
+        'ENETUNREACH',
+        'UND_ERR_CONNECT_TIMEOUT',
+        'UND_ERR_HEADERS_TIMEOUT',
+        'UND_ERR_SOCKET',
+    ].includes(
+        code
+    )
+}
+
+
+async function callModelWithRetry(
+    request,
+    maxAttempts = 3
+) {
+
+    let lastError =
+        null
+
+    for (
+        let attempt = 1;
+        attempt <= maxAttempts;
+        attempt += 1
+    ) {
+
+        try {
+
+            const response =
+                await client
+                    .responses
+                    .create(
+                        request
+                    )
+
+            const outputText =
+                typeof response
+                    ?.output_text ===
+                    'string'
+                    ? response
+                        .output_text
+                        .trim()
+                    : ''
+
+            if (!outputText) {
+
+                const emptyError =
+                    new Error(
+                        '模型返回了空文本'
+                    )
+
+                emptyError.retryable =
+                    true
+
+                throw emptyError
+            }
+
+            return response
+
+        } catch (error) {
+
+            lastError =
+                error
+
+            const canRetry =
+                isRetryableModelError(
+                    error
+                )
+
+            if (
+                !canRetry ||
+                attempt >=
+                maxAttempts
+            ) {
+                throw error
+            }
+
+            const delayMs =
+                800 *
+                (
+                    2 **
+                    (
+                        attempt - 1
+                    )
+                )
+
+            console.warn(
+                `模型请求失败，${delayMs}ms 后重试（${attempt}/${maxAttempts}）：`,
+                error?.message ||
+                error
+            )
+
+            await waitForRetry(
+                delayMs
+            )
+        }
+    }
+
+    throw (
+        lastError ||
+        new Error(
+            '模型请求失败'
+        )
+    )
+}
 
 // ======================================================
 // 读取全局设置
@@ -770,17 +963,16 @@ ${oldConversationText}
 11. 只输出整理后的长期记忆正文，不要输出解释、标题说明或 JSON。`
 
     const compressionResponse =
-        await client
-            .responses
-            .create({
+        await callModelWithRetry({
 
-                model:
-                    'gpt-5.6-sol',
+            model:
+                'gpt-5.6-sol',
 
-                input:
-                    compressionInput,
+            input:
+                compressionInput,
 
-            })
+        })
+
 
     const newSummary =
         typeof compressionResponse
@@ -1310,17 +1502,16 @@ async function generateAndSaveProactiveMessage(
         )
 
     const response =
-        await client
-            .responses
-            .create({
+        await callModelWithRetry({
 
-                model:
-                    'gpt-5.6-sol',
+            model:
+                'gpt-5.6-sol',
 
-                input:
-                    proactiveInput,
+            input:
+                proactiveInput,
 
-            })
+        })
+
 
     const reply =
         typeof response
@@ -3447,18 +3638,15 @@ app.post(
 
 
             const response =
-                await client
-                    .responses
-                    .create({
+                await callModelWithRetry({
 
-                        model:
-                            'gpt-5.6-sol',
+                    model:
+                        'gpt-5.6-sol',
 
-                        input:
-                            modelInput,
+                    input:
+                        modelInput,
 
-                    })
-
+                })
 
             const reply =
                 typeof response
