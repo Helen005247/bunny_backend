@@ -827,24 +827,6 @@ async function compressMemoryIfNeeded(
             sessionId
         )
 
-    const fullContextBefore =
-        buildModelContext({
-
-            settings,
-
-            memorySummary:
-                previousMemorySummary,
-
-            messages:
-                visibleMessages,
-
-        })
-
-    const beforeTokens =
-        estimateTokens(
-            fullContextBefore
-        )
-
     const compressThreshold =
         Number(
             settings
@@ -858,6 +840,70 @@ async function compressMemoryIfNeeded(
                 settings
                     ?.compress_keep_rounds
             ) || 6
+        )
+
+    // ==================================================
+    // 先区分：
+    //
+    // 1. 已经可以进入长期记忆的旧聊天
+    // 2. 必须继续保留的最近聊天
+    //
+    // 只有“旧聊天”参与压缩阈值计算。
+    // 系统提示词、人物背景、长期记忆、
+    // 最近保留的聊天都不会让压缩反复触发。
+    // ==================================================
+
+    const {
+        compressibleMessages,
+        keptMessages,
+    } =
+        splitMessagesForCompression(
+            visibleMessages,
+            keepRounds
+        )
+
+    if (
+        compressibleMessages
+            .length === 0
+    ) {
+
+        return {
+
+            triggered:
+                false,
+
+            reason:
+                'not_enough_old_messages',
+
+            before_tokens:
+                0,
+
+            after_tokens:
+                0,
+
+            compressed_message_count:
+                0,
+
+            memory_id:
+                previousMemory
+                    ?.id ||
+                null,
+
+        }
+    }
+
+    // ==================================================
+    // 只统计真正准备压缩的旧聊天
+    // ==================================================
+
+    const oldConversationText =
+        messagesToText(
+            compressibleMessages
+        )
+
+    const beforeTokens =
+        estimateTokens(
+            oldConversationText
         )
 
     if (
@@ -890,222 +936,36 @@ async function compressMemoryIfNeeded(
         }
     }
 
-    const {
-        compressibleMessages,
-        keptMessages,
-    } =
-        splitMessagesForCompression(
-            visibleMessages,
-            keepRounds
-        )
-
-    if (
-        compressibleMessages
-            .length === 0
-    ) {
-
-        return {
-
-            triggered:
-                false,
-
-            reason:
-                'not_enough_old_messages',
-
-            before_tokens:
-                beforeTokens,
-
-            after_tokens:
-                beforeTokens,
-
-            compressed_message_count:
-                0,
-
-            memory_id:
-                previousMemory
-                    ?.id ||
-                null,
-
-        }
-    }
-
-    const oldConversationText =
-        messagesToText(
-            compressibleMessages
-        )
+    // ==================================================
+    // 真正达到阈值以后才调用模型整理长期记忆
+    // ==================================================
 
     const compressionInput =
         `你是一个长期记忆整理器。
 
-你的任务是把“已有长期记忆”和“新的一批旧聊天记录”
-合并成一份新的、完整的累计长期记忆。
-
-长期记忆的目标不是保存聊天记录本身，
-而是保留未来聊天中真正长期有用、稳定、值得记住的信息。
+请把已有长期记忆和旧聊天合并成一份简洁的累计长期记忆。
 
 【已有长期记忆】
 ${previousMemorySummary ||
         '目前没有已有长期记忆。'
         }
 
-【本次需要压缩的旧聊天】
+【需要整理的旧聊天】
 ${oldConversationText}
 
-【核心整理原则】
+【规则】
 
-1. 优先保留对未来聊天长期有价值的信息。
+1. 只保留未来聊天真正长期有价值的信息。
+2. 保留人物关系、重要经历、偏好、习惯、承诺、长期计划和重要情绪事件。
+3. 删除寒暄、重复内容和已经没有意义的临时细节。
+4. 技术内容只保留长期项目、最终架构和已经确定的重要结果；不要保存代码、具体行号、报错日志和临时调试过程。
+5. 已经解决的一次性问题不要保留。
+6. 不要保存 API Key、密码、Token、私钥或其他秘密值。
+7. 新信息明确更新旧信息时，以新信息为准。
+8. 不要编造不存在的事实。
+9. 尽量控制在约 1500～2000 个中文字符以内。
+10. 只输出长期记忆正文，不要解释，不要输出 JSON。`
 
-2. 保留人物身份、性格、偏好、习惯、关系状态、
-重要情绪经历、共同经历、承诺、约定和长期计划。
-
-3. 准确保留“谁喜欢什么、谁做了什么、谁说了什么”，
-不要混淆用户和角色的身份或主语。
-
-4. 新聊天如果明确更新了旧信息，
-以更新、更明确的信息为准。
-
-5. 删除普通寒暄、重复表达、
-没有长期价值的日常闲聊和已经失去意义的信息。
-
-6. 不要为了让记忆显得丰富而保存大量细枝末节。
-长期记忆应当简洁、稳定、可复用。
-
-【代码、开发和技术类聊天的特殊规则】
-
-技术聊天通常包含大量临时信息，
-这些内容大多数不应该进入长期记忆。
-
-以下内容默认不要保存：
-
-- 大段源代码或代码片段
-- 某个文件的具体行号
-- 某次报错的完整报错信息
-- stack trace
-- console 日志
-- 临时调试输出
-- 一次性的终端命令
-- npm / git / SQL 的临时操作步骤
-- 某一次部署失败的具体过程
-- 已经解决的一次性 bug
-- 为排查问题尝试过但最终没有采用的方案
-- 临时测试参数
-- 临时测试数据
-- 某次调试时的具体时间点
-- 普通知识型代码问答
-- 用户临时询问的某个编程概念
-- 对未来项目没有持续价值的实现细节
-
-如果一个技术问题已经解决，
-不要保存整个排查过程。
-
-例如不要记：
-
-“server.js 第 1403 行曾经缺少一个大括号，
-后来执行 node --check 修好了。”
-
-应该只在确实具有长期价值时，
-保存最终稳定结果，例如：
-
-“后端已成功部署并稳定运行。”
-
-【可以保留的项目技术信息】
-
-只有具有长期、稳定价值的项目事实才应保留，例如：
-
-- 用户正在长期开发的项目名称和用途
-- 已经确定并长期使用的技术栈
-- 已经确定的前后端架构
-- 长期使用的数据库、部署平台等基础设施
-- 已经完成的重要长期功能
-- 已正式采用的技术方案
-- 重要的架构决策
-- 重要的隐私或安全设计
-- 用户明确决定以后继续遵守的开发原则
-- 尚未完成、未来确实还需要继续推进的重要项目目标
-
-项目进展要保存“结果”，不要保存完整施工过程。
-
-例如：
-
-可以保存：
-“Hermit 已实现 Web Push，
-主动消息可以在 App 关闭时发送系统通知，
-通知不包含聊天正文。”
-
-不要保存：
-“为了实现 Web Push，
-先创建了 push_subscriptions，
-后来遇到 permission denied，
-又运行了某段 SQL，
-然后修改了 Settings.jsx 第几行……”
-
-【尚未解决的技术问题】
-
-如果一个技术问题仍然没有解决，
-而且用户之后很可能继续处理，
-可以非常简短地保留：
-
-- 当前问题是什么
-- 已经确认的重要原因
-- 下一步准备做什么
-
-不要保存完整日志、代码和排错过程。
-
-问题解决以后，
-后续压缩时应删除这些已经过时的临时调试记忆，
-只保留最终有长期价值的结果。
-
-【秘密和敏感技术信息】
-
-永远不要把以下内容写入长期记忆：
-
-- API Key
-- Secret Key
-- 密码
-- Token
-- 私钥
-- VAPID Private Key
-- Cron Secret
-- Push Subscription endpoint
-- p256dh
-- auth
-- 任何完整认证凭据或秘密字符串
-
-如果聊天中出现这些内容，
-直接忽略具体值。
-
-只允许在确有长期价值时记录抽象事实，
-例如：
-
-“项目已配置模型 API 凭据。”
-
-绝对不要记录凭据本身。
-
-【输出要求】
-
-1. 不要编造聊天中没有出现过的事实。
-
-2. 只保留未来聊天真正值得长期记住的信息。
-
-3. 已有长期记忆中如果存在过时、
-重复或明显属于一次性技术调试的信息，
-本次整理时也应该主动删除。
-
-4. 技术项目相关内容要高度概括，
-避免让开发细节淹没人物关系和生活记忆。
-
-5. 人物关系、共同经历、情绪事件、
-用户长期偏好等个人记忆，
-通常比一次性的技术调试细节具有更高优先级。
-
-6. 输出的是给另一个 AI 使用的内部长期记忆，
-不要写成面对用户的聊天回复。
-
-7. 尽量保持信息密度高、结构清楚，
-控制在约 2000 个中文字符以内。
-
-8. 只输出整理后的长期记忆正文，
-不要输出解释、标题说明或 JSON。`
 
 
     const compressionResponse =
@@ -1233,26 +1093,18 @@ ${oldConversationText}
         throw hideMessagesError
     }
 
-    const fullContextAfter =
-        buildModelContext({
-
-            settings,
-
-            memorySummary:
-                newSummary,
-
-            messages:
-                keptMessages,
-
-        })
+    const keptMessagesText =
+        messagesToText(
+            keptMessages
+        )
 
     const afterTokens =
         estimateTokens(
-            fullContextAfter
+            keptMessagesText
         )
 
     console.log(
-        `Session ${sessionId} 已执行记忆压缩：${compressedMessageIds.length} 条消息，Token ${beforeTokens} → ${afterTokens}`
+        `Session ${sessionId} 已执行记忆压缩：${compressedMessageIds.length} 条消息；待压缩旧消息 Token ${beforeTokens}；保留近期消息 Token ${afterTokens}`
     )
 
     return {
