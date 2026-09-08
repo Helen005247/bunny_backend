@@ -2763,6 +2763,355 @@ async function generateAndSaveProactiveMessage(
 
     }
 }
+
+// ======================================================
+// 到点提醒：生成并保存提醒消息
+// ======================================================
+
+async function generateAndSaveReminderMessage(reminder) {
+
+    const settings =
+        await getGlobalSettings()
+
+    const latestMemory =
+        await getLatestMemory()
+
+    const memorySummary =
+        typeof latestMemory?.summary === 'string'
+            ? latestMemory.summary.trim()
+            : ''
+
+    const recentMessages =
+        await getRecentVisibleMessages(
+            reminder.session_id,
+            settings
+        )
+
+    const recentText =
+        messagesToText(
+            recentMessages.slice(-8)
+        )
+
+    const systemPrompt =
+        typeof settings?.system_prompt === 'string'
+            ? settings.system_prompt.trim()
+            : ''
+
+    const characterContext =
+        typeof settings?.character_context === 'string'
+            ? settings.character_context.trim()
+            : ''
+
+    const timeZone =
+        getValidTimeZone(reminder.timezone) ||
+        getValidTimeZone(settings?.timezone) ||
+        'UTC'
+
+    const eventLocal =
+        DateTime
+            .fromISO(
+                reminder.event_at,
+                {
+                    setZone: true,
+                }
+            )
+            .setZone(timeZone)
+
+    const nowLocal =
+        DateTime
+            .now()
+            .setZone(timeZone)
+
+    const minutesBefore =
+        Math.max(
+            0,
+            Number(
+                reminder.remind_before_minutes
+            ) || 0
+        )
+
+    const reminderInput =
+        `【最高优先级：角色行为规则】
+${systemPrompt}
+
+【固定人物设定、关系背景与共同经历】
+${characterContext}
+
+【长期记忆】
+${memorySummary || '无'}
+
+【最近聊天】
+${recentText || '无'}
+
+【当前任务：到点提醒】
+
+这是用户之前明确设置、现在已经到提醒时间的真实提醒。
+
+提醒内容：${reminder.content}
+事情发生时间：${eventLocal.toFormat('yyyy-LL-dd HH:mm')}
+当前时间：${nowLocal.toFormat('yyyy-LL-dd HH:mm')}
+提前提醒分钟数：${minutesBefore}
+
+请以沈星回的身份自然提醒用户。
+
+要求：
+1. 直接提醒这件事，不要假装用户刚刚说了什么。
+2. 提前提醒分钟数大于 0 时，可以自然表达“还有多久”；等于 0 时就当作“现在到时间了”。
+3. 通常 1～3 条短消息。
+4. 可以有角色语气、调侃或关心，但提醒本身必须清楚。
+5. 不要提数据库、系统、定时任务、API、AI 等内部机制。
+6. 不要编造天气、地点、用户当前行为或事情已经完成。
+7. 每条独立消息之间用一个空行分隔。
+8. 输出必须能够直接发给用户。`
+
+    const response =
+        await callModelWithRetry({
+            model:
+                'gpt-5.6-sol',
+
+            input:
+                reminderInput,
+        })
+
+    const reply =
+        typeof response?.output_text ===
+            'string'
+            ? response.output_text.trim()
+            : ''
+
+    if (!reply) {
+
+        throw new Error(
+            '提醒消息模型没有返回有效文本'
+        )
+
+    }
+
+
+    // ==================================================
+    // 领取这条提醒
+    //
+    // 只有 pending 才能变成 sent。
+    // 就算两个检查同时运行，也只有一个能成功，
+    // 防止同一条提醒发两遍。
+    // ==================================================
+
+    const sentAt =
+        new Date()
+            .toISOString()
+
+    const {
+        data:
+        claimedReminder,
+
+        error:
+        claimError,
+    } =
+        await supabase
+            .from(
+                'reminders'
+            )
+            .update({
+
+                status:
+                    'sent',
+
+                sent_at:
+                    sentAt,
+
+            })
+            .eq(
+                'id',
+                reminder.id
+            )
+            .eq(
+                'status',
+                'pending'
+            )
+            .select(
+                'id, session_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, sent_at, metadata'
+            )
+            .maybeSingle()
+
+    if (claimError) {
+        throw claimError
+    }
+
+    if (!claimedReminder) {
+
+        return {
+
+            sent:
+                false,
+
+            reason:
+                'already_processed',
+
+            reminder_id:
+                reminder.id,
+
+        }
+
+    }
+
+
+    // ==================================================
+    // 写入聊天记录
+    // ==================================================
+
+    let assistantMessage =
+        null
+
+    try {
+
+        const {
+            data,
+            error,
+        } =
+            await supabase
+                .from(
+                    'messages'
+                )
+                .insert([
+                    {
+
+                        session_id:
+                            claimedReminder
+                                .session_id,
+
+                        role:
+                            'assistant',
+
+                        content:
+                            reply,
+
+                        visible:
+                            true,
+
+                        reasoning_content:
+                            'reminder',
+
+                    },
+                ])
+                .select(
+                    'id, session_id, role, content, created_at, visible, reasoning_content'
+                )
+                .single()
+
+        if (error) {
+            throw error
+        }
+
+        assistantMessage =
+            data
+
+    } catch (error) {
+
+        // 如果聊天消息没写进去，
+        // 把提醒恢复成 pending，
+        // 下一次还能继续重试。
+
+        const {
+            error:
+            rollbackError,
+        } =
+            await supabase
+                .from(
+                    'reminders'
+                )
+                .update({
+
+                    status:
+                        'pending',
+
+                    sent_at:
+                        null,
+
+                })
+                .eq(
+                    'id',
+                    claimedReminder.id
+                )
+                .eq(
+                    'status',
+                    'sent'
+                )
+
+        if (rollbackError) {
+
+            console.error(
+                '恢复提醒 pending 状态失败：',
+                rollbackError
+            )
+
+        }
+
+        throw error
+    }
+
+
+    // ==================================================
+    // 发 Push
+    // ==================================================
+
+    let pushResult = {
+
+        sent: 0,
+        failed: 0,
+        removed: 0,
+
+        reason:
+            'not_attempted',
+
+    }
+
+    try {
+
+        pushResult =
+            await sendPushNotification(
+                claimedReminder
+                    .session_id
+            )
+
+    } catch (error) {
+
+        console.error(
+            '提醒消息已保存，但 Push 发送失败：',
+            error
+        )
+
+        pushResult = {
+
+            sent: 0,
+            failed: 1,
+            removed: 0,
+
+            reason:
+                'push_error',
+
+        }
+
+    }
+
+
+    return {
+
+        sent:
+            true,
+
+        reminder:
+            claimedReminder,
+
+        reply,
+
+        assistantMessage,
+
+        pushResult,
+
+    }
+}
+
+
 // ======================================================
 // 获取 VAPID Public Key
 // GET /api/push/public-key
@@ -5667,6 +6016,309 @@ app.post(
 
     }
 )
+
+
+// ======================================================
+// 自动检查到期提醒
+// POST /api/reminder-check
+// ======================================================
+
+app.post(
+    '/api/reminder-check',
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+            if (
+                !requireAIConfig(
+                    res
+                )
+            ) {
+                return
+            }
+
+
+            // ==================================================
+            // 安全密钥
+            //
+            // 暂时复用主动消息已有的
+            // PROACTIVE_CRON_SECRET
+            // ==================================================
+
+            const expectedSecret =
+                process.env
+                    .PROACTIVE_CRON_SECRET
+
+            if (!expectedSecret) {
+
+                return res
+                    .status(500)
+                    .json({
+
+                        ok:
+                            false,
+
+                        error:
+                            '服务器没有配置 PROACTIVE_CRON_SECRET',
+
+                    })
+
+            }
+
+            const receivedSecret =
+                req.headers[
+                'x-proactive-secret'
+                ]
+
+            if (
+                receivedSecret !==
+                expectedSecret
+            ) {
+
+                return res
+                    .status(401)
+                    .json({
+
+                        ok:
+                            false,
+
+                        error:
+                            'Unauthorized',
+
+                    })
+
+            }
+
+
+            // ==================================================
+            // 找已经到 remind_at 的 pending 提醒
+            // ==================================================
+
+            const nowIso =
+                new Date()
+                    .toISOString()
+
+            const {
+                data:
+                dueReminders,
+
+                error:
+                remindersError,
+            } =
+                await supabase
+                    .from(
+                        'reminders'
+                    )
+                    .select(
+                        'id, session_id, source_message_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, sent_at, metadata'
+                    )
+                    .eq(
+                        'status',
+                        'pending'
+                    )
+                    .lte(
+                        'remind_at',
+                        nowIso
+                    )
+                    .order(
+                        'remind_at',
+                        {
+                            ascending:
+                                true,
+                        }
+                    )
+                    .limit(
+                        20
+                    )
+
+            if (
+                remindersError
+            ) {
+                throw remindersError
+            }
+
+
+            // 没有到期提醒
+
+            if (
+                !dueReminders ||
+                dueReminders.length === 0
+            ) {
+
+                return res
+                    .status(200)
+                    .json({
+
+                        ok:
+                            true,
+
+                        processed:
+                            0,
+
+                        sent:
+                            0,
+
+                        failed:
+                            0,
+
+                        reason:
+                            'no_due_reminders',
+
+                    })
+
+            }
+
+
+            const results = []
+
+            let sentCount = 0
+            let failedCount = 0
+
+
+            // ==================================================
+            // 一条一条发送
+            // ==================================================
+
+            for (
+                const reminder
+                of dueReminders
+            ) {
+
+                try {
+
+                    const result =
+                        await generateAndSaveReminderMessage(
+                            reminder
+                        )
+
+                    if (
+                        result.sent
+                    ) {
+                        sentCount += 1
+                    }
+
+                    results.push({
+
+                        reminder_id:
+                            reminder.id,
+
+                        ok:
+                            true,
+
+                        sent:
+                            Boolean(
+                                result.sent
+                            ),
+
+                        reason:
+                            result.reason ||
+                            'sent',
+
+                        assistant_message_id:
+                            result
+                                .assistantMessage
+                                ?.id ||
+                            null,
+
+                        push_result:
+                            result
+                                .pushResult ||
+                            null,
+
+                    })
+
+                } catch (
+                reminderError
+                ) {
+
+                    failedCount += 1
+
+                    console.error(
+                        `处理 reminder id=${reminder.id} 失败：`,
+                        reminderError
+                    )
+
+                    results.push({
+
+                        reminder_id:
+                            reminder.id,
+
+                        ok:
+                            false,
+
+                        sent:
+                            false,
+
+                        error:
+                            reminderError
+                                .message,
+
+                    })
+
+                }
+
+            }
+
+
+            return res
+                .status(200)
+                .json({
+
+                    ok:
+                        true,
+
+                    processed:
+                        dueReminders.length,
+
+                    sent:
+                        sentCount,
+
+                    failed:
+                        failedCount,
+
+                    results,
+
+                })
+
+
+        } catch (error) {
+
+            console.error(
+                '自动提醒检查失败：',
+                error
+            )
+
+            return res
+                .status(500)
+                .json({
+
+                    ok:
+                        false,
+
+                    error:
+                        '自动提醒检查失败',
+
+                    detail:
+                        error.message,
+
+                })
+
+        }
+
+    }
+)
+
 
 
 // ======================================================
