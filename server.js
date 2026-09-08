@@ -517,6 +517,7 @@ async function getGlobalSettings() {
             session_id,
             system_prompt,
             character_context,
+            timezone,
             temperature,
             max_context_rounds,
             max_context_tokens,
@@ -525,6 +526,7 @@ async function getGlobalSettings() {
             max_reply_tokens,
             updated_at
         `)
+
         .eq(
             'session_id',
             'global'
@@ -1287,6 +1289,261 @@ ${oldConversationText}
 }
 
 
+
+// ======================================================
+// 主动消息：时间与多样性工具
+// ======================================================
+
+function getValidTimeZone(
+    value
+) {
+
+    const timeZone =
+        typeof value ===
+            'string'
+            ? value.trim()
+            : ''
+
+    if (!timeZone) {
+        return null
+    }
+
+    try {
+
+        new Intl.DateTimeFormat(
+            'en-US',
+            {
+                timeZone,
+            }
+        ).format(
+            new Date()
+        )
+
+        return timeZone
+
+    } catch (
+    error
+    ) {
+
+        return null
+
+    }
+}
+
+
+function getDayPart(
+    hour
+) {
+
+    if (
+        hour >= 5 &&
+        hour <= 8
+    ) {
+        return '清晨 / 早上'
+    }
+
+    if (
+        hour >= 9 &&
+        hour <= 11
+    ) {
+        return '上午'
+    }
+
+    if (
+        hour >= 12 &&
+        hour <= 13
+    ) {
+        return '中午'
+    }
+
+    if (
+        hour >= 14 &&
+        hour <= 17
+    ) {
+        return '下午'
+    }
+
+    if (
+        hour >= 18 &&
+        hour <= 21
+    ) {
+        return '晚上'
+    }
+
+    if (
+        hour >= 22
+    ) {
+        return '深夜'
+    }
+
+    return '凌晨'
+}
+
+
+// ======================================================
+// 构造用户当前本地时间
+// ======================================================
+
+function buildUserLocalTimeContext(
+    settings
+) {
+
+    const timeZone =
+        getValidTimeZone(
+            settings
+                ?.timezone
+        )
+
+    if (!timeZone) {
+
+        return [
+            '用户时区尚未设置。',
+            '本次不要自行判断用户现在是早晨、中午、晚上或凌晨。',
+            '也不要编造与当前昼夜相关的活动。',
+        ].join('\n')
+
+    }
+
+
+    const now =
+        new Date()
+
+
+    const hourText =
+        new Intl
+            .DateTimeFormat(
+                'en-US',
+                {
+                    timeZone,
+                    hour:
+                        '2-digit',
+                    hourCycle:
+                        'h23',
+                }
+            )
+            .format(
+                now
+            )
+
+
+    const hour =
+        Number(
+            hourText
+        )
+
+
+    const dateTimeText =
+        new Intl
+            .DateTimeFormat(
+                'zh-CN',
+                {
+                    timeZone,
+
+                    year:
+                        'numeric',
+
+                    month:
+                        '2-digit',
+
+                    day:
+                        '2-digit',
+
+                    weekday:
+                        'long',
+
+                    hour:
+                        '2-digit',
+
+                    minute:
+                        '2-digit',
+
+                    hourCycle:
+                        'h23',
+                }
+            )
+            .format(
+                now
+            )
+
+
+    return [
+        `用户时区：${timeZone}`,
+        `用户当前本地时间：${dateTimeText}`,
+        `当前时间段：${getDayPart(hour)}`,
+    ].join('\n')
+}
+
+
+// ======================================================
+// 读取最近几次主动消息
+//
+// 目的：
+// 防止连续主动消息都使用同一种开场、
+// 同一个话题或同一种“问候型”模板。
+// ======================================================
+
+async function getRecentProactiveMessages(
+    sessionId,
+    limit = 4
+) {
+
+    const {
+        data,
+        error,
+    } =
+        await supabase
+            .from(
+                'messages'
+            )
+            .select(
+                'id, content, created_at'
+            )
+            .eq(
+                'session_id',
+                sessionId
+            )
+            .eq(
+                'visible',
+                true
+            )
+            .eq(
+                'reasoning_content',
+                'proactive'
+            )
+            .order(
+                'created_at',
+                {
+                    ascending:
+                        false,
+                }
+            )
+            .order(
+                'id',
+                {
+                    ascending:
+                        false,
+                }
+            )
+            .limit(
+                limit
+            )
+
+
+    if (error) {
+        throw error
+    }
+
+
+    return Array.isArray(
+        data
+    )
+        ? [
+            ...data,
+        ].reverse()
+        : []
+}
+
+
 // ======================================================
 // 主动消息上下文
 // ======================================================
@@ -1300,6 +1557,7 @@ async function buildProactiveInput(
     const latestMemory =
         await getLatestMemory()
 
+
     const memorySummary =
         typeof latestMemory
             ?.summary ===
@@ -1309,11 +1567,20 @@ async function buildProactiveInput(
                 .trim()
             : ''
 
+
     const recentMessages =
         await getRecentVisibleMessages(
             sessionId,
             settings
         )
+
+
+    const recentProactiveMessages =
+        await getRecentProactiveMessages(
+            sessionId,
+            4
+        )
+
 
     const systemPrompt =
         typeof settings
@@ -1324,6 +1591,7 @@ async function buildProactiveInput(
                 .trim()
             : ''
 
+
     const characterContext =
         typeof settings
             ?.character_context ===
@@ -1333,12 +1601,33 @@ async function buildProactiveInput(
                 .trim()
             : ''
 
+
     const historyText =
         messagesToText(
             recentMessages
         )
 
+
+    const timeContext =
+        buildUserLocalTimeContext(
+            settings
+        )
+
+
+    const recentProactiveText =
+        recentProactiveMessages
+            .map(
+                (
+                    item,
+                    index
+                ) =>
+                    `主动消息 ${index + 1}：${item.content}`
+            )
+            .join('\n')
+
+
     const sections = []
+
 
     if (systemPrompt) {
 
@@ -1348,6 +1637,7 @@ ${systemPrompt}`
         )
 
     }
+
 
     if (characterContext) {
 
@@ -1361,6 +1651,7 @@ ${characterContext}`
 
     }
 
+
     if (memorySummary) {
 
         sections.push(
@@ -1369,6 +1660,7 @@ ${memorySummary}`
         )
 
     }
+
 
     if (historyText) {
 
@@ -1379,36 +1671,118 @@ ${historyText}`
 
     }
 
+
+    sections.push(
+        `【用户当前时间信息】
+${timeContext}`
+    )
+
+
+    if (
+        recentProactiveText
+    ) {
+
+        sections.push(
+            `【最近已经发过的主动消息】
+这些内容只用于避免重复。
+不要机械延续，也不要再次使用高度相似的开场、主题、问法或结尾。
+
+${recentProactiveText}`
+        )
+
+    }
+
+
     const opening =
-        mode === 'automatic'
-            ? '用户已经有一段时间没有继续聊天。现在由你自然地主动联系用户。'
-            : '现在不是用户向你提出了新问题，而是你准备主动联系用户。'
+        mode ===
+            'automatic'
+            ? '用户已经有一段时间没有继续聊天。现在由你自己决定是否以及怎样自然地主动联系用户。'
+            : '现在不是用户刚刚向你提出问题，而是你准备主动联系用户。'
+
 
     sections.push(
         `【本次任务：主动发消息】
 
 ${opening}
 
-请严格遵守：
+你不是“定时问候机器人”。
 
-1. 像即时通讯软件里的真人一样自然地先开口。
-2. 不要假装用户刚刚说了什么，也不要回答一个不存在的问题。
-3. 根据角色身份、关系背景、长期记忆以及最近聊天，自然决定此刻想说什么。
-4. 可以问候、关心用户、分享一个突然想到的念头，也可以自然延续之前尚未结束的话题。
-5. 只有当长期记忆与当前话题自然相关时才能提起，不要强行展示“你记得”。
-6. 普通情况下生成 1～3 条简短消息，不要一次写一大段。
-7. 每条独立消息之间必须使用一个空行分隔。
-8. 不要使用编号、项目符号、标题、JSON 或“消息1/消息2”之类的标记。
-9. 不要解释为什么你主动发消息。
-10. 不要说“作为 AI”“系统让我联系你”等破坏角色沉浸感的话。
-11. 不要显得催促、责怪，也不要要求用户必须回复。
-12. 输出内容必须可以直接作为角色发给用户的聊天消息。`
+主动联系用户时，优先从当前关系、最近聊天、长期记忆和当前时间中寻找真正自然的理由。
+
+【主动消息可以来自很多不同方向】
+
+例如：
+
+- 自然延续之前还留有余味的话题；
+- 想起用户刚才或之前说过的一件小事；
+- 对用户之前提到的计划产生自然的后续反应；
+- 突然想到用户；
+- 想逗用户一下；
+- 想撒一点娇；
+- 分享自己此刻一个很小的念头或生活片段；
+- 想起两个人之间某个自然相关的共同经历；
+- 根据当前时间产生符合常识的生活化表达；
+- 单纯想和用户说一句没什么实际意义的话。
+
+以上只是可能性，不是每次都要全部使用。
+
+【严格规则】
+
+1. 优先观察最近聊天。如果其中存在很自然可以接下去的内容，可以从那个内容出发。
+
+2. 不要默认使用“在干嘛”“吃饭了吗”“睡了吗”“今天过得怎么样”“有没有好好休息”这种问候型开场。
+
+3. 不需要每次都提出问题。
+有时一句念头、吐槽、玩笑、撒娇或很短的话就已经足够。
+
+4. 不要为了显得关心而强行提醒用户吃饭、喝水、休息、早点睡。
+
+5. 当前时间必须符合现实常识。
+如果当前是晚上或深夜，不要说自己正在晒太阳、刚吃早餐、准备去看日出之类明显不合时宜的话。
+如果当前是清晨，也不要无缘无故说自己刚吃完晚饭。
+
+6. 不需要每次主动提到具体时间。
+时间信息主要用来约束现实合理性，而不是要求你每次都说“现在几点”。
+
+7. 如果用户时区尚未设置，不要自行编造现在是白天还是晚上。
+
+8. 没有真实天气信息时，不要声称正在下雨、下雪、天气很好、阳光很强等具体天气事实。
+
+9. 描述自己的活动时可以有生活感，但必须符合当前时间与角色设定，不要突然创造与上下文冲突的新职业、新任务、新地点或新身份。
+
+10. 如果最近聊天中用户明确提过某件准备去做的事情，可以在之后自然想起它。
+但不要假装已经知道事情的结果。
+
+11. 查看“最近已经发过的主动消息”，避免连续使用相同的开场、相同的话题、相同的关心方式或相同结尾。
+
+12. 不要连续几次都使用“想你了”“宝宝在干嘛”“有没有好好休息”这一类同质内容。
+
+13. 根据角色自身的情绪和关系自然说话。
+允许有一点懒、困、吃醋、调侃、撒娇、无聊、想靠近用户，或者只是突然冒出一个没什么用的念头。
+
+14. 不要为了主动联系而编造用户刚刚说过不存在的话。
+
+15. 普通情况下生成 1～3 条简短消息，不要一次写很长。
+
+16. 每条独立消息之间必须使用一个空行分隔。
+
+17. 不要使用编号、项目符号、标题、JSON 或“消息1/消息2”等标记。
+
+18. 不要解释为什么你主动发消息。
+
+19. 不要提“系统”“定时任务”“AI”“主动消息规则”等内部机制。
+
+20. 不要催促、责怪用户，也不要要求用户必须回复。
+
+21. 输出必须能够直接作为沈星回发给用户的即时聊天消息。`
     )
+
 
     return sections.join(
         '\n\n'
     )
 }
+
 
 // ======================================================
 // 给所有已订阅设备发送 Push
@@ -2995,6 +3369,8 @@ app.patch(
 
                 character_context,
 
+                timezone,
+
                 temperature,
 
                 max_context_rounds,
@@ -3009,6 +3385,7 @@ app.patch(
 
             } =
                 req.body
+
 
             const updates = {}
 
@@ -3067,6 +3444,61 @@ app.patch(
 
                 updates.character_context =
                     character_context
+
+            }
+            if (
+                timezone !==
+                undefined
+            ) {
+
+                if (
+                    typeof timezone !==
+                    'string'
+                ) {
+
+                    return res
+                        .status(400)
+                        .json({
+
+                            ok:
+                                false,
+
+                            error:
+                                'timezone 必须是字符串',
+
+                        })
+
+                }
+
+
+                const normalizedTimezone =
+                    timezone.trim()
+
+
+                if (
+                    !normalizedTimezone ||
+                    !getValidTimeZone(
+                        normalizedTimezone
+                    )
+                ) {
+
+                    return res
+                        .status(400)
+                        .json({
+
+                            ok:
+                                false,
+
+                            error:
+                                'timezone 不是有效的 IANA 时区',
+
+                        })
+
+                }
+
+
+                updates.timezone =
+                    normalizedTimezone
 
             }
 
@@ -3205,18 +3637,20 @@ app.patch(
                         'global'
                     )
                     .select(`
-                        id,
-                        session_id,
-                        system_prompt,
-                        character_context,
-                        temperature,
-                        max_context_rounds,
-                        max_context_tokens,
-                        compress_threshold,
-                        compress_keep_rounds,
-                        max_reply_tokens,
-                        updated_at
-                    `)
+                id,
+                session_id,
+                system_prompt,
+                character_context,
+                timezone,
+                temperature,
+                max_context_rounds,
+                max_context_tokens,
+                compress_threshold,
+                compress_keep_rounds,
+                max_reply_tokens,
+                updated_at
+            `)
+
                     .maybeSingle()
 
             if (error) {
