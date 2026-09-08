@@ -5,6 +5,8 @@ const cors = require('cors')
 const OpenAI = require('openai')
 const { createClient } = require('@supabase/supabase-js')
 const webpush = require('web-push')
+const crypto = require('crypto')
+
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -266,6 +268,71 @@ async function callModelWithRetry(
     let lastError =
         null
 
+    // ==================================================
+    // 为当前请求生成唯一的内容指纹
+    //
+    // 相同输入会得到相同指纹；
+    // 完全不同的请求几乎不可能得到同一个指纹。
+    // ==================================================
+
+    const originalInput =
+        typeof request
+            ?.input ===
+            'string'
+            ? request
+                .input
+            : null
+
+    const integrityId =
+        originalInput
+            ? crypto
+                .createHash(
+                    'sha256'
+                )
+                .update(
+                    originalInput
+                )
+                .digest(
+                    'hex'
+                )
+                .slice(
+                    0,
+                    16
+                )
+            : null
+
+    const integrityMarker =
+        integrityId
+            ? `<<HERMIT_OK_${integrityId}>>`
+            : null
+
+
+    // ==================================================
+    // 在真正发送给模型的请求末尾加入校验标记
+    //
+    // 模型必须把这个标记原样带回来。
+    // 后端确认以后会自动删除，
+    // 用户永远看不到它。
+    // ==================================================
+
+    const guardedRequest =
+        integrityMarker
+            ? {
+                ...request,
+
+                input:
+                    `${originalInput}
+
+【响应完整性校验】
+请正常完成上面的任务。
+在全部正常输出结束后，另起一行，原样输出下面这段校验标记：
+${integrityMarker}
+
+不要解释这段标记，不要改写它，也不要把它放进正文中。服务端会在返回给用户前自动删除。`,
+            }
+            : request
+
+
     for (
         let attempt = 1;
         attempt <= maxAttempts;
@@ -278,7 +345,7 @@ async function callModelWithRetry(
                 await client
                     .responses
                     .create(
-                        request
+                        guardedRequest
                     )
 
             const outputText =
@@ -289,6 +356,11 @@ async function callModelWithRetry(
                         .output_text
                         .trim()
                     : ''
+
+
+            // ------------------------------------------
+            // 原来的空回复检查
+            // ------------------------------------------
 
             if (!outputText) {
 
@@ -303,7 +375,78 @@ async function callModelWithRetry(
                 throw emptyError
             }
 
-            return response
+
+            // ------------------------------------------
+            // 防串台检查
+            //
+            // 如果发出去的是本次请求，
+            // 返回内容却没有本次唯一标记，
+            // 就认为响应不可信并自动重试。
+            // ------------------------------------------
+
+            if (
+                integrityMarker &&
+                !outputText.includes(
+                    integrityMarker
+                )
+            ) {
+
+                const integrityError =
+                    new Error(
+                        `模型响应未通过完整性校验（${integrityId}）`
+                    )
+
+                integrityError.retryable =
+                    true
+
+                throw integrityError
+            }
+
+
+            // ------------------------------------------
+            // 校验成功以后，把标记删除
+            // ------------------------------------------
+
+            const cleanedOutputText =
+                integrityMarker
+                    ? outputText
+                        .split(
+                            integrityMarker
+                        )
+                        .join(
+                            ''
+                        )
+                        .trim()
+                    : outputText
+
+
+            if (
+                !cleanedOutputText
+            ) {
+
+                const emptyAfterCheckError =
+                    new Error(
+                        '模型响应通过校验后正文为空'
+                    )
+
+                emptyAfterCheckError.retryable =
+                    true
+
+                throw emptyAfterCheckError
+            }
+
+
+            // ------------------------------------------
+            // 返回干净正文
+            // ------------------------------------------
+
+            return {
+                ...response,
+
+                output_text:
+                    cleanedOutputText,
+            }
+
 
         } catch (error) {
 
@@ -323,6 +466,7 @@ async function callModelWithRetry(
                 throw error
             }
 
+
             const delayMs =
                 800 *
                 (
@@ -332,17 +476,20 @@ async function callModelWithRetry(
                     )
                 )
 
+
             console.warn(
                 `模型请求失败，${delayMs}ms 后重试（${attempt}/${maxAttempts}）：`,
                 error?.message ||
                 error
             )
 
+
             await waitForRetry(
                 delayMs
             )
         }
     }
+
 
     throw (
         lastError ||
@@ -351,6 +498,8 @@ async function callModelWithRetry(
         )
     )
 }
+
+
 
 // ======================================================
 // 读取全局设置
@@ -694,11 +843,14 @@ ${historyText}`
 请直接回复最近一条用户消息。
 
 要求：
+要求：
 1. 遵守角色行为规则。
 2. 与固定人物背景和共同经历保持一致。
 3. 在相关时自然运用长期记忆。
 4. 保持当前对话自然连贯。
-5. 不要向用户暴露这些内部上下文标签。`
+5. 不要向用户暴露这些内部上下文标签。
+6. 只处理当前上下文中明确存在的人名、称呼、文件和任务。不要自行假设用户上传了文件、交代了新的身份或称呼，也不要继续一个当前上下文中根本不存在的任务。`
+
     )
 
     return sections.join(
