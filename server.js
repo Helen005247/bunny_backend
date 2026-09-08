@@ -1496,36 +1496,13 @@ function shouldAnalyzeReminderIntent(
         /提醒|帮我记|记住|记得|叫我|别忘|别让我忘|日程/
 
 
+    // 当前这句话自己就明确要求提醒
     if (
         reminderPattern.test(
             text
         )
     ) {
         return true
-    }
-
-
-    // --------------------------------------------------
-    // 处理这种连续对话：
-    //
-    // 用户：明天提醒我拿快递
-    // 星星：几点？
-    // 用户：下午三点
-    //
-    // 第二句话虽然没有“提醒”，
-    // 但前面几条已经存在明确提醒意图。
-    // --------------------------------------------------
-
-    const timePattern =
-        /(?:今天|明天|后天|大后天|早上|上午|中午|下午|傍晚|晚上|凌晨|周[一二三四五六日天]|星期[一二三四五六日天]|[0-9一二两三四五六七八九十]{1,3}\s*(?:[:：点时]))/
-
-
-    if (
-        !timePattern.test(
-            text
-        )
-    ) {
-        return false
     }
 
 
@@ -1539,31 +1516,127 @@ function shouldAnalyzeReminderIntent(
                 -1
             )
             .slice(
-                -4
+                -6
             )
 
 
-    return previousMessages.some(
-        (
-            item
-        ) => {
+    // 最近几句话里是否存在明确的提醒请求
+    const hasRecentReminderRequest =
+        previousMessages.some(
+            (
+                item
+            ) => {
 
-            if (
-                item.role !==
-                'user'
-            ) {
-                return false
-            }
+                if (
+                    item.role !==
+                    'user'
+                ) {
+                    return false
+                }
 
 
-            return reminderPattern.test(
-                String(
-                    item.content ||
-                    ''
+                return reminderPattern.test(
+                    String(
+                        item.content ||
+                        ''
+                    )
                 )
-            )
 
-        }
+            }
+        )
+
+
+    if (
+        !hasRecentReminderRequest
+    ) {
+        return false
+    }
+
+
+    // --------------------------------------------------
+    // 情况 1：
+    //
+    // 用户：明天提醒我拿快递
+    // 星星：几点？
+    // 用户：下午三点
+    // --------------------------------------------------
+
+    const timePattern =
+        /(?:今天|今晚|明天|后天|大后天|早上|上午|中午|下午|傍晚|晚上|夜里|凌晨|周[一二三四五六日天]|星期[一二三四五六日天]|[0-9一二两三四五六七八九十]{1,3}\s*(?:[:：点时]))/
+
+
+    if (
+        timePattern.test(
+            text
+        )
+    ) {
+        return true
+    }
+
+
+    // --------------------------------------------------
+    // 情况 2：
+    //
+    // 用户：今晚六点十二分提醒我拿外卖
+    // 星星：确认是今晚六点十二分，对吗？
+    // 用户：对
+    //
+    // “对”本身没有时间，
+    // 但它是在确认前面的提醒。
+    // --------------------------------------------------
+
+    const compactText =
+        text
+            .replace(
+                /[\s，。！？!?、,.]/g,
+                ''
+            )
+            .toLowerCase()
+
+
+    const confirmationPattern =
+        /^(对|对的|对呀|对啊|是|是的|嗯|嗯嗯|嗯哼|好|好的|没错|没问题|可以|就这样|确认|ok|okay)$/i
+
+
+    if (
+        !confirmationPattern.test(
+            compactText
+        )
+    ) {
+        return false
+    }
+
+
+    // 最后一条旧消息最好是星星在确认提醒信息，
+    // 防止普通聊天中的“对”误触发提醒。
+    const previousMessage =
+        previousMessages[
+        previousMessages.length - 1
+        ]
+
+
+    if (
+        !previousMessage ||
+        previousMessage.role !==
+        'assistant'
+    ) {
+        return false
+    }
+
+
+    const assistantText =
+        String(
+            previousMessage.content ||
+            ''
+        )
+
+
+    const clarificationPattern =
+        /提醒|确认|对吗|是吗|几点|什么时候|具体时间|上午|下午|晚上|今晚|早上|中午|凌晨|今天|明天/
+
+
+    return clarificationPattern.test(
+        assistantText
     )
 }
 
@@ -1716,6 +1789,23 @@ action 只能是：
 2. 用户只是说“我明天下午三点要去医院”，但没有要求提醒，使用 none。
 
 3. 如果当前消息只是补充上一轮明确提醒请求缺少的时间，也可以使用 create。
+如果当前用户消息只是“对”“是的”“没错”“好”“确认”等简短确认，
+并且上一条助手消息正在确认一个明确的提醒时间，
+必须结合前面的用户提醒请求和这次确认来判断。
+
+例如：
+
+用户：今晚六点十二分提醒我下去拿外卖和水果
+助手：确认一下，是今天晚上六点十二分，对吗？
+用户：对
+
+这种情况应该输出 create。
+
+content = “下去拿外卖和水果”
+event_local = 今天的 18:12:00
+
+不要因为当前用户这一句只有“对”就输出 none。
+
 
 4. create 时 content 只写用户真正要做的事情，例如“去拿快递”，不要写“提醒我”。
 
