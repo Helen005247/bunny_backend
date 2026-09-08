@@ -6,6 +6,8 @@ const OpenAI = require('openai')
 const { createClient } = require('@supabase/supabase-js')
 const webpush = require('web-push')
 const crypto = require('crypto')
+const { DateTime } = require('luxon')
+
 
 
 const app = express()
@@ -1471,6 +1473,620 @@ function buildUserLocalTimeContext(
         `用户当前本地时间：${dateTimeText}`,
         `当前时间段：${getDayPart(hour)}`,
     ].join('\n')
+}
+
+
+// ======================================================
+// 提醒功能：判断是否值得调用提醒解析器
+// ======================================================
+
+function shouldAnalyzeReminderIntent(
+    cleanMessage,
+    recentMessages
+) {
+
+    const text =
+        typeof cleanMessage ===
+            'string'
+            ? cleanMessage.trim()
+            : ''
+
+
+    const reminderPattern =
+        /提醒|帮我记|记住|记得|叫我|别忘|别让我忘|日程/
+
+
+    if (
+        reminderPattern.test(
+            text
+        )
+    ) {
+        return true
+    }
+
+
+    // --------------------------------------------------
+    // 处理这种连续对话：
+    //
+    // 用户：明天提醒我拿快递
+    // 星星：几点？
+    // 用户：下午三点
+    //
+    // 第二句话虽然没有“提醒”，
+    // 但前面几条已经存在明确提醒意图。
+    // --------------------------------------------------
+
+    const timePattern =
+        /(?:今天|明天|后天|大后天|早上|上午|中午|下午|傍晚|晚上|凌晨|周[一二三四五六日天]|星期[一二三四五六日天]|[0-9一二两三四五六七八九十]{1,3}\s*(?:[:：点时]))/
+
+
+    if (
+        !timePattern.test(
+            text
+        )
+    ) {
+        return false
+    }
+
+
+    const previousMessages =
+        (
+            recentMessages ||
+            []
+        )
+            .slice(
+                0,
+                -1
+            )
+            .slice(
+                -4
+            )
+
+
+    return previousMessages.some(
+        (
+            item
+        ) => {
+
+            if (
+                item.role !==
+                'user'
+            ) {
+                return false
+            }
+
+
+            return reminderPattern.test(
+                String(
+                    item.content ||
+                    ''
+                )
+            )
+
+        }
+    )
+}
+
+
+// ======================================================
+// 从模型输出中取 JSON
+// ======================================================
+
+function parseReminderJson(
+    text
+) {
+
+    if (
+        typeof text !==
+        'string'
+    ) {
+        return null
+    }
+
+
+    const start =
+        text.indexOf(
+            '{'
+        )
+
+    const end =
+        text.lastIndexOf(
+            '}'
+        )
+
+
+    if (
+        start < 0 ||
+        end < start
+    ) {
+        return null
+    }
+
+
+    try {
+
+        return JSON.parse(
+            text.slice(
+                start,
+                end + 1
+            )
+        )
+
+    } catch (
+    error
+    ) {
+
+        return null
+
+    }
+}
+
+
+// ======================================================
+// 用模型理解自然语言提醒
+// ======================================================
+
+async function analyzeAndCreateReminder({
+    sessionId,
+    settings,
+    cleanMessage,
+    userMessageId,
+    recentMessages,
+}) {
+
+    const timeZone =
+        getValidTimeZone(
+            settings
+                ?.timezone
+        )
+
+
+    if (!timeZone) {
+
+        return {
+            status:
+                'clarify',
+
+            clarification:
+                '当前还没有可靠的用户时区，因此不能安全地确定提醒时间。',
+        }
+
+    }
+
+
+    const nowLocal =
+        DateTime
+            .now()
+            .setZone(
+                timeZone
+            )
+
+
+    const recentText =
+        messagesToText(
+            (
+                recentMessages ||
+                []
+            ).slice(
+                -8
+            )
+        )
+
+
+    const parserInput =
+        `你是 Hermit 的提醒意图解析器。
+
+你只负责判断用户是否明确要求创建“未来某个时间的提醒”，以及把时间解析成结构化数据。
+不要聊天，不要扮演角色。
+
+【用户时区】
+${timeZone}
+
+【用户当前本地时间】
+${nowLocal.toISO()}
+
+【最近聊天】
+${recentText || '无'}
+
+【当前用户消息】
+${cleanMessage}
+
+只允许输出一个 JSON 对象，不要输出 Markdown，不要解释。
+
+格式必须是：
+
+{
+  "action": "none",
+  "content": null,
+  "event_local": null,
+  "remind_before_minutes": 10,
+  "clarification": null
+}
+
+action 只能是：
+
+"none"
+"create"
+"clarify"
+
+规则：
+
+1. 只有用户明确要求“提醒我、帮我记一下并提醒、到时候叫我、别让我忘”等未来提醒时，才使用 create。
+
+2. 用户只是说“我明天下午三点要去医院”，但没有要求提醒，使用 none。
+
+3. 如果当前消息只是补充上一轮明确提醒请求缺少的时间，也可以使用 create。
+
+4. create 时 content 只写用户真正要做的事情，例如“去拿快递”，不要写“提醒我”。
+
+5. event_local 必须转换成用户时区下的完整本地时间，格式严格为：
+YYYY-MM-DDTHH:mm:ss
+
+6. 不要在 event_local 中加入 Z 或时区偏移。
+
+7. 如果用户没有说明提前多久，默认 remind_before_minutes = 10。
+
+8. 如果用户说“到点提醒”“到时候提醒”，而明显表示事情发生时再提醒，则 remind_before_minutes = 0。
+
+9. “提前一点”但没有具体分钟数时，使用默认 10 分钟。
+
+10. 如果日期或具体时间不足以唯一确定，使用 clarify。
+
+11. 像“明天三点”这种无法确定上午还是下午的表达，不要猜，使用 clarify。
+
+12. clarification 只简短说明还缺什么，例如“需要确认是上午三点还是下午三点”。
+
+13. 不能编造用户没有说过的日程。
+
+14. 解析出的事件时间必须在当前时间之后。`
+
+
+    const response =
+        await callModelWithRetry({
+
+            model:
+                'gpt-5.6-sol',
+
+            input:
+                parserInput,
+
+        })
+
+
+    const parsed =
+        parseReminderJson(
+            response
+                ?.output_text
+        )
+
+
+    if (!parsed) {
+
+        throw new Error(
+            '提醒解析器没有返回有效 JSON'
+        )
+
+    }
+
+
+    const action =
+        typeof parsed.action ===
+            'string'
+            ? parsed.action
+                .trim()
+                .toLowerCase()
+            : 'none'
+
+
+    if (
+        action ===
+        'none'
+    ) {
+
+        return {
+            status:
+                'none',
+        }
+
+    }
+
+
+    if (
+        action ===
+        'clarify'
+    ) {
+
+        return {
+
+            status:
+                'clarify',
+
+            clarification:
+                typeof parsed
+                    .clarification ===
+                    'string' &&
+                    parsed
+                        .clarification
+                        .trim()
+                    ? parsed
+                        .clarification
+                        .trim()
+                    : '还缺少一个明确的提醒时间。',
+
+        }
+
+    }
+
+
+    if (
+        action !==
+        'create'
+    ) {
+
+        return {
+            status:
+                'none',
+        }
+
+    }
+
+
+    const content =
+        typeof parsed.content ===
+            'string'
+            ? parsed.content
+                .trim()
+            : ''
+
+
+    const eventLocalText =
+        typeof parsed
+            .event_local ===
+            'string'
+            ? parsed
+                .event_local
+                .trim()
+            : ''
+
+
+    if (
+        !content ||
+        !eventLocalText
+    ) {
+
+        return {
+
+            status:
+                'clarify',
+
+            clarification:
+                '还缺少明确的事情内容或具体时间。',
+
+        }
+
+    }
+
+
+    const eventLocal =
+        DateTime.fromISO(
+            eventLocalText,
+            {
+                zone:
+                    timeZone,
+            }
+        )
+
+
+    if (
+        !eventLocal.isValid
+    ) {
+
+        return {
+
+            status:
+                'clarify',
+
+            clarification:
+                '这个时间没有解析成功，请重新确认具体日期和时间。',
+
+        }
+
+    }
+
+
+    if (
+        eventLocal.toMillis() <=
+        nowLocal.toMillis()
+    ) {
+
+        return {
+
+            status:
+                'clarify',
+
+            clarification:
+                '这个时间已经过去了，需要重新确认一个未来的时间。',
+
+        }
+
+    }
+
+
+    const beforeRaw =
+        Number(
+            parsed
+                .remind_before_minutes
+        )
+
+
+    const remindBeforeMinutes =
+        Number.isFinite(
+            beforeRaw
+        ) &&
+            beforeRaw >= 0
+            ? Math.min(
+                10080,
+                Math.round(
+                    beforeRaw
+                )
+            )
+            : 10
+
+
+    const plannedRemindLocal =
+        eventLocal.minus({
+            minutes:
+                remindBeforeMinutes,
+        })
+
+
+    // 如果事情已经很近，
+    // “提前十分钟”已经来不及，
+    // 那么提醒时间就设成现在。
+    const remindLocal =
+        plannedRemindLocal.toMillis() <
+            nowLocal.toMillis()
+            ? nowLocal
+            : plannedRemindLocal
+
+
+    const {
+        data:
+        reminder,
+
+        error:
+        reminderError,
+    } =
+        await supabase
+            .from(
+                'reminders'
+            )
+            .insert([
+                {
+
+                    session_id:
+                        sessionId,
+
+                    source_message_id:
+                        userMessageId,
+
+                    content,
+
+                    event_at:
+                        eventLocal
+                            .toUTC()
+                            .toISO(),
+
+                    remind_at:
+                        remindLocal
+                            .toUTC()
+                            .toISO(),
+
+                    timezone:
+                        timeZone,
+
+                    status:
+                        'pending',
+
+                    remind_before_minutes:
+                        remindBeforeMinutes,
+
+                    metadata: {
+
+                        created_via:
+                            'chat',
+
+                        event_local:
+                            eventLocalText,
+
+                    },
+
+                },
+            ])
+            .select(
+                'id, session_id, source_message_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, metadata'
+            )
+            .single()
+
+
+    if (
+        reminderError
+    ) {
+        throw reminderError
+    }
+
+
+    return {
+
+        status:
+            'created',
+
+        reminder,
+
+        eventLocalText:
+            eventLocal.toFormat(
+                'yyyy-LL-dd HH:mm'
+            ),
+
+    }
+}
+
+
+// ======================================================
+// 告诉“正常聊天模型”提醒到底有没有创建成功
+// ======================================================
+
+function buildReminderReplyContext(
+    reminderResult
+) {
+
+    if (
+        reminderResult
+            ?.status ===
+        'created'
+    ) {
+
+        const reminder =
+            reminderResult
+                .reminder
+
+
+        return `【本次提醒操作结果】
+
+提醒已经真正保存成功。
+
+提醒内容：${reminder.content}
+事件时间（用户本地）：${reminderResult.eventLocalText}
+提前提醒：${reminder.remind_before_minutes} 分钟
+
+请以沈星回的身份自然确认这件事。
+不要提数据库、API、系统、解析器等内部机制。
+不要再次询问已经明确的信息。
+不要声称做了其他并不存在的操作。`
+
+    }
+
+
+    if (
+        reminderResult
+            ?.status ===
+        'clarify'
+    ) {
+
+        return `【本次提醒操作结果】
+
+用户有设置提醒的意图，但当前还没有成功创建提醒。
+
+原因：
+${reminderResult.clarification}
+
+这次回复请自然地追问缺失的信息。
+不要说“已经记住了”“已经设置好了”或其他暗示提醒已经创建成功的话。`
+
+    }
+
+
+    return ''
 }
 
 
@@ -4174,11 +4790,82 @@ app.post(
                 await getGlobalSettings()
 
 
+            // ==================================================
+            // 检查当前消息是否包含提醒请求
+            // ==================================================
+
+            const reminderRecentMessages =
+                await getRecentVisibleMessages(
+                    sessionId,
+                    settings
+                )
+
+
+            let reminderResult = {
+                status:
+                    'none',
+            }
+
+
+            if (
+                shouldAnalyzeReminderIntent(
+                    cleanMessage,
+                    reminderRecentMessages
+                )
+            ) {
+
+                try {
+
+                    reminderResult =
+                        await analyzeAndCreateReminder({
+
+                            sessionId,
+
+                            settings,
+
+                            cleanMessage,
+
+                            userMessageId:
+                                userMessage.id,
+
+                            recentMessages:
+                                reminderRecentMessages,
+
+                        })
+
+                } catch (
+                reminderError
+                ) {
+
+                    console.error(
+                        '提醒识别或保存失败：',
+                        reminderError
+                    )
+
+
+                    // 很重要：
+                    // 失败时绝对不能让模型假装“提醒已经设置成功”
+                    reminderResult = {
+
+                        status:
+                            'clarify',
+
+                        clarification:
+                            '这次提醒没有成功保存，请让用户重新确认一次具体时间。',
+
+                    }
+
+                }
+
+            }
+
+
             const compression =
                 await compressMemoryIfNeeded(
                     sessionId,
                     settings
                 )
+
 
 
             const latestMemory =
@@ -4202,7 +4889,7 @@ app.post(
                 )
 
 
-            const modelInput =
+            const baseModelInput =
                 buildModelContext({
 
                     settings,
@@ -4213,6 +4900,20 @@ app.post(
                         history,
 
                 })
+
+
+            const reminderReplyContext =
+                buildReminderReplyContext(
+                    reminderResult
+                )
+
+
+            const modelInput =
+                reminderReplyContext
+                    ? `${baseModelInput}
+
+${reminderReplyContext}`
+                    : baseModelInput
 
 
             const finalEstimatedTokens =
@@ -4347,6 +5048,15 @@ app.post(
 
                     assistant_message:
                         assistantMessage,
+
+                    reminder:
+                        reminderResult
+                            .status ===
+                            'created'
+                            ? reminderResult
+                                .reminder
+                            : null,
+
 
                 })
 
