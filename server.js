@@ -682,6 +682,9 @@ async function getGlobalSettings(
         compress_threshold,
         compress_keep_rounds,
         max_reply_tokens,
+        hermit_avatar_url,
+        user_avatar_url,
+        background_url,
         updated_at
     `
 
@@ -5093,6 +5096,9 @@ app.patch(
                 compress_threshold,
                 compress_keep_rounds,
                 max_reply_tokens,
+                hermit_avatar_url,
+                user_avatar_url,
+                background_url,
                 updated_at
             `)
 
