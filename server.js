@@ -5756,25 +5756,47 @@ app.post(
 
 
             // ==================================================
-            // 找最近使用的会话
+            // 找用户最近真正聊天过的会话
+            //
+            // 不再依赖 sessions.updated_at。
+            // 因为重命名、测试或其他操作可能会修改 updated_at，
+            // 导致旧测试会话被误认为最近会话。
+            //
+            // 直接找到最新一条真实用户消息，
+            // 它所在的 session 才是最近实际聊天的 session。
             // ==================================================
 
             const {
                 data:
-                recentSessions,
+                latestUserMessages,
 
                 error:
-                sessionsError,
+                latestUserMessageError,
             } =
                 await supabase
                     .from(
-                        'sessions'
+                        'messages'
                     )
                     .select(
-                        'id, name, created_at, updated_at'
+                        'id, session_id, created_at'
+                    )
+                    .eq(
+                        'role',
+                        'user'
+                    )
+                    .eq(
+                        'visible',
+                        true
                     )
                     .order(
-                        'updated_at',
+                        'created_at',
+                        {
+                            ascending:
+                                false,
+                        }
+                    )
+                    .order(
+                        'id',
                         {
                             ascending:
                                 false,
@@ -5784,15 +5806,15 @@ app.post(
 
 
             if (
-                sessionsError
+                latestUserMessageError
             ) {
-                throw sessionsError
+                throw latestUserMessageError
             }
 
 
             if (
-                !recentSessions ||
-                recentSessions
+                !latestUserMessages ||
+                latestUserMessages
                     .length === 0
             ) {
 
@@ -5807,7 +5829,7 @@ app.post(
                             false,
 
                         reason:
-                            'no_session',
+                            'no_user_messages',
 
                     })
 
@@ -5815,8 +5837,8 @@ app.post(
 
 
             const sessionId =
-                recentSessions[0]
-                    .id
+                latestUserMessages[0]
+                    .session_id
 
 
             // ==================================================
