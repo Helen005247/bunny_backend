@@ -18,12 +18,23 @@ app.use(express.json({ limit: '1mb' }))
 
 const AI_REQUEST_TIMEOUT_MS =
     Math.min(
-        120000,
+        60000,
         Math.max(
-            15000,
+            12000,
             Number(
                 process.env.AI_REQUEST_TIMEOUT_MS
-            ) || 45000
+            ) || 25000
+        )
+    )
+
+const AI_BACKGROUND_TIMEOUT_MS =
+    Math.min(
+        45000,
+        Math.max(
+            8000,
+            Number(
+                process.env.AI_BACKGROUND_TIMEOUT_MS
+            ) || 18000
         )
     )
 
@@ -31,13 +42,22 @@ const client = new OpenAI({
     apiKey: process.env.AI_API_KEY,
     baseURL: process.env.AI_BASE_URL,
 
-    // 第三方兼容线路繁忙时，SDK 自己重试会把一次请求拖成几分钟。
-    // 这里关闭 SDK 隐藏重试，统一交给下面的 callModelWithRetry 控制。
+    // 交互请求只由 Hermit 自己控制重试，避免 SDK 隐藏重试把一次请求拖成几分钟。
     maxRetries: 0,
 
-    // 默认 45 秒。Render 无需新增环境变量；
-    // 如果以后确实要调整，可选配置 AI_REQUEST_TIMEOUT_MS。
+    // 普通聊天单次默认最多 25 秒。
     timeout: AI_REQUEST_TIMEOUT_MS,
+})
+
+const backgroundClient = new OpenAI({
+    apiKey: process.env.AI_API_KEY,
+    baseURL: process.env.AI_BASE_URL,
+
+    // 后台任务同样禁止 SDK 隐藏重试。
+    maxRetries: 0,
+
+    // 后台任务更短；失败后等下一次空闲机会，不和用户聊天抢线路。
+    timeout: AI_BACKGROUND_TIMEOUT_MS,
 })
 // ======================================================
 // Web Push / VAPID
@@ -334,6 +354,261 @@ app.use(
 
 
 // ======================================================
+// 模型请求调度器
+//
+// 同一时间只放 1 个真正的上游模型请求出去，避免 Hermit 自己并发抢同一条 Aizex 线路。
+// 优先级：
+// 1. 用户正在等待的聊天 / 提醒解析
+// 2. 到点提醒
+// 3. 主动消息
+// 4. 长期记忆压缩
+//
+// 已经开始的后台请求不会强行中断，但后台请求本身有更短的超时；
+// 新进入队列的聊天会排在所有尚未开始的后台任务前面。
+// ======================================================
+
+const MODEL_TASK_PRIORITY = {
+    chat: 0,
+    reminder: 1,
+    proactive: 2,
+    memory: 3,
+}
+
+const modelRequestQueue = []
+
+let modelRequestRunning =
+    false
+
+let activeModelTaskType =
+    null
+
+let modelRequestSequence =
+    0
+
+
+function normalizeModelTaskType(
+    value
+) {
+
+    return Object.prototype
+        .hasOwnProperty
+        .call(
+            MODEL_TASK_PRIORITY,
+            value
+        )
+        ? value
+        : 'chat'
+}
+
+
+function getModelTaskPriority(
+    taskType
+) {
+
+    return MODEL_TASK_PRIORITY[
+        normalizeModelTaskType(
+            taskType
+        )
+    ]
+}
+
+
+function hasPendingInteractiveModelWork() {
+
+    if (
+        activeModelTaskType ===
+        'chat'
+    ) {
+        return true
+    }
+
+
+    return modelRequestQueue
+        .some(
+            (item) =>
+                item.taskType ===
+                'chat'
+        )
+}
+
+
+async function drainModelRequestQueue() {
+
+    if (
+        modelRequestRunning
+    ) {
+        return
+    }
+
+
+    modelRequestRunning =
+        true
+
+
+    try {
+
+        while (
+            modelRequestQueue
+                .length >
+            0
+        ) {
+
+            modelRequestQueue
+                .sort(
+                    (
+                        left,
+                        right
+                    ) => {
+
+                        const priorityDiff =
+                            getModelTaskPriority(
+                                left.taskType
+                            ) -
+                            getModelTaskPriority(
+                                right.taskType
+                            )
+
+                        if (
+                            priorityDiff !==
+                            0
+                        ) {
+                            return priorityDiff
+                        }
+
+
+                        return (
+                            left.sequence -
+                            right.sequence
+                        )
+                    }
+                )
+
+
+            const item =
+                modelRequestQueue
+                    .shift()
+
+
+            if (!item) {
+                continue
+            }
+
+
+            const waitedMs =
+                Date.now() -
+                item.queuedAt
+
+
+            if (
+                waitedMs >=
+                1000
+            ) {
+
+                console.log(
+                    `模型任务等待队列 ${waitedMs}ms 后开始：${item.taskType}`
+                )
+            }
+
+
+            activeModelTaskType =
+                item.taskType
+
+
+            try {
+
+                const result =
+                    await item.run()
+
+                item.resolve(
+                    result
+                )
+
+
+            } catch (error) {
+
+                item.reject(
+                    error
+                )
+
+
+            } finally {
+
+                activeModelTaskType =
+                    null
+            }
+        }
+
+
+    } finally {
+
+        modelRequestRunning =
+            false
+
+
+        // 极小概率下，如果 finally 前后恰好又入队，继续排空。
+        if (
+            modelRequestQueue
+                .length >
+            0
+        ) {
+
+            setImmediate(
+                () => {
+                    drainModelRequestQueue()
+                }
+            )
+        }
+    }
+}
+
+
+function enqueueModelRequest(
+    taskType,
+    run
+) {
+
+    const normalizedTaskType =
+        normalizeModelTaskType(
+            taskType
+        )
+
+
+    return new Promise(
+        (
+            resolve,
+            reject
+        ) => {
+
+            modelRequestSequence +=
+                1
+
+
+            modelRequestQueue
+                .push({
+                    taskType:
+                        normalizedTaskType,
+
+                    sequence:
+                        modelRequestSequence,
+
+                    queuedAt:
+                        Date.now(),
+
+                    run,
+
+                    resolve,
+
+                    reject,
+                })
+
+
+            drainModelRequestQueue()
+        }
+    )
+}
+
+
+// ======================================================
 // 模型请求自动重试
 // ======================================================
 
@@ -420,6 +695,18 @@ function isRetryableModelError(error) {
         return true
     }
 
+
+    // OpenAI SDK 的 APIConnectionTimeoutError 在部分版本里
+    // status / code 都可能是 undefined，只能从 name / message 判断。
+    if (
+        isModelTimeoutError(
+            error
+        )
+    ) {
+        return true
+    }
+
+
     const status =
         getModelErrorStatus(
             error
@@ -469,21 +756,33 @@ function isRetryableModelError(error) {
 
 async function callModelWithRetry(
     request,
-    maxAttempts = 2
+    maxAttempts = 2,
+    taskType = 'chat'
 ) {
 
     let lastError =
         null
 
+    const normalizedTaskType =
+        normalizeModelTaskType(
+            taskType
+        )
+
+    const isInteractiveTask =
+        normalizedTaskType ===
+        'chat'
+
+    const requestClient =
+        isInteractiveTask
+            ? client
+            : backgroundClient
+
+
     // ==================================================
-    // 保留原来的请求指纹，但改成“软校验”
+    // 保留请求指纹，但继续使用“软校验”。
     //
-    // Aizex / 第三方兼容线路没有回显标记时：
-    // - 记录 warning
-    // - 接受正常正文
-    // - 不再因为缺少 HERMIT_OK 自动重试
-    //
-    // 这样不会再把一个正常回答放大成多轮长等待。
+    // 上游没有回显 HERMIT_OK 时只记录 warning，
+    // 不会因为这个重新请求模型。
     // ==================================================
 
     const originalInput =
@@ -535,9 +834,23 @@ ${integrityMarker}
             : request
 
 
+    const safeMaxAttempts =
+        isInteractiveTask
+            ? Math.max(
+                1,
+                Math.min(
+                    2,
+                    Number(
+                        maxAttempts
+                    ) || 1
+                )
+            )
+            : 1
+
+
     for (
         let attempt = 1;
-        attempt <= maxAttempts;
+        attempt <= safeMaxAttempts;
         attempt += 1
     ) {
 
@@ -547,11 +860,15 @@ ${integrityMarker}
         try {
 
             const response =
-                await client
-                    .responses
-                    .create(
-                        guardedRequest
-                    )
+                await enqueueModelRequest(
+                    normalizedTaskType,
+                    () =>
+                        requestClient
+                            .responses
+                            .create(
+                                guardedRequest
+                            )
+                )
 
             const outputText =
                 typeof response
@@ -576,11 +893,6 @@ ${integrityMarker}
             }
 
 
-            // ------------------------------------------
-            // HERMIT_OK 改为软校验：
-            // 没有回显时只记录日志，不把正常回答判死。
-            // ------------------------------------------
-
             if (
                 integrityMarker &&
                 !outputText.includes(
@@ -594,7 +906,6 @@ ${integrityMarker}
             }
 
 
-            // 如果有标记则删除；没有标记就原样使用正文。
             const cleanedOutputText =
                 integrityMarker
                     ? outputText
@@ -606,6 +917,7 @@ ${integrityMarker}
                         )
                         .trim()
                     : outputText
+
 
             if (
                 !cleanedOutputText
@@ -627,13 +939,14 @@ ${integrityMarker}
                 Date.now() -
                 attemptStartedAt
 
+
             if (
                 elapsedMs >=
                 10000
             ) {
 
                 console.log(
-                    `模型请求成功，耗时 ${elapsedMs}ms（第 ${attempt} 次尝试）`
+                    `模型请求成功，耗时 ${elapsedMs}ms（${normalizedTaskType}，第 ${attempt} 次尝试）`
                 )
             }
 
@@ -651,76 +964,61 @@ ${integrityMarker}
             lastError =
                 error
 
+
             const elapsedMs =
                 Date.now() -
                 attemptStartedAt
-
-
-            // ------------------------------------------
-            // 超时后不再从头等第二遍。
-            // SDK 内部重试已经关闭，所以单次最长由
-            // AI_REQUEST_TIMEOUT_MS 控制（默认 45 秒）。
-            // ------------------------------------------
-
-            if (
-                isModelTimeoutError(
-                    error
-                )
-            ) {
-
-                console.warn(
-                    `模型请求超时，已等待 ${elapsedMs}ms；为避免拖成几分钟，本轮不再重试：`,
-                    error?.message ||
-                    error
-                )
-
-                throw error
-            }
-
 
             const canRetry =
                 isRetryableModelError(
                     error
                 )
 
-
-            // 如果一个 503 / 5xx 本身已经让我们等了很久，
-            // 再从头请求一次通常只会继续拖慢。
-            // 只有 8 秒内“快速失败”的临时错误才值得重试一次。
-            const failedQuickly =
-                elapsedMs <
-                8000
+            const isTimeout =
+                isModelTimeoutError(
+                    error
+                )
 
 
             if (
                 !canRetry ||
                 attempt >=
-                maxAttempts ||
-                !failedQuickly
+                safeMaxAttempts
             ) {
 
-                if (
-                    canRetry &&
-                    !failedQuickly
-                ) {
+                if (isTimeout) {
 
                     console.warn(
-                        `模型请求在 ${elapsedMs}ms 后失败；为避免继续拖延，本轮不再重试：`,
+                        `模型请求超时，已等待 ${elapsedMs}ms（${normalizedTaskType}）；本轮停止：`,
+                        error?.message ||
+                        error
+                    )
+
+                } else {
+
+                    console.warn(
+                        `模型请求失败（${normalizedTaskType}，${elapsedMs}ms）：`,
                         error?.message ||
                         error
                     )
                 }
 
+
                 throw error
             }
 
 
+            // 交互请求只再给一次机会。
+            // 单次默认最多 25 秒，SDK 隐藏重试已经关闭，
+            // 所以最坏也不会重新膨胀成几分钟。
             const delayMs =
-                800
+                isTimeout
+                    ? 1200
+                    : 800
 
 
             console.warn(
-                `模型请求快速失败，${delayMs}ms 后只重试一次（${attempt}/${maxAttempts}）：`,
+                `模型请求临时失败，${delayMs}ms 后最后重试一次（${normalizedTaskType}，${attempt}/${safeMaxAttempts}）：`,
                 error?.message ||
                 error
             )
@@ -1969,7 +2267,7 @@ ${oldConversationText}
             input:
                 compressionInput,
 
-        }, 1)
+        }, 1, 'memory')
 
 
     const newSummary =
@@ -2143,7 +2441,7 @@ ${oldConversationText}
 // ======================================================
 
 const MEMORY_COMPRESSION_IDLE_DELAY_MS =
-    30 * 1000
+    60 * 1000
 
 const memoryCompressionTimers =
     new Map()
@@ -2201,6 +2499,21 @@ function scheduleMemoryCompression(
                             key
                         )
                 ) {
+
+                    return
+                }
+
+
+                // 用户还有交互模型任务在进行或排队时，长期记忆继续让路。
+                if (
+                    hasPendingInteractiveModelWork()
+                ) {
+
+                    scheduleMemoryCompression(
+                        sessionId,
+                        settings,
+                        userId
+                    )
 
                     return
                 }
@@ -2830,7 +3143,7 @@ YYYY-MM-DDTHH:mm:ss
             input:
                 parserInput,
 
-        })
+        }, 1, 'chat')
 
 
     const parsed =
@@ -3796,7 +4109,7 @@ async function generateAndSaveProactiveMessage(
             input:
                 proactiveInput,
 
-        })
+        }, 1, 'proactive')
 
 
     const reply =
@@ -4029,7 +4342,7 @@ ${recentText || '无'}
 
             input:
                 reminderInput,
-        })
+        }, 1, 'reminder')
 
     const reply =
         typeof response?.output_text ===
@@ -6602,7 +6915,7 @@ ${reminderReplyContext}`
                     input:
                         modelInput,
 
-                })
+                }, 2, 'chat')
 
             const reply =
                 typeof response
