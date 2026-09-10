@@ -826,6 +826,463 @@ async function getLatestMemory(
 
 
 // ======================================================
+// 原作素材库：动态挑选少量 character_lore
+//
+// 普通聊天：最多 1 条高权重语感样本 + 1 条相关行为模式
+// 剧情相关：在上面的基础上，最多再加入 2 条相关 lore
+// 数据库读取失败时自动降级，不阻断聊天。
+// ======================================================
+
+const CHARACTER_LORE_CACHE_TTL_MS = 2 * 60 * 1000
+const characterLoreCache = new Map()
+
+function normalizeLoreText(value) {
+    return String(value ?? '')
+        .toLowerCase()
+        .replace(/\s+/g, '')
+}
+
+function clipLoreText(value, maxLength) {
+    const text = typeof value === 'string' ? value.trim() : ''
+
+    if (!text || text.length <= maxLength) {
+        return text
+    }
+
+    return `${text.slice(0, Math.max(1, maxLength - 1))}…`
+}
+
+function expandLoreConceptTerms(value) {
+    const text = String(value ?? '')
+    const terms = new Set()
+
+    const rules = [
+        {
+            pattern: /吃|饭|饿|早餐|午餐|晚餐|夜宵|火锅|炸鸡|外卖|甜品|零食|做饭|餐厅|食物/,
+            terms: ['食物', '吃饭', '生活', '日常'],
+        },
+        {
+            pattern: /吃醋|嫉妒|醋意|前任|别人|比较|更喜欢|选谁|占有欲/,
+            terms: ['吃醋', '占有欲', '偏爱', '特殊'],
+        },
+        {
+            pattern: /家里|父母|妈妈|爸爸|逼我|强迫|必须|命令|不想|选择|决定|愿意|自由|想不想/,
+            terms: ['自主选择', '尊重', '自由', '选择', '命令', '意愿'],
+        },
+        {
+            pattern: /回家|到家|回来了|同居|靠一会|抱抱|拥抱|想你|陪我|陪着/,
+            terms: ['回家', '同居', '自然亲密', '依赖', '长期伴侣'],
+        },
+        {
+            pattern: /维修|修理|坏了|扳手|工具|保养|修东西/,
+            terms: ['维修', '搭档', '偏爱', '日常'],
+        },
+        {
+            pattern: /烟花|邻居|最特殊|普通邻居|特殊位置/,
+            terms: ['烟花', '亲密', '占有欲', '特殊', '恋爱'],
+        },
+        {
+            pattern: /离开|分别|带我走|跟你走|同行|等我|等你|时空|星球/,
+            terms: ['分别', '同行', '耐心', '选择', '信任', '时空', '星球'],
+        },
+    ]
+
+    for (const rule of rules) {
+        if (!rule.pattern.test(text)) {
+            continue
+        }
+
+        for (const term of rule.terms) {
+            terms.add(normalizeLoreText(term))
+        }
+    }
+
+    return [...terms]
+}
+
+function extractLoreTerms(value) {
+    const source = String(value ?? '').toLowerCase()
+    const terms = new Set(expandLoreConceptTerms(source))
+
+    const ignored = new Set([
+        '我们', '你们', '他们', '她们', '这个', '那个',
+        '这些', '那些', '什么', '怎么', '可以', '还是',
+        '已经', '就是', '真的', '觉得', '一下', '现在',
+        '今天', '然后', '因为', '所以', '但是', '如果',
+        '一个', '一点', '时候', '自己',
+    ])
+
+    for (const word of source.match(/[a-z0-9_-]{3,}/g) || []) {
+        terms.add(word)
+    }
+
+    for (const chunk of source.match(/[\u4e00-\u9fff]{2,}/g) || []) {
+        const clean = normalizeLoreText(chunk)
+
+        if (clean.length >= 2 && clean.length <= 8 && !ignored.has(clean)) {
+            terms.add(clean)
+        }
+
+        for (const size of [2, 3, 4]) {
+            for (let index = 0; index <= clean.length - size; index += 1) {
+                const term = clean.slice(index, index + size)
+
+                if (!ignored.has(term)) {
+                    terms.add(term)
+                }
+
+                if (terms.size >= 80) {
+                    return [...terms]
+                }
+            }
+        }
+    }
+
+    return [...terms]
+}
+
+function getLoreFields(item) {
+    return {
+        title: normalizeLoreText(item?.title),
+        source: normalizeLoreText(item?.source),
+        timeline: normalizeLoreText(item?.timeline),
+        scene: normalizeLoreText(item?.scene),
+        tags: Array.isArray(item?.tags)
+            ? item.tags.map((tag) => normalizeLoreText(tag))
+            : [],
+        summary: normalizeLoreText(item?.summary),
+        content: normalizeLoreText(item?.content),
+    }
+}
+
+function scoreLoreItem(item, terms, multiplier = 1) {
+    if (!Array.isArray(terms) || terms.length === 0) {
+        return 0
+    }
+
+    const fields = getLoreFields(item)
+    let score = 0
+
+    for (const rawTerm of terms.slice(0, 80)) {
+        const term = normalizeLoreText(rawTerm)
+
+        if (!term || term.length < 2) {
+            continue
+        }
+
+        let best = 0
+
+        if (fields.source === term || fields.source.includes(term)) {
+            best = Math.max(best, 7)
+        }
+
+        if (fields.title.includes(term)) {
+            best = Math.max(best, 6)
+        }
+
+        if (
+            fields.tags.some(
+                (tag) =>
+                    tag === term ||
+                    tag.includes(term) ||
+                    (term.length >= 3 && term.includes(tag))
+            )
+        ) {
+            best = Math.max(best, 8)
+        }
+
+        if (fields.timeline.includes(term)) {
+            best = Math.max(best, 5)
+        }
+
+        if (fields.scene.includes(term)) {
+            best = Math.max(best, 4)
+        }
+
+        if (fields.summary.includes(term)) {
+            best = Math.max(best, 3)
+        }
+
+        if (fields.content.includes(term)) {
+            best = Math.max(best, 2)
+        }
+
+        score += best * multiplier
+    }
+
+    return score
+}
+
+function neutralVoiceScore(item) {
+    if (item?.type !== 'voice_sample') {
+        return -Infinity
+    }
+
+    const fields = getLoreFields(item)
+    let score = Number(item.priority) || 0
+
+    for (const hint of ['日常', '自然', '偏爱', '长期', '生活', '搭档', '亲密']) {
+        const normalizedHint = normalizeLoreText(hint)
+
+        if (
+            fields.tags.some((tag) => tag.includes(normalizedHint)) ||
+            fields.summary.includes(normalizedHint)
+        ) {
+            score += 1.5
+        }
+    }
+
+    for (const hint of ['吃醋', '嫉妒', '占有欲', '愤怒', '争吵']) {
+        const normalizedHint = normalizeLoreText(hint)
+
+        if (
+            fields.tags.some((tag) => tag.includes(normalizedHint)) ||
+            fields.summary.includes(normalizedHint)
+        ) {
+            score -= 4
+        }
+    }
+
+    if (item?.metadata && typeof item.metadata === 'object' && item.metadata.emotion) {
+        score -= 3
+    }
+
+    return score
+}
+
+async function getActiveCharacterLore(userId) {
+    if (!userId || !supabase) {
+        return []
+    }
+
+    const cached = characterLoreCache.get(userId)
+    const now = Date.now()
+
+    if (cached && now - cached.loadedAt < CHARACTER_LORE_CACHE_TTL_MS) {
+        return cached.rows
+    }
+
+    const { data, error } = await supabase
+        .from('character_lore')
+        .select(
+            'id, user_id, character_name, title, source, timeline, scene, type, tags, summary, content, priority, active, metadata, updated_at'
+        )
+        .eq('user_id', userId)
+        .eq('active', true)
+        .order('priority', { ascending: false })
+        .limit(200)
+
+    if (error) {
+        throw error
+    }
+
+    const rows = Array.isArray(data) ? data : []
+
+    characterLoreCache.set(userId, {
+        loadedAt: now,
+        rows,
+    })
+
+    if (characterLoreCache.size > 100) {
+        const oldestKey = characterLoreCache.keys().next().value
+
+        if (oldestKey) {
+            characterLoreCache.delete(oldestKey)
+        }
+    }
+
+    return rows
+}
+
+function formatCharacterLoreItem(item) {
+    const typeLabel =
+        item.type === 'voice_sample'
+            ? '语感样本'
+            : item.type === 'behavior'
+                ? '行为模式'
+                : '剧情事实'
+
+    const lines = [
+        `【${typeLabel}｜${item.title}】`,
+        `来源：${item.source}`,
+    ]
+
+    if (item.scene) {
+        lines.push(`场景：${item.scene}`)
+    }
+
+    if (Array.isArray(item.tags) && item.tags.length > 0) {
+        lines.push(`标签：${item.tags.slice(0, 8).join('、')}`)
+    }
+
+    const summary = clipLoreText(item.summary, 280)
+    const content = clipLoreText(
+        item.content,
+        item.type === 'lore' ? 560 : 420
+    )
+
+    if (summary) {
+        lines.push(`提炼：${summary}`)
+    }
+
+    if (content) {
+        lines.push(`参考：${content}`)
+    }
+
+    return lines.join('\n')
+}
+
+async function getCharacterLoreContext({
+    userId,
+    currentMessage = '',
+    recentMessages = [],
+}) {
+    let rows = []
+
+    try {
+        rows = await getActiveCharacterLore(userId)
+    } catch (error) {
+        console.warn(
+            '读取 character_lore 失败，本轮继续使用基础上下文：',
+            error?.message || error
+        )
+
+        return {
+            context: '',
+            selected: [],
+        }
+    }
+
+    if (rows.length === 0) {
+        return {
+            context: '',
+            selected: [],
+        }
+    }
+
+    const recentText = (recentMessages || [])
+        .slice(-8)
+        .map((item) => String(item?.content || ''))
+        .join('\n')
+
+    const currentTerms = extractLoreTerms(currentMessage)
+    const recentTerms = extractLoreTerms(recentText)
+
+    const storyIntent =
+        /剧情|设定|原作|以前|过去|曾经|当时|那次|那时候|经历|身份|世界观|时间线|为什么会|发生过|还记得|记不记得|王储|女王|师门|师兄|光猎|菲罗斯|异星|时空/
+            .test(`${currentMessage}\n${recentText}`)
+
+    const scored = rows
+        .map((item) => {
+            const relevance =
+                scoreLoreItem(item, currentTerms, 1) +
+                scoreLoreItem(item, recentTerms, 0.35)
+
+            return {
+                item,
+                relevance,
+                rank: relevance + (Number(item.priority) || 0) * 0.18,
+            }
+        })
+        .sort((left, right) => right.rank - left.rank)
+
+    const selected = []
+    const selectedIds = new Set()
+
+    const addItem = (item) => {
+        if (!item || selectedIds.has(item.id)) {
+            return
+        }
+
+        selectedIds.add(item.id)
+        selected.push(item)
+    }
+
+    const relatedVoice = scored.find(
+        (entry) =>
+            entry.item.type === 'voice_sample' &&
+            entry.relevance >= 4
+    )
+
+    if (relatedVoice) {
+        addItem(relatedVoice.item)
+    } else {
+        const neutralVoice = rows
+            .filter((item) => item.type === 'voice_sample')
+            .sort((left, right) => neutralVoiceScore(right) - neutralVoiceScore(left))[0]
+
+        addItem(neutralVoice)
+    }
+
+    const relatedBehavior = scored.find(
+        (entry) =>
+            entry.item.type === 'behavior' &&
+            entry.relevance >= 6
+    )
+
+    if (relatedBehavior) {
+        addItem(relatedBehavior.item)
+    }
+
+    const relatedLore = scored
+        .filter(
+            (entry) =>
+                entry.item.type === 'lore' &&
+                (
+                    entry.relevance >= 10 ||
+                    (storyIntent && entry.relevance >= 4)
+                )
+        )
+        .slice(0, 2)
+
+    for (const entry of relatedLore) {
+        addItem(entry.item)
+    }
+
+    const budgeted = []
+    let usedTokens = 0
+
+    for (const item of selected) {
+        const block = formatCharacterLoreItem(item)
+        const itemTokens = estimateTokens(block)
+
+        if (budgeted.length > 0 && usedTokens + itemTokens > 1700) {
+            continue
+        }
+
+        budgeted.push(item)
+        usedTokens += itemTokens
+    }
+
+    if (budgeted.length === 0) {
+        return {
+            context: '',
+            selected: [],
+        }
+    }
+
+    const materialText = budgeted
+        .map((item) => formatCharacterLoreItem(item))
+        .join('\n\n')
+
+    return {
+        selected: budgeted,
+        context: `【按当前对话动态选取的原作参考素材】
+下面只是一小组与当前聊天相关的原作参考，不是要逐句复述的台词库。
+
+使用规则：
+1. “语感样本”只学习表达节奏、反应方式和亲密感，不要照抄原句，也不要无缘无故复现场景。
+2. “行为模式”只约束相似情境里的选择和反应，不需要主动解释这条规则。
+3. “剧情事实”只作为已经发生过的事实或世界观依据；只有当前话题相关时才自然使用。
+4. 不要为了证明你记得原作而主动报出卡名、来源、标签或内部分类。
+5. 如果素材与当前消息关系很弱，以当前聊天、固定人物设定和长期记忆为准，不要硬套素材。
+
+${materialText}`,
+    }
+}
+
+
+// ======================================================
 // 获取指定会话
 // ======================================================
 
@@ -1046,6 +1503,7 @@ function buildModelContext({
     settings,
     memorySummary,
     messages,
+    characterLoreContext = '',
 }) {
 
     const systemPrompt =
@@ -1090,6 +1548,18 @@ ${systemPrompt}`
 请把这些内容视为既有事实，自然地体现在回答中，不要机械复述。
 
 ${characterContext}`
+        )
+
+    }
+
+    if (
+        typeof characterLoreContext ===
+            'string' &&
+        characterLoreContext.trim()
+    ) {
+
+        sections.push(
+            characterLoreContext.trim()
         )
 
     }
@@ -2580,6 +3050,33 @@ async function buildProactiveInput(
         )
 
 
+    const latestUserMessage =
+        [
+            ...recentMessages,
+        ]
+            .reverse()
+            .find(
+                (item) =>
+                    item.role ===
+                    'user'
+            )
+            ?.content ||
+        ''
+
+
+    const characterLore =
+        await getCharacterLoreContext({
+
+            userId,
+
+            currentMessage:
+                latestUserMessage,
+
+            recentMessages,
+
+        })
+
+
     const recentProactiveMessages =
         await getRecentProactiveMessages(
             sessionId,
@@ -2652,6 +3149,18 @@ ${systemPrompt}`
 请把它们视为既有事实，但不要为了表现记忆而机械复述。
 
 ${characterContext}`
+        )
+
+    }
+
+
+    if (
+        characterLore
+            ?.context
+    ) {
+
+        sections.push(
+            characterLore.context
         )
 
     }
@@ -5256,6 +5765,37 @@ app.get(
                     sessionId
                 )
 
+            const latestUserMessage =
+                [
+                    ...messages,
+                ]
+                    .reverse()
+                    .find(
+                        (item) =>
+                            item.role ===
+                            'user'
+                    )
+                    ?.content ||
+                ''
+
+
+            const characterLore =
+                await getCharacterLoreContext({
+
+                    userId:
+                        req.userId,
+
+                    currentMessage:
+                        latestUserMessage,
+
+                    recentMessages:
+                        messages.slice(
+                            -8
+                        ),
+
+                })
+
+
             const fullContext =
                 buildModelContext({
 
@@ -5264,6 +5804,10 @@ app.get(
                     memorySummary,
 
                     messages,
+
+                    characterLoreContext:
+                        characterLore
+                            .context,
 
                 })
 
@@ -5750,6 +6294,21 @@ app.post(
                 )
 
 
+            const characterLore =
+                await getCharacterLoreContext({
+
+                    userId:
+                        req.userId,
+
+                    currentMessage:
+                        cleanMessage,
+
+                    recentMessages:
+                        history,
+
+                })
+
+
             const baseModelInput =
                 buildModelContext({
 
@@ -5759,6 +6318,10 @@ app.post(
 
                     messages:
                         history,
+
+                    characterLoreContext:
+                        characterLore
+                            .context,
 
                 })
 
