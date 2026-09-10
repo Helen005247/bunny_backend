@@ -16,9 +16,28 @@ const PORT = process.env.PORT || 3000
 app.use(cors())
 app.use(express.json({ limit: '1mb' }))
 
+const AI_REQUEST_TIMEOUT_MS =
+    Math.min(
+        120000,
+        Math.max(
+            15000,
+            Number(
+                process.env.AI_REQUEST_TIMEOUT_MS
+            ) || 45000
+        )
+    )
+
 const client = new OpenAI({
     apiKey: process.env.AI_API_KEY,
     baseURL: process.env.AI_BASE_URL,
+
+    // 第三方兼容线路繁忙时，SDK 自己重试会把一次请求拖成几分钟。
+    // 这里关闭 SDK 隐藏重试，统一交给下面的 callModelWithRetry 控制。
+    maxRetries: 0,
+
+    // 默认 45 秒。Render 无需新增环境变量；
+    // 如果以后确实要调整，可选配置 AI_REQUEST_TIMEOUT_MS。
+    timeout: AI_REQUEST_TIMEOUT_MS,
 })
 // ======================================================
 // Web Push / VAPID
@@ -358,6 +377,40 @@ function getModelErrorCode(error) {
 }
 
 
+function isModelTimeoutError(error) {
+
+    const name =
+        String(
+            error?.name || ''
+        ).toUpperCase()
+
+    const code =
+        getModelErrorCode(
+            error
+        )
+
+    const message =
+        String(
+            error?.message || ''
+        ).toLowerCase()
+
+    return (
+        name.includes(
+            'TIMEOUT'
+        ) ||
+        code.includes(
+            'TIMEOUT'
+        ) ||
+        message.includes(
+            'timed out'
+        ) ||
+        message.includes(
+            'timeout'
+        )
+    )
+}
+
+
 function isRetryableModelError(error) {
 
     if (
@@ -416,23 +469,27 @@ function isRetryableModelError(error) {
 
 async function callModelWithRetry(
     request,
-    maxAttempts = 3
+    maxAttempts = 2
 ) {
 
     let lastError =
         null
 
     // ==================================================
-    // 为当前请求生成唯一的内容指纹
+    // 保留原来的请求指纹，但改成“软校验”
     //
-    // 相同输入会得到相同指纹；
-    // 完全不同的请求几乎不可能得到同一个指纹。
+    // Aizex / 第三方兼容线路没有回显标记时：
+    // - 记录 warning
+    // - 接受正常正文
+    // - 不再因为缺少 HERMIT_OK 自动重试
+    //
+    // 这样不会再把一个正常回答放大成多轮长等待。
     // ==================================================
 
     const originalInput =
         typeof request
             ?.input ===
-            'string'
+        'string'
             ? request
                 .input
             : null
@@ -460,15 +517,6 @@ async function callModelWithRetry(
             ? `<<HERMIT_OK_${integrityId}>>`
             : null
 
-
-    // ==================================================
-    // 在真正发送给模型的请求末尾加入校验标记
-    //
-    // 模型必须把这个标记原样带回来。
-    // 后端确认以后会自动删除，
-    // 用户永远看不到它。
-    // ==================================================
-
     const guardedRequest =
         integrityMarker
             ? {
@@ -479,7 +527,7 @@ async function callModelWithRetry(
 
 【响应完整性校验】
 请正常完成上面的任务。
-在全部正常输出结束后，另起一行，原样输出下面这段校验标记：
+在全部正常输出结束后，如果当前线路支持，请另起一行原样输出下面这段校验标记：
 ${integrityMarker}
 
 不要解释这段标记，不要改写它，也不要把它放进正文中。服务端会在返回给用户前自动删除。`,
@@ -493,6 +541,9 @@ ${integrityMarker}
         attempt += 1
     ) {
 
+        const attemptStartedAt =
+            Date.now()
+
         try {
 
             const response =
@@ -505,16 +556,11 @@ ${integrityMarker}
             const outputText =
                 typeof response
                     ?.output_text ===
-                    'string'
+                'string'
                     ? response
                         .output_text
                         .trim()
                     : ''
-
-
-            // ------------------------------------------
-            // 原来的空回复检查
-            // ------------------------------------------
 
             if (!outputText) {
 
@@ -531,11 +577,8 @@ ${integrityMarker}
 
 
             // ------------------------------------------
-            // 防串台检查
-            //
-            // 如果发出去的是本次请求，
-            // 返回内容却没有本次唯一标记，
-            // 就认为响应不可信并自动重试。
+            // HERMIT_OK 改为软校验：
+            // 没有回显时只记录日志，不把正常回答判死。
             // ------------------------------------------
 
             if (
@@ -545,22 +588,13 @@ ${integrityMarker}
                 )
             ) {
 
-                const integrityError =
-                    new Error(
-                        `模型响应未通过完整性校验（${integrityId}）`
-                    )
-
-                integrityError.retryable =
-                    true
-
-                throw integrityError
+                console.warn(
+                    `模型响应未回显完整性校验标记（${integrityId}），本次接受正文，不因此重试`
+                )
             }
 
 
-            // ------------------------------------------
-            // 校验成功以后，把标记删除
-            // ------------------------------------------
-
+            // 如果有标记则删除；没有标记就原样使用正文。
             const cleanedOutputText =
                 integrityMarker
                     ? outputText
@@ -573,14 +607,13 @@ ${integrityMarker}
                         .trim()
                     : outputText
 
-
             if (
                 !cleanedOutputText
             ) {
 
                 const emptyAfterCheckError =
                     new Error(
-                        '模型响应通过校验后正文为空'
+                        '模型正文为空'
                     )
 
                 emptyAfterCheckError.retryable =
@@ -590,9 +623,20 @@ ${integrityMarker}
             }
 
 
-            // ------------------------------------------
-            // 返回干净正文
-            // ------------------------------------------
+            const elapsedMs =
+                Date.now() -
+                attemptStartedAt
+
+            if (
+                elapsedMs >=
+                10000
+            ) {
+
+                console.log(
+                    `模型请求成功，耗时 ${elapsedMs}ms（第 ${attempt} 次尝试）`
+                )
+            }
+
 
             return {
                 ...response,
@@ -607,32 +651,76 @@ ${integrityMarker}
             lastError =
                 error
 
+            const elapsedMs =
+                Date.now() -
+                attemptStartedAt
+
+
+            // ------------------------------------------
+            // 超时后不再从头等第二遍。
+            // SDK 内部重试已经关闭，所以单次最长由
+            // AI_REQUEST_TIMEOUT_MS 控制（默认 45 秒）。
+            // ------------------------------------------
+
+            if (
+                isModelTimeoutError(
+                    error
+                )
+            ) {
+
+                console.warn(
+                    `模型请求超时，已等待 ${elapsedMs}ms；为避免拖成几分钟，本轮不再重试：`,
+                    error?.message ||
+                    error
+                )
+
+                throw error
+            }
+
+
             const canRetry =
                 isRetryableModelError(
                     error
                 )
 
+
+            // 如果一个 503 / 5xx 本身已经让我们等了很久，
+            // 再从头请求一次通常只会继续拖慢。
+            // 只有 8 秒内“快速失败”的临时错误才值得重试一次。
+            const failedQuickly =
+                elapsedMs <
+                8000
+
+
             if (
                 !canRetry ||
                 attempt >=
-                maxAttempts
+                maxAttempts ||
+                !failedQuickly
             ) {
+
+                if (
+                    canRetry &&
+                    !failedQuickly
+                ) {
+
+                    console.warn(
+                        `模型请求在 ${elapsedMs}ms 后失败；为避免继续拖延，本轮不再重试：`,
+                        error?.message ||
+                        error
+                    )
+                }
+
                 throw error
             }
 
 
             const delayMs =
-                800 *
-                (
-                    2 **
-                    (
-                        attempt - 1
-                    )
-                )
+                800
 
 
             console.warn(
-                `模型请求失败，${delayMs}ms 后重试（${attempt}/${maxAttempts}）：`,
+                `模型请求快速失败，${delayMs}ms 后只重试一次（${attempt}/${maxAttempts}）：`,
                 error?.message ||
                 error
             )
@@ -652,7 +740,6 @@ ${integrityMarker}
         )
     )
 }
-
 
 
 // ======================================================
@@ -1882,7 +1969,7 @@ ${oldConversationText}
             input:
                 compressionInput,
 
-        })
+        }, 1)
 
 
     const newSummary =
@@ -2044,6 +2131,146 @@ ${oldConversationText}
             newMemory.id,
 
     }
+}
+
+
+// ======================================================
+// 后台记忆压缩调度
+//
+// 普通聊天不再等待记忆压缩。
+// 每次成功回复以后，等用户空闲 30 秒再尝试整理长期记忆。
+// 如果用户继续聊天，计时会重新开始。
+// ======================================================
+
+const MEMORY_COMPRESSION_IDLE_DELAY_MS =
+    30 * 1000
+
+const memoryCompressionTimers =
+    new Map()
+
+const memoryCompressionRunning =
+    new Set()
+
+
+function scheduleMemoryCompression(
+    sessionId,
+    settings,
+    userId
+) {
+
+    if (
+        !sessionId ||
+        !userId
+    ) {
+        return
+    }
+
+
+    const key =
+        `${userId}:${sessionId}`
+
+
+    const previousTimer =
+        memoryCompressionTimers
+            .get(
+                key
+            )
+
+
+    if (previousTimer) {
+
+        clearTimeout(
+            previousTimer
+        )
+    }
+
+
+    const timer =
+        setTimeout(
+            async () => {
+
+                memoryCompressionTimers
+                    .delete(
+                        key
+                    )
+
+
+                if (
+                    memoryCompressionRunning
+                        .has(
+                            key
+                        )
+                ) {
+
+                    return
+                }
+
+
+                memoryCompressionRunning
+                    .add(
+                        key
+                    )
+
+
+                try {
+
+                    const result =
+                        await compressMemoryIfNeeded(
+                            sessionId,
+                            settings,
+                            userId
+                        )
+
+
+                    if (
+                        result
+                            ?.triggered
+                    ) {
+
+                        console.log(
+                            `Session ${sessionId} 后台记忆压缩完成`
+                        )
+                    }
+
+
+                } catch (error) {
+
+                    // 后台压缩失败不能影响已经完成的聊天回复。
+                    console.error(
+                        `Session ${sessionId} 后台记忆压缩失败，本次跳过：`,
+                        error
+                    )
+
+
+                } finally {
+
+                    memoryCompressionRunning
+                        .delete(
+                            key
+                        )
+                }
+
+            },
+            MEMORY_COMPRESSION_IDLE_DELAY_MS
+        )
+
+
+    // 这个计时器本身不应该阻止 Node 进程正常退出。
+    if (
+        typeof timer
+            .unref ===
+        'function'
+    ) {
+
+        timer.unref()
+    }
+
+
+    memoryCompressionTimers
+        .set(
+            key,
+            timer
+        )
 }
 
 
@@ -6262,12 +6489,32 @@ app.post(
             }
 
 
-            const compression =
-                await compressMemoryIfNeeded(
-                    sessionId,
-                    settings,
-                    req.userId
-                )
+            // ==================================================
+            // 不再让当前聊天等待长期记忆压缩。
+            //
+            // 先使用现有长期记忆完成这次回复；
+            // 回复保存并返回给前端以后，再在后台空闲期压缩。
+            // ==================================================
+
+            const compression = {
+                triggered:
+                    false,
+
+                reason:
+                    'deferred_until_idle',
+
+                before_tokens:
+                    null,
+
+                after_tokens:
+                    null,
+
+                compressed_message_count:
+                    0,
+
+                memory_id:
+                    null,
+            }
 
 
 
@@ -6490,6 +6737,15 @@ ${reminderReplyContext}`
 
 
                 })
+
+
+            // 当前聊天响应已经发给前端。
+            // 长期记忆整理延后到空闲期，不再挡住用户看到回复。
+            scheduleMemoryCompression(
+                sessionId,
+                settings,
+                req.userId
+            )
 
 
         } catch (
