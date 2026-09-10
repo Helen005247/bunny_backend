@@ -2261,6 +2261,12 @@ function shouldAnalyzeReminderIntent(
             : ''
 
 
+    if (!text) {
+        return false
+    }
+
+
+    // 用户本轮明确提出提醒 / 管理提醒，直接解析。
     const reminderPattern =
         /提醒|帮我记|记住|记得|叫我|别忘|别让我忘|日程/
 
@@ -2281,6 +2287,11 @@ function shouldAnalyzeReminderIntent(
     }
 
 
+    // 只有“上一条 assistant 确实是在追问提醒缺失信息”时，
+    // 才允许本轮把“明天下午 / 三点 / 好 / 那个”等
+    // 当成 reminder follow-up。
+    //
+    // 已经成功创建/修改提醒以后，普通聊天不再继承提醒状态。
     const previousMessages =
         (
             recentMessages ||
@@ -2290,39 +2301,55 @@ function shouldAnalyzeReminderIntent(
                 0,
                 -1
             )
-            .slice(
-                -8
+
+
+    const lastAssistantMessage =
+        [
+            ...previousMessages,
+        ]
+            .reverse()
+            .find(
+                (
+                    item
+                ) =>
+                    item?.role ===
+                    'assistant'
             )
 
 
-    const recentReminderContext =
-        previousMessages.some(
-            (
-                item
-            ) => {
-
-                const content =
-                    String(
-                        item.content ||
-                        ''
-                    )
-
-                return (
-                    reminderPattern.test(
-                        content
-                    ) ||
-                    /已提醒|提醒时间|提前提醒|几点|什么时候|具体时间|取消|修改/
-                        .test(
-                            content
-                        )
-                )
-
-            }
+    const lastAssistantText =
+        String(
+            lastAssistantMessage
+                ?.content ||
+            ''
         )
+            .trim()
+
+
+    const reminderClarificationPattern =
+        /我还差一点信息|还差.*(?:时间|几点|哪一天|哪天|哪个提醒|哪一个提醒|提前多久|提前多少)|(?:提醒|日程).*(?:具体时间|几点|什么时候|哪一天|哪天|哪个|哪一个|提前多久|提前多少)|(?:具体时间|几点|什么时候|哪一天|哪天|哪个提醒|哪一个提醒|提前多久|提前多少).*(?:提醒|日程)|要取消哪|要修改哪|想改哪/
 
 
     if (
-        !recentReminderContext
+        !reminderClarificationPattern
+            .test(
+                lastAssistantText
+            )
+    ) {
+        return false
+    }
+
+
+    // 关键修复：
+    // “晚上好”不能因为包含“晚上”而被当成提醒时间。
+    const greetingOnlyPattern =
+        /^(?:早安|早上好|上午好|中午好|下午好|晚上好|晚安|你好|你好吗|嗨+|哈喽|哈啰|hello|hi|hey)(?:呀|啊|哦|啦|呢|～|~|！|!|。|\.|，|,|\s)*$/i
+
+
+    if (
+        greetingOnlyPattern.test(
+            text
+        )
     ) {
         return false
     }
