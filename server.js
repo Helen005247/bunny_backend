@@ -19,12 +19,6 @@ app.use(express.json({ limit: '1mb' }))
 const client = new OpenAI({
     apiKey: process.env.AI_API_KEY,
     baseURL: process.env.AI_BASE_URL,
-
-    // Aizex / 第三方线路偶尔比官方接口慢。
-    // 单次最多等 60 秒；仍关闭 SDK 自带隐藏重试，
-    // 避免一层 SDK 重试再叠一层业务重试。
-    timeout: 60000,
-    maxRetries: 0,
 })
 // ======================================================
 // Web Push / VAPID
@@ -364,46 +358,6 @@ function getModelErrorCode(error) {
 }
 
 
-function isModelTimeoutError(error) {
-
-    const code =
-        getModelErrorCode(
-            error
-        )
-
-    const name =
-        String(
-            error?.name ||
-            ''
-        ).toUpperCase()
-
-    const message =
-        String(
-            error?.message ||
-            ''
-        ).toUpperCase()
-
-    return (
-        [
-            'ETIMEDOUT',
-            'UND_ERR_CONNECT_TIMEOUT',
-            'UND_ERR_HEADERS_TIMEOUT',
-        ].includes(
-            code
-        ) ||
-        name.includes(
-            'TIMEOUT'
-        ) ||
-        message.includes(
-            'TIMED OUT'
-        ) ||
-        message.includes(
-            'TIMEOUT'
-        )
-    )
-}
-
-
 function isRetryableModelError(error) {
 
     if (
@@ -462,7 +416,7 @@ function isRetryableModelError(error) {
 
 async function callModelWithRetry(
     request,
-    maxAttempts = 2
+    maxAttempts = 3
 ) {
 
     let lastError =
@@ -577,42 +531,38 @@ ${integrityMarker}
 
 
             // ------------------------------------------
-            // 响应完整性标记：改成“软校验”
+            // 防串台检查
             //
-            // Aizex 这类 OpenAI 兼容代理并不保证模型会把
-            // 提示词末尾的校验标记逐字回显。
-            // 上一版把“没有回显 marker”直接当成失败，
-            // 会造成正常聊天全部返回 500。
-            //
-            // 现在：
-            // - 有 marker：删除后正常返回；
-            // - 没有 marker：只记一条 warning，不阻断聊天。
-            //
-            // 真正防重复仍由 request_id + 数据库唯一索引负责。
+            // 如果发出去的是本次请求，
+            // 返回内容却没有本次唯一标记，
+            // 就认为响应不可信并自动重试。
             // ------------------------------------------
-
-            const hasIntegrityMarker =
-                Boolean(
-                    integrityMarker &&
-                    outputText.includes(
-                        integrityMarker
-                    )
-                )
-
 
             if (
                 integrityMarker &&
-                !hasIntegrityMarker
+                !outputText.includes(
+                    integrityMarker
+                )
             ) {
 
-                console.warn(
-                    `模型响应没有回显完整性标记（${integrityId}），按兼容模式继续返回正文`
-                )
+                const integrityError =
+                    new Error(
+                        `模型响应未通过完整性校验（${integrityId}）`
+                    )
+
+                integrityError.retryable =
+                    true
+
+                throw integrityError
             }
 
 
+            // ------------------------------------------
+            // 校验成功以后，把标记删除
+            // ------------------------------------------
+
             const cleanedOutputText =
-                hasIntegrityMarker
+                integrityMarker
                     ? outputText
                         .split(
                             integrityMarker
@@ -658,9 +608,6 @@ ${integrityMarker}
                 error
 
             const canRetry =
-                !isModelTimeoutError(
-                    error
-                ) &&
                 isRetryableModelError(
                     error
                 )
@@ -2287,14 +2234,6 @@ function buildUserLocalTimeContext(
 
 // ======================================================
 // 提醒功能：判断是否值得调用提醒解析器
-//
-// 现在支持：
-// create      创建提醒
-// list        查询待办提醒
-// cancel      取消一条提醒
-// cancel_all  明确要求时取消全部待办提醒
-// update      修改时间 / 提前量 / 内容
-// clarify     信息不足时追问
 // ======================================================
 
 function shouldAnalyzeReminderIntent(
@@ -2309,25 +2248,13 @@ function shouldAnalyzeReminderIntent(
             : ''
 
 
-    if (!text) {
-        return false
-    }
-
-
-    // 用户本轮明确提出提醒 / 管理提醒，直接解析。
     const reminderPattern =
         /提醒|帮我记|记住|记得|叫我|别忘|别让我忘|日程/
 
 
-    const managementPattern =
-        /取消|删掉|删除|清空|还有什么|有哪些|什么提醒|待办|改成|改到|改为|改一下|修改|提前|推迟|延后|延迟|换成|挪到|改时间/
-
-
+    // 当前这句话自己就明确要求提醒
     if (
         reminderPattern.test(
-            text
-        ) ||
-        managementPattern.test(
             text
         )
     ) {
@@ -2335,11 +2262,6 @@ function shouldAnalyzeReminderIntent(
     }
 
 
-    // 只有“上一条 assistant 确实是在追问提醒缺失信息”时，
-    // 才允许本轮把“明天下午 / 三点 / 好 / 那个”等
-    // 当成 reminder follow-up。
-    //
-    // 已经成功创建/修改提醒以后，普通聊天不再继承提醒状态。
     const previousMessages =
         (
             recentMessages ||
@@ -2349,59 +2271,51 @@ function shouldAnalyzeReminderIntent(
                 0,
                 -1
             )
-
-
-    const lastAssistantMessage =
-        [
-            ...previousMessages,
-        ]
-            .reverse()
-            .find(
-                (
-                    item
-                ) =>
-                    item?.role ===
-                    'assistant'
+            .slice(
+                -6
             )
 
 
-    const lastAssistantText =
-        String(
-            lastAssistantMessage
-                ?.content ||
-            ''
+    // 最近几句话里是否存在明确的提醒请求
+    const hasRecentReminderRequest =
+        previousMessages.some(
+            (
+                item
+            ) => {
+
+                if (
+                    item.role !==
+                    'user'
+                ) {
+                    return false
+                }
+
+
+                return reminderPattern.test(
+                    String(
+                        item.content ||
+                        ''
+                    )
+                )
+
+            }
         )
-            .trim()
-
-
-    const reminderClarificationPattern =
-        /我还差一点信息|还差.*(?:时间|几点|哪一天|哪天|哪个提醒|哪一个提醒|提前多久|提前多少)|(?:提醒|日程).*(?:具体时间|几点|什么时候|哪一天|哪天|哪个|哪一个|提前多久|提前多少)|(?:具体时间|几点|什么时候|哪一天|哪天|哪个提醒|哪一个提醒|提前多久|提前多少).*(?:提醒|日程)|要取消哪|要修改哪|想改哪/
 
 
     if (
-        !reminderClarificationPattern
-            .test(
-                lastAssistantText
-            )
+        !hasRecentReminderRequest
     ) {
         return false
     }
 
 
-    // 关键修复：
-    // “晚上好”不能因为包含“晚上”而被当成提醒时间。
-    const greetingOnlyPattern =
-        /^(?:早安|早上好|上午好|中午好|下午好|晚上好|晚安|你好|你好吗|嗨+|哈喽|哈啰|hello|hi|hey)(?:呀|啊|哦|啦|呢|～|~|！|!|。|\.|，|,|\s)*$/i
-
-
-    if (
-        greetingOnlyPattern.test(
-            text
-        )
-    ) {
-        return false
-    }
-
+    // --------------------------------------------------
+    // 情况 1：
+    //
+    // 用户：明天提醒我拿快递
+    // 星星：几点？
+    // 用户：下午三点
+    // --------------------------------------------------
 
     const timePattern =
         /(?:今天|今晚|明天|后天|大后天|早上|上午|中午|下午|傍晚|晚上|夜里|凌晨|周[一二三四五六日天]|星期[一二三四五六日天]|[0-9一二两三四五六七八九十]{1,3}\s*(?:[:：点时]))/
@@ -2416,12 +2330,69 @@ function shouldAnalyzeReminderIntent(
     }
 
 
-    const followUpPattern =
-        /^(对|对的|对呀|对啊|是|是的|嗯|嗯嗯|嗯哼|好|好的|没错|没问题|可以|就这样|确认|那个|这个|刚才那个|取消|删掉|改吧|改一下|提前一点|晚一点|推迟一点|ok|okay)[\s，。！？!?、,.]*$/i
+    // --------------------------------------------------
+    // 情况 2：
+    //
+    // 用户：今晚六点十二分提醒我拿外卖
+    // 星星：确认是今晚六点十二分，对吗？
+    // 用户：对
+    //
+    // “对”本身没有时间，
+    // 但它是在确认前面的提醒。
+    // --------------------------------------------------
 
-
-    return followUpPattern.test(
+    const compactText =
         text
+            .replace(
+                /[\s，。！？!?、,.]/g,
+                ''
+            )
+            .toLowerCase()
+
+
+    const confirmationPattern =
+        /^(对|对的|对呀|对啊|是|是的|嗯|嗯嗯|嗯哼|好|好的|没错|没问题|可以|就这样|确认|ok|okay)$/i
+
+
+    if (
+        !confirmationPattern.test(
+            compactText
+        )
+    ) {
+        return false
+    }
+
+
+    // 最后一条旧消息最好是星星在确认提醒信息，
+    // 防止普通聊天中的“对”误触发提醒。
+    const previousMessage =
+        previousMessages[
+        previousMessages.length - 1
+        ]
+
+
+    if (
+        !previousMessage ||
+        previousMessage.role !==
+        'assistant'
+    ) {
+        return false
+    }
+
+
+    const assistantText =
+        String(
+            previousMessage.content ||
+            ''
+        )
+
+
+    const clarificationPattern =
+        /提醒|确认|对吗|是吗|几点|什么时候|具体时间|上午|下午|晚上|今晚|早上|中午|凌晨|今天|明天/
+
+
+    return clarificationPattern.test(
+        assistantText
     )
 }
 
@@ -2481,130 +2452,10 @@ function parseReminderJson(
 
 
 // ======================================================
-// 读取当前用户还没有完成的提醒
+// 用模型理解自然语言提醒
 // ======================================================
 
-async function getPendingReminders(
-    userId,
-    limit = 20
-) {
-
-    if (!userId) {
-        throw new Error(
-            '读取 reminders 时缺少 user_id'
-        )
-    }
-
-
-    const {
-        data,
-        error,
-    } =
-        await supabase
-            .from(
-                'reminders'
-            )
-            .select(
-                'id, user_id, session_id, source_message_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, sent_at, cancelled_at, metadata'
-            )
-            .eq(
-                'user_id',
-                userId
-            )
-            .eq(
-                'status',
-                'pending'
-            )
-            .order(
-                'event_at',
-                {
-                    ascending:
-                        true,
-                }
-            )
-            .limit(
-                limit
-            )
-
-
-    if (error) {
-        throw error
-    }
-
-
-    return Array.isArray(
-        data
-    )
-        ? data
-        : []
-}
-
-
-// ======================================================
-// 把数据库提醒转换成解析器能安全读取的文本
-// ======================================================
-
-function buildPendingReminderParserText(
-    reminders,
-    defaultTimeZone
-) {
-
-    if (
-        !Array.isArray(
-            reminders
-        ) ||
-        reminders.length === 0
-    ) {
-        return '当前没有 pending 提醒。'
-    }
-
-
-    return reminders
-        .map(
-            (
-                reminder
-            ) => {
-
-                const timeZone =
-                    getValidTimeZone(
-                        reminder.timezone
-                    ) ||
-                    defaultTimeZone ||
-                    'UTC'
-
-
-                const eventLocal =
-                    DateTime
-                        .fromISO(
-                            reminder.event_at,
-                            {
-                                setZone:
-                                    true,
-                            }
-                        )
-                        .setZone(
-                            timeZone
-                        )
-
-
-                return [
-                    `id=${reminder.id}`,
-                    `content=${reminder.content}`,
-                    `event_local=${eventLocal.toFormat('yyyy-LL-dd HH:mm')}`,
-                    `remind_before_minutes=${reminder.remind_before_minutes}`,
-                ].join(' | ')
-
-            }
-        )
-        .join('\n')
-}
-
-
-// ======================================================
-// 用模型理解“创建 / 查询 / 取消 / 修改提醒”
-// ======================================================
-
-async function analyzeReminderIntent({
+async function analyzeAndCreateReminder({
     sessionId,
     userId,
     settings,
@@ -2615,10 +2466,9 @@ async function analyzeReminderIntent({
 
     if (!userId) {
         throw new Error(
-            '处理 reminder 时缺少 user_id'
+            '创建 reminder 时缺少 user_id'
         )
     }
-
 
     const timeZone =
         getValidTimeZone(
@@ -2634,7 +2484,7 @@ async function analyzeReminderIntent({
                 'clarify',
 
             clarification:
-                '当前还没有可靠的用户时区，因此不能安全地处理提醒时间。',
+                '当前还没有可靠的用户时区，因此不能安全地确定提醒时间。',
         }
 
     }
@@ -2648,35 +2498,21 @@ async function analyzeReminderIntent({
             )
 
 
-    const pendingReminders =
-        await getPendingReminders(
-            userId,
-            20
-        )
-
-
-    const pendingReminderText =
-        buildPendingReminderParserText(
-            pendingReminders,
-            timeZone
-        )
-
-
     const recentText =
         messagesToText(
             (
                 recentMessages ||
                 []
             ).slice(
-                -10
+                -8
             )
         )
 
 
     const parserInput =
-        `你是 Hermit 的提醒管理解析器。
+        `你是 Hermit 的提醒意图解析器。
 
-你只负责判断用户对提醒系统的真实操作意图，并输出结构化 JSON。
+你只负责判断用户是否明确要求创建“未来某个时间的提醒”，以及把时间解析成结构化数据。
 不要聊天，不要扮演角色。
 
 【用户时区】
@@ -2684,9 +2520,6 @@ ${timeZone}
 
 【用户当前本地时间】
 ${nowLocal.toISO()}
-
-【当前待处理提醒】
-${pendingReminderText}
 
 【最近聊天】
 ${recentText || '无'}
@@ -2700,10 +2533,9 @@ ${cleanMessage}
 
 {
   "action": "none",
-  "target_reminder_id": null,
   "content": null,
   "event_local": null,
-  "remind_before_minutes": null,
+  "remind_before_minutes": 10,
   "clarification": null
 }
 
@@ -2711,84 +2543,67 @@ action 只能是：
 
 "none"
 "create"
-"list"
-"cancel"
-"cancel_all"
-"update"
 "clarify"
 
-【核心规则】
+规则：
 
-1. create：
-只有用户明确要求“提醒我、帮我记一下并提醒、到时候叫我、别让我忘”等未来提醒时才创建。
-用户只是说自己未来要做某件事，但没有要求提醒时，action = none。
+1. 只有用户明确要求“提醒我、帮我记一下并提醒、到时候叫我、别让我忘”等未来提醒时，才使用 create。
 
-2. list：
-用户问“我还有什么提醒”“有哪些提醒”“帮我看看待办提醒”等时使用。
-只查询当前 pending 提醒。
+2. 用户只是说“我明天下午三点要去医院”，但没有要求提醒，使用 none。
 
-3. cancel：
-用户明确要取消、删除某一条提醒时使用。
-target_reminder_id 必须从【当前待处理提醒】中选择。
-如果无法唯一判断是哪一条，必须 clarify，绝对不要猜。
+3. 如果当前消息只是补充上一轮明确提醒请求缺少的时间，也可以使用 create。
+如果当前用户消息只是“对”“是的”“没错”“好”“确认”等简短确认，
+并且上一条助手消息正在确认一个明确的提醒时间，
+必须结合前面的用户提醒请求和这次确认来判断。
 
-4. cancel_all：
-只有用户非常明确地说“取消全部提醒”“所有提醒都删掉”“清空所有提醒”等时才能使用。
-普通的“取消提醒”不能理解成 cancel_all。
+例如：
 
-5. update：
-用户要修改已有提醒的时间、提前提醒分钟数或事情内容时使用。
-target_reminder_id 必须从【当前待处理提醒】中选择。
-如果无法唯一确定目标提醒，必须 clarify。
+用户：今晚六点十二分提醒我下去拿外卖和水果
+助手：确认一下，是今天晚上六点十二分，对吗？
+用户：对
 
-6. create 或 update 中，只要要设置一个新的事件时间，event_local 必须是用户时区下完整时间：
+这种情况应该输出 create。
+
+content = “下去拿外卖和水果”
+event_local = 今天的 18:12:00
+
+不要因为当前用户这一句只有“对”就输出 none。
+
+
+4. create 时 content 只写用户真正要做的事情，例如“去拿快递”，不要写“提醒我”。
+
+5. event_local 必须转换成用户时区下的完整本地时间，格式严格为：
 YYYY-MM-DDTHH:mm:ss
-不要带 Z 或时区偏移。
 
-7. create 时：
-content 只写真正要做的事情，不要写“提醒我”。
-如果用户没有说明提前多久，remind_before_minutes = 10。
-如果用户明确说“到点提醒”“到时候提醒”，remind_before_minutes = 0。
-如果用户说“提前一点”但没给具体分钟，使用 10。
+6. 不要在 event_local 中加入 Z 或时区偏移。
 
-8. update 时：
-只修改用户明确要求改变的内容。
-- 只改事情内容：content 填新内容，其余可以为 null。
-- 只改事件时间：event_local 填新完整时间。
-- 只改提前量：remind_before_minutes 填新数值，event_local 可以为 null。
-- 没说要改的字段保持 null。
+7. 如果用户没有说明提前多久，默认 remind_before_minutes = 10。
 
-9. 如果用户说“把明天下午三点那个改到四点”，必须结合当前提醒的日期和上下文，把 event_local 解析成完整时间。
-如果“凌晨/上午/下午”无法唯一判断，不要猜，clarify。
+8. 如果用户说“到点提醒”“到时候提醒”，而明显表示事情发生时再提醒，则 remind_before_minutes = 0。
 
-10. 如果用户说“刚才那个提前半小时”，并且根据最近聊天和当前 pending 提醒可以唯一确认目标，则 update：
-remind_before_minutes = 30。
+9. “提前一点”但没有具体分钟数时，使用默认 10 分钟。
 
-11. 当前消息如果只是“对”“是的”“没错”“好”“确认”等，
-而上一轮助手正在确认提醒信息，
-必须结合最近聊天继续完成操作，不要因为当前消息很短就输出 none。
+10. 如果日期或具体时间不足以唯一确定，使用 clarify。
 
-12. target_reminder_id 只能使用当前待处理提醒里真实存在的 id。
-不能编造 id。
+11. 像“明天三点”这种无法确定上午还是下午的表达，不要猜，使用 clarify。
 
-13. 新的事件时间必须在当前时间之后。
+12. clarification 只简短说明还缺什么，例如“需要确认是上午三点还是下午三点”。
 
-14. clarification 只简短说明还缺什么，不要聊天。`
+13. 不能编造用户没有说过的日程。
+
+14. 解析出的事件时间必须在当前时间之后。`
 
 
     const response =
-        await callModelWithRetry(
-            {
+        await callModelWithRetry({
 
-                model:
-                    'gpt-5.6-sol',
+            model:
+                'gpt-5.6-sol',
 
-                input:
-                    parserInput,
+            input:
+                parserInput,
 
-            },
-            1
-        )
+        })
 
 
     const parsed =
@@ -2801,7 +2616,7 @@ remind_before_minutes = 30。
     if (!parsed) {
 
         throw new Error(
-            '提醒管理解析器没有返回有效 JSON'
+            '提醒解析器没有返回有效 JSON'
         )
 
     }
@@ -2814,19 +2629,6 @@ remind_before_minutes = 30。
                 .trim()
                 .toLowerCase()
             : 'none'
-
-
-    const clarification =
-        typeof parsed
-            .clarification ===
-            'string' &&
-            parsed
-                .clarification
-                .trim()
-            ? parsed
-                .clarification
-                .trim()
-            : ''
 
 
     if (
@@ -2853,567 +2655,16 @@ remind_before_minutes = 30。
                 'clarify',
 
             clarification:
-                clarification ||
-                '还缺少足够的信息来确定这次提醒操作。',
-
-        }
-
-    }
-
-
-    if (
-        action ===
-        'list'
-    ) {
-
-        return {
-
-            status:
-                'listed',
-
-            reminders:
-                pendingReminders,
-
-            timeZone,
-
-        }
-
-    }
-
-
-    if (
-        action ===
-        'cancel_all'
-    ) {
-
-        if (
-            pendingReminders.length ===
-            0
-        ) {
-
-            return {
-                status:
-                    'cancelled_all',
-
-                reminders:
-                    [],
-
-                cancelledCount:
-                    0,
-
-                timeZone,
-            }
-
-        }
-
-
-        const reminderIds =
-            pendingReminders.map(
-                (
-                    reminder
-                ) =>
-                    reminder.id
-            )
-
-
-        const cancelledAt =
-            new Date()
-                .toISOString()
-
-
-        const {
-            data:
-            cancelledReminders,
-
-            error:
-            cancelAllError,
-        } =
-            await supabase
-                .from(
-                    'reminders'
-                )
-                .update({
-                    status:
-                        'cancelled',
-
-                    cancelled_at:
-                        cancelledAt,
-                })
-                .eq(
-                    'user_id',
-                    userId
-                )
-                .eq(
-                    'status',
-                    'pending'
-                )
-                .in(
-                    'id',
-                    reminderIds
-                )
-                .select(
-                    'id, user_id, session_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, cancelled_at, metadata'
-                )
-
-
-        if (cancelAllError) {
-            throw cancelAllError
-        }
-
-
-        return {
-
-            status:
-                'cancelled_all',
-
-            reminders:
-                cancelledReminders ||
-                [],
-
-            cancelledCount:
-                Array.isArray(
-                    cancelledReminders
-                )
-                    ? cancelledReminders
-                        .length
-                    : 0,
-
-            timeZone,
-
-        }
-
-    }
-
-
-    const targetReminderId =
-        Number(
-            parsed
-                .target_reminder_id
-        )
-
-
-    const targetReminder =
-        Number.isInteger(
-            targetReminderId
-        )
-            ? pendingReminders
-                .find(
-                    (
-                        reminder
-                    ) =>
-                        Number(
-                            reminder.id
-                        ) ===
-                        targetReminderId
-                )
-            : null
-
-
-    if (
-        (
-            action ===
-            'cancel' ||
-            action ===
-            'update'
-        ) &&
-        !targetReminder
-    ) {
-
-        return {
-
-            status:
-                'clarify',
-
-            clarification:
-                clarification ||
-                (
-                    pendingReminders.length ===
-                    0
-                        ? '当前没有可以修改或取消的待处理提醒。'
-                        : '还不能唯一确定你指的是哪一条提醒。'
-                ),
-
-        }
-
-    }
-
-
-    if (
-        action ===
-        'cancel'
-    ) {
-
-        const cancelledAt =
-            new Date()
-                .toISOString()
-
-
-        const {
-            data:
-            cancelledReminder,
-
-            error:
-            cancelError,
-        } =
-            await supabase
-                .from(
-                    'reminders'
-                )
-                .update({
-                    status:
-                        'cancelled',
-
-                    cancelled_at:
-                        cancelledAt,
-                })
-                .eq(
-                    'id',
-                    targetReminder.id
-                )
-                .eq(
-                    'user_id',
-                    userId
-                )
-                .eq(
-                    'status',
-                    'pending'
-                )
-                .select(
-                    'id, user_id, session_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, cancelled_at, metadata'
-                )
-                .maybeSingle()
-
-
-        if (cancelError) {
-            throw cancelError
-        }
-
-
-        if (!cancelledReminder) {
-
-            return {
-
-                status:
-                    'clarify',
-
-                clarification:
-                    '这条提醒已经不是待处理状态了，请重新确认。',
-
-            }
-
-        }
-
-
-        return {
-
-            status:
-                'cancelled',
-
-            reminder:
-                cancelledReminder,
-
-            timeZone,
-
-        }
-
-    }
-
-
-    if (
-        action ===
-        'update'
-    ) {
-
-        const oldTimeZone =
-            getValidTimeZone(
-                targetReminder.timezone
-            ) ||
-            timeZone
-
-
-        const oldEventLocal =
-            DateTime
-                .fromISO(
-                    targetReminder.event_at,
-                    {
-                        setZone:
-                            true,
-                    }
-                )
-                .setZone(
-                    oldTimeZone
-                )
-
-
-        let newEventLocal =
-            oldEventLocal
-
-
-        const eventLocalText =
-            typeof parsed
-                .event_local ===
-                'string'
-                ? parsed
-                    .event_local
-                    .trim()
-                : ''
-
-
-        if (eventLocalText) {
-
-            newEventLocal =
-                DateTime
-                    .fromISO(
-                        eventLocalText,
-                        {
-                            zone:
-                                timeZone,
-                        }
-                    )
-
-
-            if (
-                !newEventLocal.isValid
-            ) {
-
-                return {
-
-                    status:
-                        'clarify',
-
-                    clarification:
-                        '新的提醒时间没有解析成功，请重新确认日期和时间。',
-
-                }
-
-            }
-
-        }
-
-
-        if (
-            newEventLocal
-                .toMillis() <=
-            nowLocal
-                .toMillis()
-        ) {
-
-            return {
-
-                status:
-                    'clarify',
-
-                clarification:
-                    '修改后的时间已经过去了，需要确认一个未来的时间。',
-
-            }
-
-        }
-
-
-        const content =
-            typeof parsed.content ===
-                'string' &&
-                parsed.content.trim()
-                ? parsed.content.trim()
-                : targetReminder.content
-
-
-        const beforeRaw =
-            parsed
-                .remind_before_minutes ===
-                null ||
-                parsed
-                    .remind_before_minutes ===
-                undefined
-                ? null
-                : Number(
+                typeof parsed
+                    .clarification ===
+                    'string' &&
                     parsed
-                        .remind_before_minutes
-                )
-
-
-        const remindBeforeMinutes =
-            beforeRaw ===
-                null
-                ? Number(
-                    targetReminder
-                        .remind_before_minutes
-                ) || 0
-                : Number.isFinite(
-                    beforeRaw
-                ) &&
-                    beforeRaw >= 0
-                    ? Math.min(
-                        10080,
-                        Math.round(
-                            beforeRaw
-                        )
-                    )
-                    : null
-
-
-        if (
-            remindBeforeMinutes ===
-            null
-        ) {
-
-            return {
-
-                status:
-                    'clarify',
-
-                clarification:
-                    '新的提前提醒时间没有解析成功。',
-
-            }
-
-        }
-
-
-        const plannedRemindLocal =
-            newEventLocal.minus({
-                minutes:
-                    remindBeforeMinutes,
-            })
-
-
-        const remindLocal =
-            plannedRemindLocal
-                .toMillis() <
-                nowLocal
-                    .toMillis()
-                ? nowLocal
-                : plannedRemindLocal
-
-
-        const oldSnapshot = {
-            content:
-                targetReminder.content,
-
-            event_at:
-                targetReminder.event_at,
-
-            remind_at:
-                targetReminder.remind_at,
-
-            remind_before_minutes:
-                targetReminder
-                    .remind_before_minutes,
-        }
-
-
-        const oldMetadata =
-            targetReminder.metadata &&
-                typeof targetReminder
-                    .metadata ===
-                'object' &&
-                !Array.isArray(
-                    targetReminder
-                        .metadata
-                )
-                ? targetReminder
-                    .metadata
-                : {}
-
-
-        const {
-            data:
-            updatedReminder,
-
-            error:
-            updateError,
-        } =
-            await supabase
-                .from(
-                    'reminders'
-                )
-                .update({
-                    content,
-
-                    event_at:
-                        newEventLocal
-                            .toUTC()
-                            .toISO(),
-
-                    remind_at:
-                        remindLocal
-                            .toUTC()
-                            .toISO(),
-
-                    timezone:
-                        timeZone,
-
-                    remind_before_minutes:
-                        remindBeforeMinutes,
-
-                    metadata: {
-                        ...oldMetadata,
-
-                        updated_via:
-                            'chat',
-
-                        updated_at:
-                            new Date()
-                                .toISOString(),
-
-                        event_local:
-                            newEventLocal
-                                .toFormat(
-                                    "yyyy-LL-dd'T'HH:mm:ss"
-                                ),
-                    },
-                })
-                .eq(
-                    'id',
-                    targetReminder.id
-                )
-                .eq(
-                    'user_id',
-                    userId
-                )
-                .eq(
-                    'status',
-                    'pending'
-                )
-                .select(
-                    'id, user_id, session_id, source_message_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, metadata'
-                )
-                .maybeSingle()
-
-
-        if (updateError) {
-            throw updateError
-        }
-
-
-        if (!updatedReminder) {
-
-            return {
-
-                status:
-                    'clarify',
-
-                clarification:
-                    '这条提醒刚刚已经发生变化，请重新确认一次。',
-
-            }
-
-        }
-
-
-        return {
-
-            status:
-                'updated',
-
-            reminder:
-                updatedReminder,
-
-            previous:
-                oldSnapshot,
-
-            timeZone,
+                        .clarification
+                        .trim()
+                    ? parsed
+                        .clarification
+                        .trim()
+                    : '还缺少一个明确的提醒时间。',
 
         }
 
@@ -3542,6 +2793,9 @@ remind_before_minutes = 30。
         })
 
 
+    // 如果事情已经很近，
+    // “提前十分钟”已经来不及，
+    // 那么提醒时间就设成现在。
     const remindLocal =
         plannedRemindLocal.toMillis() <
             nowLocal.toMillis()
@@ -3606,7 +2860,7 @@ remind_before_minutes = 30。
                 },
             ])
             .select(
-                'id, user_id, session_id, source_message_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, metadata'
+                'id, session_id, source_message_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, metadata'
             )
             .single()
 
@@ -3630,27 +2884,21 @@ remind_before_minutes = 30。
                 'yyyy-LL-dd HH:mm'
             ),
 
-        timeZone,
-
     }
 }
 
 
 // ======================================================
-// 提醒结果交给正常聊天模型，用角色口吻回复
+// 告诉“正常聊天模型”提醒到底有没有创建成功
 // ======================================================
 
 function buildReminderReplyContext(
     reminderResult
 ) {
 
-    const status =
-        reminderResult
-            ?.status
-
-
     if (
-        status ===
+        reminderResult
+            ?.status ===
         'created'
     ) {
 
@@ -3676,442 +2924,25 @@ function buildReminderReplyContext(
 
 
     if (
-        status ===
-        'listed'
-    ) {
-
-        const reminders =
-            reminderResult
-                .reminders ||
-            []
-
-
-        if (
-            reminders.length ===
-            0
-        ) {
-
-            return `【本次提醒操作结果】
-
-用户正在查询还没完成的提醒。
-当前没有 pending 提醒。
-
-请以沈星回的身份自然告诉用户目前没有待处理提醒。
-不要编造不存在的提醒。`
-
-        }
-
-
-        const lines =
-            reminders
-                .slice(
-                    0,
-                    10
-                )
-                .map(
-                    (
-                        reminder,
-                        index
-                    ) => {
-
-                        const timeZone =
-                            getValidTimeZone(
-                                reminder.timezone
-                            ) ||
-                            reminderResult
-                                .timeZone ||
-                            'UTC'
-
-
-                        const eventLocal =
-                            DateTime
-                                .fromISO(
-                                    reminder.event_at,
-                                    {
-                                        setZone:
-                                            true,
-                                    }
-                                )
-                                .setZone(
-                                    timeZone
-                                )
-
-
-                        return (
-                            `${index + 1}. ${reminder.content}｜${eventLocal.toFormat('yyyy-LL-dd HH:mm')}｜提前 ${reminder.remind_before_minutes} 分钟`
-                        )
-
-                    }
-                )
-                .join(
-                    '\n'
-                )
-
-
-        return `【本次提醒操作结果】
-
-用户正在查询还没完成的提醒。
-以下是数据库里真实存在的 pending 提醒：
-
-${lines}
-
-请以沈星回的身份自然告诉用户。
-信息必须准确，不要增加不存在的提醒。
-如果条目较多，可以简洁列出，不需要长篇解释。`
-
-    }
-
-
-    if (
-        status ===
-        'cancelled'
-    ) {
-
-        const reminder =
-            reminderResult
-                .reminder
-
-
-        return `【本次提醒操作结果】
-
-用户要求取消一条提醒，操作已经真正成功。
-
-已取消：
-${reminder.content}
-
-请以沈星回的身份自然确认已经取消。
-不要说它仍然会提醒，也不要编造其他变化。`
-
-    }
-
-
-    if (
-        status ===
-        'cancelled_all'
-    ) {
-
-        const count =
-            Number(
-                reminderResult
-                    .cancelledCount
-            ) || 0
-
-
-        return `【本次提醒操作结果】
-
-用户明确要求取消全部待处理提醒。
-这次实际取消数量：${count}。
-
-请以沈星回的身份自然确认结果。
-如果数量是 0，就自然告诉用户本来就没有待处理提醒。
-不要编造不存在的提醒。`
-
-    }
-
-
-    if (
-        status ===
-        'updated'
-    ) {
-
-        const reminder =
-            reminderResult
-                .reminder
-
-
-        const timeZone =
-            getValidTimeZone(
-                reminder.timezone
-            ) ||
-            reminderResult
-                .timeZone ||
-            'UTC'
-
-
-        const eventLocal =
-            DateTime
-                .fromISO(
-                    reminder.event_at,
-                    {
-                        setZone:
-                            true,
-                    }
-                )
-                .setZone(
-                    timeZone
-                )
-
-
-        return `【本次提醒操作结果】
-
-用户要求修改一条提醒，操作已经真正成功。
-
-现在的提醒：
-内容：${reminder.content}
-事件时间（用户本地）：${eventLocal.toFormat('yyyy-LL-dd HH:mm')}
-提前提醒：${reminder.remind_before_minutes} 分钟
-
-请以沈星回的身份自然确认修改后的结果。
-不要再次询问已经确定的信息。
-不要提数据库、API、解析器等内部机制。`
-
-    }
-
-
-    if (
-        status ===
+        reminderResult
+            ?.status ===
         'clarify'
     ) {
 
         return `【本次提醒操作结果】
 
-用户有提醒相关意图，但当前还不能安全完成操作。
+用户有设置提醒的意图，但当前还没有成功创建提醒。
 
 原因：
 ${reminderResult.clarification}
 
-这次回复请自然地追问真正缺失的信息。
-不要说“已经设置好了”“已经取消了”“已经改好了”等暗示操作成功的话。`
+这次回复请自然地追问缺失的信息。
+不要说“已经记住了”“已经设置好了”或其他暗示提醒已经创建成功的话。`
 
     }
 
 
     return ''
-}
-
-
-// ======================================================
-// 提醒管理操作的即时确认回复
-//
-// 创建 / 查询 / 修改 / 取消提醒已经由后端真实执行。
-// 这类操作不再为了生成一句确认文案额外调用第二次模型。
-// 真正“到点提醒”的消息仍然由角色模型生成。
-// ======================================================
-
-function buildDirectReminderReply(
-    reminderResult
-) {
-
-    const status =
-        reminderResult
-            ?.status
-
-
-    const formatReminderTime =
-        (
-            reminder
-        ) => {
-
-            const timeZone =
-                getValidTimeZone(
-                    reminder
-                        ?.timezone
-                ) ||
-                reminderResult
-                    ?.timeZone ||
-                'UTC'
-
-
-            const local =
-                DateTime
-                    .fromISO(
-                        reminder
-                            .event_at,
-                        {
-                            setZone:
-                                true,
-                        }
-                    )
-                    .setZone(
-                        timeZone
-                    )
-
-
-            return local
-                .isValid
-                ? local.toFormat(
-                    'LL月dd日 HH:mm'
-                )
-                : ''
-
-        }
-
-
-    const formatBefore =
-        (
-            minutes
-        ) => {
-
-            const value =
-                Math.max(
-                    0,
-                    Number(
-                        minutes
-                    ) || 0
-                )
-
-
-            if (
-                value === 0
-            ) {
-                return '到点'
-            }
-
-
-            if (
-                value % 60 === 0
-            ) {
-
-                const hours =
-                    value / 60
-
-                return (
-                    hours === 1
-                        ? '提前1小时'
-                        : `提前${hours}小时`
-                )
-            }
-
-
-            return `提前${value}分钟`
-
-        }
-
-
-    if (
-        status ===
-        'created'
-    ) {
-
-        const reminder =
-            reminderResult
-                .reminder
-
-        return [
-            '好，记下了。',
-            `${reminder.content}：${formatReminderTime(reminder)}，${formatBefore(reminder.remind_before_minutes)}提醒你。`,
-        ].join('\n')
-
-    }
-
-
-    if (
-        status ===
-        'listed'
-    ) {
-
-        const reminders =
-            reminderResult
-                .reminders ||
-            []
-
-
-        if (
-            reminders.length ===
-            0
-        ) {
-            return '现在没有还在等着的提醒。'
-        }
-
-
-        const lines =
-            reminders
-                .slice(
-                    0,
-                    10
-                )
-                .map(
-                    (
-                        reminder
-                    ) =>
-                        `${reminder.content}：${formatReminderTime(reminder)}，${formatBefore(reminder.remind_before_minutes)}。`
-                )
-
-
-        return [
-            '现在还有这些：',
-            ...lines,
-        ].join('\n')
-
-    }
-
-
-    if (
-        status ===
-        'cancelled'
-    ) {
-
-        return (
-            `好，${reminderResult.reminder.content}那个提醒取消了。`
-        )
-
-    }
-
-
-    if (
-        status ===
-        'cancelled_all'
-    ) {
-
-        const count =
-            Number(
-                reminderResult
-                    .cancelledCount
-            ) || 0
-
-
-        return (
-            count > 0
-                ? `好，${count}个待处理提醒都取消了。`
-                : '现在本来就没有待处理提醒。'
-        )
-
-    }
-
-
-    if (
-        status ===
-        'updated'
-    ) {
-
-        const reminder =
-            reminderResult
-                .reminder
-
-
-        return [
-            '改好了。',
-            `${reminder.content}：${formatReminderTime(reminder)}，${formatBefore(reminder.remind_before_minutes)}提醒你。`,
-        ].join('\n')
-
-    }
-
-
-    if (
-        status ===
-        'clarify'
-    ) {
-
-        const clarification =
-            String(
-                reminderResult
-                    .clarification ||
-                '还差一点信息。'
-            )
-                .trim()
-
-
-        return (
-            clarification
-                ? `我还差一点信息：${clarification}`
-                : '我还差一点信息，确认一下再帮你改。'
-        )
-
-    }
-
-
-    return ''
-
 }
 
 
@@ -4887,20 +3718,6 @@ async function generateAndSaveReminderMessage(reminder) {
             settings
         )
 
-
-    const characterLore =
-        await getCharacterLoreContext({
-
-            userId,
-
-            currentMessage:
-                reminder.content,
-
-            recentMessages,
-
-        })
-
-
     const recentText =
         messagesToText(
             recentMessages.slice(-8)
@@ -4951,12 +3768,7 @@ ${systemPrompt}
 【固定人物设定、关系背景与共同经历】
 ${characterContext}
 
-${characterLore?.context
-        ? `${characterLore.context}
-
-`
-        : ''
-    }【长期记忆】
+【长期记忆】
 ${memorySummary || '无'}
 
 【最近聊天】
@@ -7111,826 +5923,6 @@ app.get(
 
 
 // ======================================================
-// 聊天请求幂等保护
-//
-// request_id 由前端每次发送时生成。
-// reasoning_content 已经是 messages 表现有字段，
-// 因此不需要新增数据库列。
-//
-// 作用：
-// 1. 双击 / 连按 Enter：前端同步锁先挡住。
-// 2. 同一 HTTP 请求被网络重复送达：后端复用同一个处理 Promise。
-// 3. 请求已经写入数据库、客户端却没收到响应：再次收到同一 request_id 时
-//    直接复用数据库里的用户消息 / AI 回复，不再重复写入。
-// ======================================================
-
-const chatRequestInFlight =
-    new Map()
-
-const CHAT_REQUEST_ID_MAX_LENGTH =
-    120
-
-function normalizeChatRequestId(
-    value
-) {
-
-    const requestId =
-        typeof value ===
-            'string'
-            ? value.trim()
-            : ''
-
-    if (!requestId) {
-        return null
-    }
-
-    if (
-        requestId.length >
-        CHAT_REQUEST_ID_MAX_LENGTH
-    ) {
-        return null
-    }
-
-    if (
-        !/^[A-Za-z0-9._:-]+$/
-            .test(
-                requestId
-            )
-    ) {
-        return null
-    }
-
-    return requestId
-}
-
-
-function buildChatRequestMarker(
-    type,
-    requestId
-) {
-
-    return (
-        `chat:${type}:${requestId}`
-    )
-}
-
-
-async function getExistingChatRequestMessages({
-    userId,
-    sessionId,
-    requestId,
-}) {
-
-    const userMarker =
-        buildChatRequestMarker(
-            'user',
-            requestId
-        )
-
-    const assistantMarker =
-        buildChatRequestMarker(
-            'assistant',
-            requestId
-        )
-
-    const {
-        data,
-        error,
-    } =
-        await supabase
-            .from(
-                'messages'
-            )
-            .select(
-                'id, session_id, role, content, created_at, visible, reasoning_content'
-            )
-            .eq(
-                'user_id',
-                userId
-            )
-            .eq(
-                'session_id',
-                sessionId
-            )
-            .in(
-                'reasoning_content',
-                [
-                    userMarker,
-                    assistantMarker,
-                ]
-            )
-            .order(
-                'created_at',
-                {
-                    ascending:
-                        true,
-                }
-            )
-            .order(
-                'id',
-                {
-                    ascending:
-                        true,
-                }
-            )
-
-    if (error) {
-        throw error
-    }
-
-    const rows =
-        Array.isArray(data)
-            ? data
-            : []
-
-    return {
-        userMessage:
-            rows.find(
-                (item) =>
-                    item.role ===
-                        'user' &&
-                    item.reasoning_content ===
-                        userMarker
-            ) || null,
-
-        assistantMessage:
-            rows.find(
-                (item) =>
-                    item.role ===
-                        'assistant' &&
-                    item.reasoning_content ===
-                        assistantMarker
-            ) || null,
-
-        userMarker,
-        assistantMarker,
-    }
-}
-
-
-async function getReminderCreatedByMessage(
-    userId,
-    userMessageId
-) {
-
-    if (!userMessageId) {
-        return null
-    }
-
-    const {
-        data,
-        error,
-    } =
-        await supabase
-            .from(
-                'reminders'
-            )
-            .select(
-                'id, user_id, session_id, source_message_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, sent_at, cancelled_at, metadata'
-            )
-            .eq(
-                'user_id',
-                userId
-            )
-            .eq(
-                'source_message_id',
-                userMessageId
-            )
-            .order(
-                'created_at',
-                {
-                    ascending:
-                        true,
-                }
-            )
-            .limit(1)
-            .maybeSingle()
-
-    if (error) {
-        throw error
-    }
-
-    return data || null
-}
-
-
-async function processChatRequestOnce({
-    userId,
-    sessionId,
-    cleanMessage,
-    requestId,
-}) {
-
-    let existing =
-        await getExistingChatRequestMessages({
-            userId,
-            sessionId,
-            requestId,
-        })
-
-
-    // --------------------------------------------------
-    // 同一个 request_id 不允许对应另一段用户文字。
-    // --------------------------------------------------
-
-    if (
-        existing.userMessage &&
-        existing.userMessage
-            .content !==
-        cleanMessage
-    ) {
-
-        const collisionError =
-            new Error(
-                'request_id 已经被另一条消息使用'
-            )
-
-        collisionError.statusCode =
-            409
-
-        throw collisionError
-    }
-
-
-    // --------------------------------------------------
-    // 数据库里已经有完整的一问一答：直接回放。
-    // 不再调用模型，也不再写消息。
-    // --------------------------------------------------
-
-    if (
-        existing.userMessage &&
-        existing.assistantMessage
-    ) {
-
-        const existingReminder =
-            await getReminderCreatedByMessage(
-                userId,
-                existing
-                    .userMessage
-                    .id
-            )
-
-        return {
-            ok:
-                true,
-
-            session_id:
-                sessionId,
-
-            request_id:
-                requestId,
-
-            idempotent_replay:
-                true,
-
-            reply:
-                existing
-                    .assistantMessage
-                    .content,
-
-            estimated_tokens:
-                null,
-
-            compression: {
-                triggered:
-                    false,
-                reason:
-                    'idempotent_replay',
-            },
-
-            user_message:
-                existing
-                    .userMessage,
-
-            assistant_message:
-                existing
-                    .assistantMessage,
-
-            reminder:
-                existingReminder,
-        }
-    }
-
-
-    // ==================================================
-    // 保存真正的用户消息
-    //
-    // 如果上一次请求已经写入用户消息但客户端没拿到响应，
-    // 这里会复用原记录，不会再插一条重复消息。
-    // ==================================================
-
-    let userMessage =
-        existing.userMessage
-
-    let createdUserMessage =
-        false
-
-    if (!userMessage) {
-
-        const {
-            data,
-            error,
-        } =
-            await supabase
-                .from(
-                    'messages'
-                )
-                .insert([
-                    {
-                        user_id:
-                            userId,
-
-                        session_id:
-                            sessionId,
-
-                        role:
-                            'user',
-
-                        content:
-                            cleanMessage,
-
-                        visible:
-                            true,
-
-                        reasoning_content:
-                            existing
-                                .userMarker,
-                    },
-                ])
-                .select(
-                    'id, session_id, role, content, created_at, visible, reasoning_content'
-                )
-                .single()
-
-        if (error) {
-
-            // 如果已经执行了可选的数据库唯一索引，
-            // 多实例极端并发时其中一个 INSERT 可能拿到 23505。
-            // 这不是聊天失败，而是说明另一条执行链已经先写入。
-            if (
-                String(
-                    error.code ||
-                    ''
-                ) ===
-                '23505'
-            ) {
-
-                existing =
-                    await getExistingChatRequestMessages({
-                        userId,
-                        sessionId,
-                        requestId,
-                    })
-
-                if (
-                    existing.userMessage &&
-                    existing.userMessage
-                        .content ===
-                    cleanMessage
-                ) {
-
-                    userMessage =
-                        existing
-                            .userMessage
-
-                } else {
-                    throw error
-                }
-
-            } else {
-                throw error
-            }
-
-        } else {
-
-            userMessage =
-                data
-
-            createdUserMessage =
-                true
-        }
-    }
-
-
-    const settings =
-        await getGlobalSettings(
-            userId
-        )
-
-
-    // ==================================================
-    // 检查当前消息是否包含提醒创建 / 查询 / 取消 / 修改请求
-    // ==================================================
-
-    const reminderRecentMessages =
-        await getRecentVisibleMessages(
-            sessionId,
-            settings
-        )
-
-
-    let reminderResult = {
-        status:
-            'none',
-    }
-
-
-    // 如果这个用户消息已经创建过提醒，优先复用，
-    // 避免网络重放造成同一个提醒被插入两次。
-    const existingCreatedReminder =
-        await getReminderCreatedByMessage(
-            userId,
-            userMessage.id
-        )
-
-    if (existingCreatedReminder) {
-
-        reminderResult = {
-            status:
-                'created',
-
-            reminder:
-                existingCreatedReminder,
-
-            timeZone:
-                existingCreatedReminder
-                    .timezone,
-        }
-
-    } else if (
-        shouldAnalyzeReminderIntent(
-            cleanMessage,
-            reminderRecentMessages
-        )
-    ) {
-
-        try {
-
-            reminderResult =
-                await analyzeReminderIntent({
-                    sessionId,
-                    userId,
-                    settings,
-                    cleanMessage,
-                    userMessageId:
-                        userMessage.id,
-                    recentMessages:
-                        reminderRecentMessages,
-                })
-
-        } catch (
-        reminderError
-        ) {
-
-            console.error(
-                '提醒识别或保存失败：',
-                reminderError
-            )
-
-            reminderResult = {
-                status:
-                    'clarify',
-
-                clarification:
-                    '这次提醒没有成功保存，请让用户重新确认一次具体时间。',
-            }
-        }
-    }
-
-
-    // 只有本次真正新插入用户消息时才做记忆压缩。
-    // 如果是在恢复一个已经开始过的 request_id，跳过一次压缩即可，
-    // 避免极端断线场景下重复生成长期记忆。
-    const compression =
-        createdUserMessage
-            ? await compressMemoryIfNeeded(
-                sessionId,
-                settings,
-                userId
-            )
-            : {
-                triggered:
-                    false,
-                reason:
-                    'idempotent_resume',
-            }
-
-
-    const latestMemory =
-        await getLatestMemory(
-            userId
-        )
-
-
-    const memorySummary =
-        typeof latestMemory
-            ?.summary ===
-            'string'
-            ? latestMemory
-                .summary
-                .trim()
-            : ''
-
-
-    const history =
-        await getRecentVisibleMessages(
-            sessionId,
-            settings
-        )
-
-
-    const characterLore =
-        await getCharacterLoreContext({
-            userId,
-            currentMessage:
-                cleanMessage,
-            recentMessages:
-                history,
-        })
-
-
-    const baseModelInput =
-        buildModelContext({
-            settings,
-            memorySummary,
-            messages:
-                history,
-            characterLoreContext:
-                characterLore
-                    .context,
-        })
-
-
-    const reminderReplyContext =
-        buildReminderReplyContext(
-            reminderResult
-        )
-
-
-    const modelInput =
-        reminderReplyContext
-            ? `${baseModelInput}\n\n${reminderReplyContext}`
-            : baseModelInput
-
-
-    const finalEstimatedTokens =
-        estimateTokens(
-            modelInput
-        )
-
-
-    let reply =
-        ''
-
-
-    if (
-        reminderResult
-            .status !==
-        'none'
-    ) {
-
-        reply =
-            buildDirectReminderReply(
-                reminderResult
-            )
-
-    } else {
-
-        const response =
-            await callModelWithRetry({
-                model:
-                    'gpt-5.6-sol',
-                input:
-                    modelInput,
-            })
-
-        reply =
-            typeof response
-                .output_text ===
-                'string'
-                ? response
-                    .output_text
-                    .trim()
-                : ''
-    }
-
-
-    if (!reply) {
-        throw new Error(
-            'AI 没有返回有效的文本回复'
-        )
-    }
-
-
-    // --------------------------------------------------
-    // 在写 AI 回复前再查一次。
-    // 这能覆盖“同一 request_id 在另一条执行链刚刚完成”的极端情况。
-    // --------------------------------------------------
-
-    existing =
-        await getExistingChatRequestMessages({
-            userId,
-            sessionId,
-            requestId,
-        })
-
-    if (existing.assistantMessage) {
-
-        return {
-            ok:
-                true,
-
-            session_id:
-                sessionId,
-
-            request_id:
-                requestId,
-
-            idempotent_replay:
-                true,
-
-            reply:
-                existing
-                    .assistantMessage
-                    .content,
-
-            estimated_tokens:
-                finalEstimatedTokens,
-
-            compression,
-
-            user_message:
-                userMessage,
-
-            assistant_message:
-                existing
-                    .assistantMessage,
-
-            reminder:
-                reminderResult
-                    .status ===
-                    'created'
-                    ? reminderResult
-                        .reminder
-                    : null,
-        }
-    }
-
-
-    let assistantMessage =
-        null
-
-    const {
-        data:
-        insertedAssistantMessage,
-
-        error:
-        assistantMessageError,
-    } =
-        await supabase
-            .from(
-                'messages'
-            )
-            .insert([
-                {
-                    user_id:
-                        userId,
-
-                    session_id:
-                        sessionId,
-
-                    role:
-                        'assistant',
-
-                    content:
-                        reply,
-
-                    visible:
-                        true,
-
-                    reasoning_content:
-                        existing
-                            .assistantMarker,
-                },
-            ])
-            .select(
-                'id, session_id, role, content, created_at, visible, reasoning_content'
-            )
-            .single()
-
-
-    if (assistantMessageError) {
-
-        if (
-            String(
-                assistantMessageError
-                    .code ||
-                ''
-            ) ===
-            '23505'
-        ) {
-
-            existing =
-                await getExistingChatRequestMessages({
-                    userId,
-                    sessionId,
-                    requestId,
-                })
-
-            if (existing.assistantMessage) {
-
-                assistantMessage =
-                    existing
-                        .assistantMessage
-
-                reply =
-                    assistantMessage
-                        .content
-
-            } else {
-                throw assistantMessageError
-            }
-
-        } else {
-            throw assistantMessageError
-        }
-
-    } else {
-
-        assistantMessage =
-            insertedAssistantMessage
-    }
-
-
-    const {
-        error:
-        sessionUpdateError,
-    } =
-        await supabase
-            .from(
-                'sessions'
-            )
-            .update({
-                updated_at:
-                    new Date()
-                        .toISOString(),
-            })
-            .eq(
-                'id',
-                sessionId
-            )
-            .eq(
-                'user_id',
-                userId
-            )
-
-
-    if (sessionUpdateError) {
-        console.error(
-            '更新 session 时间失败：',
-            sessionUpdateError
-        )
-    }
-
-
-    return {
-        ok:
-            true,
-
-        session_id:
-            sessionId,
-
-        request_id:
-            requestId,
-
-        idempotent_replay:
-            false,
-
-        reply,
-
-        estimated_tokens:
-            finalEstimatedTokens,
-
-        compression,
-
-        user_message:
-            userMessage,
-
-        assistant_message:
-            assistantMessage,
-
-        reminder:
-            reminderResult
-                .status ===
-                'created'
-                ? reminderResult
-                    .reminder
-                : null,
-    }
-}
-
-
-// ======================================================
 // 核心 AI 对话
 // POST /api/chat
 // ======================================================
@@ -7961,12 +5953,13 @@ app.post(
             }
 
             const {
+
                 message,
+
                 session_id,
-                request_id,
+
             } =
                 req.body
-
 
             if (
                 typeof message !==
@@ -7977,87 +5970,57 @@ app.post(
                 return res
                     .status(400)
                     .json({
+
                         ok:
                             false,
+
                         error:
                             'message 不能为空',
-                    })
-            }
 
+                    })
+
+            }
 
             const cleanMessage =
                 message.trim()
-
-
-            const suppliedRequestId =
-                request_id !==
-                    undefined &&
-                request_id !==
-                    null &&
-                request_id !==
-                    ''
-
-            const normalizedRequestId =
-                normalizeChatRequestId(
-                    request_id
-                )
-
-
-            if (
-                suppliedRequestId &&
-                !normalizedRequestId
-            ) {
-
-                return res
-                    .status(400)
-                    .json({
-                        ok:
-                            false,
-                        error:
-                            '无效的 request_id',
-                    })
-            }
-
-
-            // 兼容尚未更新的旧前端：
-            // 没传 request_id 时由后端补一个。
-            // 新前端会始终主动传入，因此正常使用时具有完整幂等能力。
-            const requestId =
-                normalizedRequestId ||
-                crypto.randomUUID()
-
 
             let sessionId =
                 null
 
             const hasSessionId =
                 session_id !==
-                    undefined &&
+                undefined &&
                 session_id !==
-                    null &&
+                null &&
                 session_id !==
-                    ''
+                ''
 
-
-            if (hasSessionId) {
+            if (
+                hasSessionId
+            ) {
 
                 const parsedSessionId =
                     parsePositiveSessionId(
                         session_id
                     )
 
-                if (!parsedSessionId) {
+                if (
+                    !parsedSessionId
+                ) {
 
                     return res
                         .status(400)
                         .json({
+
                             ok:
                                 false,
+
                             error:
                                 '无效的 session_id',
-                        })
-                }
 
+                        })
+
+                }
 
                 const session =
                     await getSessionById(
@@ -8071,11 +6034,15 @@ app.post(
                     return res
                         .status(404)
                         .json({
+
                             ok:
                                 false,
+
                             error:
                                 '会话不存在',
+
                         })
+
                 }
 
                 sessionId =
@@ -8110,10 +6077,11 @@ app.post(
                         )
                         .limit(1)
 
-                if (recentSessionError) {
+                if (
+                    recentSessionError
+                ) {
                     throw recentSessionError
                 }
-
 
                 if (
                     recentSessions &&
@@ -8140,10 +6108,13 @@ app.post(
                             )
                             .insert([
                                 {
+
                                     name:
                                         '新对话',
+
                                     user_id:
                                         req.userId,
+
                                 },
                             ])
                             .select(
@@ -8151,85 +6122,375 @@ app.post(
                             )
                             .single()
 
-                    if (newSessionError) {
+                    if (
+                        newSessionError
+                    ) {
                         throw newSessionError
                     }
 
                     sessionId =
                         newSession.id
+
                 }
+
             }
 
 
-            const requestKey =
-                `${req.userId}:${sessionId}:${requestId}`
+            // ==================================================
+            // 保存真正的用户消息
+            // ==================================================
 
+            const {
+                data:
+                userMessage,
 
-            // 同一个 Node 进程里如果已经在处理同一 request_id，
-            // 后来的重复 HTTP 请求直接等待前一个 Promise。
-            const existingPromise =
-                chatRequestInFlight
-                    .get(
-                        requestKey
+                error:
+                userMessageError,
+            } =
+                await supabase
+                    .from(
+                        'messages'
                     )
+                    .insert([
+                        {
 
-            if (existingPromise) {
+                            user_id:
+                                req.userId,
 
-                const existingResult =
-                    await existingPromise
+                            session_id:
+                                sessionId,
 
-                return res
-                    .status(200)
-                    .json({
-                        ...existingResult,
-                        idempotent_replay:
-                            true,
-                    })
+                            role:
+                                'user',
+
+                            content:
+                                cleanMessage,
+
+                            visible:
+                                true,
+
+                        },
+                    ])
+                    .select(
+                        'id, session_id, role, content, created_at, visible'
+                    )
+                    .single()
+
+            if (
+                userMessageError
+            ) {
+                throw userMessageError
             }
 
 
-            const requestPromise =
-                processChatRequestOnce({
-                    userId:
-                        req.userId,
+            const settings =
+                await getGlobalSettings(
+                    req.userId
+                )
+
+
+            // ==================================================
+            // 检查当前消息是否包含提醒请求
+            // ==================================================
+
+            const reminderRecentMessages =
+                await getRecentVisibleMessages(
                     sessionId,
+                    settings
+                )
+
+
+            let reminderResult = {
+                status:
+                    'none',
+            }
+
+
+            if (
+                shouldAnalyzeReminderIntent(
                     cleanMessage,
-                    requestId,
-                })
+                    reminderRecentMessages
+                )
+            ) {
 
-            chatRequestInFlight.set(
-                requestKey,
-                requestPromise
-            )
+                try {
 
+                    reminderResult =
+                        await analyzeAndCreateReminder({
 
-            try {
+                            sessionId,
 
-                const result =
-                    await requestPromise
+                            userId:
+                                req.userId,
 
-                return res
-                    .status(200)
-                    .json(
-                        result
-                    )
+                            settings,
 
-            } finally {
+                            cleanMessage,
 
-                if (
-                    chatRequestInFlight
-                        .get(
-                            requestKey
-                        ) ===
-                    requestPromise
+                            userMessageId:
+                                userMessage.id,
+
+                            recentMessages:
+                                reminderRecentMessages,
+
+                        })
+
+                } catch (
+                reminderError
                 ) {
 
-                    chatRequestInFlight
-                        .delete(
-                            requestKey
-                        )
+                    console.error(
+                        '提醒识别或保存失败：',
+                        reminderError
+                    )
+
+
+                    // 很重要：
+                    // 失败时绝对不能让模型假装“提醒已经设置成功”
+                    reminderResult = {
+
+                        status:
+                            'clarify',
+
+                        clarification:
+                            '这次提醒没有成功保存，请让用户重新确认一次具体时间。',
+
+                    }
+
                 }
+
             }
+
+
+            const compression =
+                await compressMemoryIfNeeded(
+                    sessionId,
+                    settings,
+                    req.userId
+                )
+
+
+
+            const latestMemory =
+                await getLatestMemory(
+                    req.userId
+                )
+
+
+            const memorySummary =
+                typeof latestMemory
+                    ?.summary ===
+                    'string'
+                    ? latestMemory
+                        .summary
+                        .trim()
+                    : ''
+
+
+            const history =
+                await getRecentVisibleMessages(
+                    sessionId,
+                    settings
+                )
+
+
+            const characterLore =
+                await getCharacterLoreContext({
+
+                    userId:
+                        req.userId,
+
+                    currentMessage:
+                        cleanMessage,
+
+                    recentMessages:
+                        history,
+
+                })
+
+
+            const baseModelInput =
+                buildModelContext({
+
+                    settings,
+
+                    memorySummary,
+
+                    messages:
+                        history,
+
+                    characterLoreContext:
+                        characterLore
+                            .context,
+
+                })
+
+
+            const reminderReplyContext =
+                buildReminderReplyContext(
+                    reminderResult
+                )
+
+
+            const modelInput =
+                reminderReplyContext
+                    ? `${baseModelInput}
+
+${reminderReplyContext}`
+                    : baseModelInput
+
+
+            const finalEstimatedTokens =
+                estimateTokens(
+                    modelInput
+                )
+
+
+            const response =
+                await callModelWithRetry({
+
+                    model:
+                        'gpt-5.6-sol',
+
+                    input:
+                        modelInput,
+
+                })
+
+            const reply =
+                typeof response
+                    .output_text ===
+                    'string'
+                    ? response
+                        .output_text
+                        .trim()
+                    : ''
+
+
+            if (!reply) {
+
+                throw new Error(
+                    'AI 没有返回有效的文本回复'
+                )
+
+            }
+
+
+            const {
+                data:
+                assistantMessage,
+
+                error:
+                assistantMessageError,
+            } =
+                await supabase
+                    .from(
+                        'messages'
+                    )
+                    .insert([
+                        {
+
+                            user_id:
+                                req.userId,
+
+                            session_id:
+                                sessionId,
+
+                            role:
+                                'assistant',
+
+                            content:
+                                reply,
+
+                            visible:
+                                true,
+
+                        },
+                    ])
+                    .select(
+                        'id, session_id, role, content, created_at, visible'
+                    )
+                    .single()
+
+
+            if (
+                assistantMessageError
+            ) {
+                throw assistantMessageError
+            }
+
+
+            const {
+                error:
+                sessionUpdateError,
+            } =
+                await supabase
+                    .from(
+                        'sessions'
+                    )
+                    .update({
+
+                        updated_at:
+                            new Date()
+                                .toISOString(),
+
+                    })
+                    .eq(
+                        'id',
+                        sessionId
+                    )
+                    .eq(
+                        'user_id',
+                        req.userId
+                    )
+
+
+            if (
+                sessionUpdateError
+            ) {
+
+                console.error(
+                    '更新 session 时间失败：',
+                    sessionUpdateError
+                )
+
+            }
+
+
+            res
+                .status(200)
+                .json({
+
+                    ok:
+                        true,
+
+                    session_id:
+                        sessionId,
+
+                    reply,
+
+                    estimated_tokens:
+                        finalEstimatedTokens,
+
+                    compression,
+
+                    user_message:
+                        userMessage,
+
+                    assistant_message:
+                        assistantMessage,
+
+                    reminder:
+                        reminderResult
+                            .status ===
+                            'created'
+                            ? reminderResult
+                                .reminder
+                            : null,
+
+
+                })
+
 
         } catch (
         error
@@ -8240,38 +6501,26 @@ app.post(
                 error
             )
 
-            const statusCode =
-                Number(
-                    error
-                        ?.statusCode
-                )
-
             res
-                .status(
-                    Number.isFinite(
-                        statusCode
-                    ) &&
-                        statusCode >= 400 &&
-                        statusCode <= 599
-                        ? statusCode
-                        : 500
-                )
+                .status(500)
                 .json({
+
                     ok:
                         false,
+
                     error:
                         'AI 对话处理失败',
+
                     detail:
                         error.message,
-                    request_id:
-                        normalizeChatRequestId(
-                            req.body
-                                ?.request_id
-                        ),
+
                 })
+
         }
+
     }
 )
+
 
 // ======================================================
 // 手动触发星星主动发消息
