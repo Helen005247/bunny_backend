@@ -7036,6 +7036,826 @@ app.get(
 
 
 // ======================================================
+// 聊天请求幂等保护
+//
+// request_id 由前端每次发送时生成。
+// reasoning_content 已经是 messages 表现有字段，
+// 因此不需要新增数据库列。
+//
+// 作用：
+// 1. 双击 / 连按 Enter：前端同步锁先挡住。
+// 2. 同一 HTTP 请求被网络重复送达：后端复用同一个处理 Promise。
+// 3. 请求已经写入数据库、客户端却没收到响应：再次收到同一 request_id 时
+//    直接复用数据库里的用户消息 / AI 回复，不再重复写入。
+// ======================================================
+
+const chatRequestInFlight =
+    new Map()
+
+const CHAT_REQUEST_ID_MAX_LENGTH =
+    120
+
+function normalizeChatRequestId(
+    value
+) {
+
+    const requestId =
+        typeof value ===
+            'string'
+            ? value.trim()
+            : ''
+
+    if (!requestId) {
+        return null
+    }
+
+    if (
+        requestId.length >
+        CHAT_REQUEST_ID_MAX_LENGTH
+    ) {
+        return null
+    }
+
+    if (
+        !/^[A-Za-z0-9._:-]+$/
+            .test(
+                requestId
+            )
+    ) {
+        return null
+    }
+
+    return requestId
+}
+
+
+function buildChatRequestMarker(
+    type,
+    requestId
+) {
+
+    return (
+        `chat:${type}:${requestId}`
+    )
+}
+
+
+async function getExistingChatRequestMessages({
+    userId,
+    sessionId,
+    requestId,
+}) {
+
+    const userMarker =
+        buildChatRequestMarker(
+            'user',
+            requestId
+        )
+
+    const assistantMarker =
+        buildChatRequestMarker(
+            'assistant',
+            requestId
+        )
+
+    const {
+        data,
+        error,
+    } =
+        await supabase
+            .from(
+                'messages'
+            )
+            .select(
+                'id, session_id, role, content, created_at, visible, reasoning_content'
+            )
+            .eq(
+                'user_id',
+                userId
+            )
+            .eq(
+                'session_id',
+                sessionId
+            )
+            .in(
+                'reasoning_content',
+                [
+                    userMarker,
+                    assistantMarker,
+                ]
+            )
+            .order(
+                'created_at',
+                {
+                    ascending:
+                        true,
+                }
+            )
+            .order(
+                'id',
+                {
+                    ascending:
+                        true,
+                }
+            )
+
+    if (error) {
+        throw error
+    }
+
+    const rows =
+        Array.isArray(data)
+            ? data
+            : []
+
+    return {
+        userMessage:
+            rows.find(
+                (item) =>
+                    item.role ===
+                        'user' &&
+                    item.reasoning_content ===
+                        userMarker
+            ) || null,
+
+        assistantMessage:
+            rows.find(
+                (item) =>
+                    item.role ===
+                        'assistant' &&
+                    item.reasoning_content ===
+                        assistantMarker
+            ) || null,
+
+        userMarker,
+        assistantMarker,
+    }
+}
+
+
+async function getReminderCreatedByMessage(
+    userId,
+    userMessageId
+) {
+
+    if (!userMessageId) {
+        return null
+    }
+
+    const {
+        data,
+        error,
+    } =
+        await supabase
+            .from(
+                'reminders'
+            )
+            .select(
+                'id, user_id, session_id, source_message_id, content, event_at, remind_at, timezone, status, remind_before_minutes, created_at, sent_at, cancelled_at, metadata'
+            )
+            .eq(
+                'user_id',
+                userId
+            )
+            .eq(
+                'source_message_id',
+                userMessageId
+            )
+            .order(
+                'created_at',
+                {
+                    ascending:
+                        true,
+                }
+            )
+            .limit(1)
+            .maybeSingle()
+
+    if (error) {
+        throw error
+    }
+
+    return data || null
+}
+
+
+async function processChatRequestOnce({
+    userId,
+    sessionId,
+    cleanMessage,
+    requestId,
+}) {
+
+    let existing =
+        await getExistingChatRequestMessages({
+            userId,
+            sessionId,
+            requestId,
+        })
+
+
+    // --------------------------------------------------
+    // 同一个 request_id 不允许对应另一段用户文字。
+    // --------------------------------------------------
+
+    if (
+        existing.userMessage &&
+        existing.userMessage
+            .content !==
+        cleanMessage
+    ) {
+
+        const collisionError =
+            new Error(
+                'request_id 已经被另一条消息使用'
+            )
+
+        collisionError.statusCode =
+            409
+
+        throw collisionError
+    }
+
+
+    // --------------------------------------------------
+    // 数据库里已经有完整的一问一答：直接回放。
+    // 不再调用模型，也不再写消息。
+    // --------------------------------------------------
+
+    if (
+        existing.userMessage &&
+        existing.assistantMessage
+    ) {
+
+        const existingReminder =
+            await getReminderCreatedByMessage(
+                userId,
+                existing
+                    .userMessage
+                    .id
+            )
+
+        return {
+            ok:
+                true,
+
+            session_id:
+                sessionId,
+
+            request_id:
+                requestId,
+
+            idempotent_replay:
+                true,
+
+            reply:
+                existing
+                    .assistantMessage
+                    .content,
+
+            estimated_tokens:
+                null,
+
+            compression: {
+                triggered:
+                    false,
+                reason:
+                    'idempotent_replay',
+            },
+
+            user_message:
+                existing
+                    .userMessage,
+
+            assistant_message:
+                existing
+                    .assistantMessage,
+
+            reminder:
+                existingReminder,
+        }
+    }
+
+
+    // ==================================================
+    // 保存真正的用户消息
+    //
+    // 如果上一次请求已经写入用户消息但客户端没拿到响应，
+    // 这里会复用原记录，不会再插一条重复消息。
+    // ==================================================
+
+    let userMessage =
+        existing.userMessage
+
+    let createdUserMessage =
+        false
+
+    if (!userMessage) {
+
+        const {
+            data,
+            error,
+        } =
+            await supabase
+                .from(
+                    'messages'
+                )
+                .insert([
+                    {
+                        user_id:
+                            userId,
+
+                        session_id:
+                            sessionId,
+
+                        role:
+                            'user',
+
+                        content:
+                            cleanMessage,
+
+                        visible:
+                            true,
+
+                        reasoning_content:
+                            existing
+                                .userMarker,
+                    },
+                ])
+                .select(
+                    'id, session_id, role, content, created_at, visible, reasoning_content'
+                )
+                .single()
+
+        if (error) {
+
+            // 如果已经执行了可选的数据库唯一索引，
+            // 多实例极端并发时其中一个 INSERT 可能拿到 23505。
+            // 这不是聊天失败，而是说明另一条执行链已经先写入。
+            if (
+                String(
+                    error.code ||
+                    ''
+                ) ===
+                '23505'
+            ) {
+
+                existing =
+                    await getExistingChatRequestMessages({
+                        userId,
+                        sessionId,
+                        requestId,
+                    })
+
+                if (
+                    existing.userMessage &&
+                    existing.userMessage
+                        .content ===
+                    cleanMessage
+                ) {
+
+                    userMessage =
+                        existing
+                            .userMessage
+
+                } else {
+                    throw error
+                }
+
+            } else {
+                throw error
+            }
+
+        } else {
+
+            userMessage =
+                data
+
+            createdUserMessage =
+                true
+        }
+    }
+
+
+    const settings =
+        await getGlobalSettings(
+            userId
+        )
+
+
+    // ==================================================
+    // 检查当前消息是否包含提醒创建 / 查询 / 取消 / 修改请求
+    // ==================================================
+
+    const reminderRecentMessages =
+        await getRecentVisibleMessages(
+            sessionId,
+            settings
+        )
+
+
+    let reminderResult = {
+        status:
+            'none',
+    }
+
+
+    // 如果这个用户消息已经创建过提醒，优先复用，
+    // 避免网络重放造成同一个提醒被插入两次。
+    const existingCreatedReminder =
+        await getReminderCreatedByMessage(
+            userId,
+            userMessage.id
+        )
+
+    if (existingCreatedReminder) {
+
+        reminderResult = {
+            status:
+                'created',
+
+            reminder:
+                existingCreatedReminder,
+
+            timeZone:
+                existingCreatedReminder
+                    .timezone,
+        }
+
+    } else if (
+        shouldAnalyzeReminderIntent(
+            cleanMessage,
+            reminderRecentMessages
+        )
+    ) {
+
+        try {
+
+            reminderResult =
+                await analyzeReminderIntent({
+                    sessionId,
+                    userId,
+                    settings,
+                    cleanMessage,
+                    userMessageId:
+                        userMessage.id,
+                    recentMessages:
+                        reminderRecentMessages,
+                })
+
+        } catch (
+        reminderError
+        ) {
+
+            console.error(
+                '提醒识别或保存失败：',
+                reminderError
+            )
+
+            reminderResult = {
+                status:
+                    'clarify',
+
+                clarification:
+                    '这次提醒没有成功保存，请让用户重新确认一次具体时间。',
+            }
+        }
+    }
+
+
+    // 只有本次真正新插入用户消息时才做记忆压缩。
+    // 如果是在恢复一个已经开始过的 request_id，跳过一次压缩即可，
+    // 避免极端断线场景下重复生成长期记忆。
+    const compression =
+        createdUserMessage
+            ? await compressMemoryIfNeeded(
+                sessionId,
+                settings,
+                userId
+            )
+            : {
+                triggered:
+                    false,
+                reason:
+                    'idempotent_resume',
+            }
+
+
+    const latestMemory =
+        await getLatestMemory(
+            userId
+        )
+
+
+    const memorySummary =
+        typeof latestMemory
+            ?.summary ===
+            'string'
+            ? latestMemory
+                .summary
+                .trim()
+            : ''
+
+
+    const history =
+        await getRecentVisibleMessages(
+            sessionId,
+            settings
+        )
+
+
+    const characterLore =
+        await getCharacterLoreContext({
+            userId,
+            currentMessage:
+                cleanMessage,
+            recentMessages:
+                history,
+        })
+
+
+    const baseModelInput =
+        buildModelContext({
+            settings,
+            memorySummary,
+            messages:
+                history,
+            characterLoreContext:
+                characterLore
+                    .context,
+        })
+
+
+    const reminderReplyContext =
+        buildReminderReplyContext(
+            reminderResult
+        )
+
+
+    const modelInput =
+        reminderReplyContext
+            ? `${baseModelInput}\n\n${reminderReplyContext}`
+            : baseModelInput
+
+
+    const finalEstimatedTokens =
+        estimateTokens(
+            modelInput
+        )
+
+
+    let reply =
+        ''
+
+
+    if (
+        reminderResult
+            .status !==
+        'none'
+    ) {
+
+        reply =
+            buildDirectReminderReply(
+                reminderResult
+            )
+
+    } else {
+
+        const response =
+            await callModelWithRetry({
+                model:
+                    'gpt-5.6-sol',
+                input:
+                    modelInput,
+            })
+
+        reply =
+            typeof response
+                .output_text ===
+                'string'
+                ? response
+                    .output_text
+                    .trim()
+                : ''
+    }
+
+
+    if (!reply) {
+        throw new Error(
+            'AI 没有返回有效的文本回复'
+        )
+    }
+
+
+    // --------------------------------------------------
+    // 在写 AI 回复前再查一次。
+    // 这能覆盖“同一 request_id 在另一条执行链刚刚完成”的极端情况。
+    // --------------------------------------------------
+
+    existing =
+        await getExistingChatRequestMessages({
+            userId,
+            sessionId,
+            requestId,
+        })
+
+    if (existing.assistantMessage) {
+
+        return {
+            ok:
+                true,
+
+            session_id:
+                sessionId,
+
+            request_id:
+                requestId,
+
+            idempotent_replay:
+                true,
+
+            reply:
+                existing
+                    .assistantMessage
+                    .content,
+
+            estimated_tokens:
+                finalEstimatedTokens,
+
+            compression,
+
+            user_message:
+                userMessage,
+
+            assistant_message:
+                existing
+                    .assistantMessage,
+
+            reminder:
+                reminderResult
+                    .status ===
+                    'created'
+                    ? reminderResult
+                        .reminder
+                    : null,
+        }
+    }
+
+
+    let assistantMessage =
+        null
+
+    const {
+        data:
+        insertedAssistantMessage,
+
+        error:
+        assistantMessageError,
+    } =
+        await supabase
+            .from(
+                'messages'
+            )
+            .insert([
+                {
+                    user_id:
+                        userId,
+
+                    session_id:
+                        sessionId,
+
+                    role:
+                        'assistant',
+
+                    content:
+                        reply,
+
+                    visible:
+                        true,
+
+                    reasoning_content:
+                        existing
+                            .assistantMarker,
+                },
+            ])
+            .select(
+                'id, session_id, role, content, created_at, visible, reasoning_content'
+            )
+            .single()
+
+
+    if (assistantMessageError) {
+
+        if (
+            String(
+                assistantMessageError
+                    .code ||
+                ''
+            ) ===
+            '23505'
+        ) {
+
+            existing =
+                await getExistingChatRequestMessages({
+                    userId,
+                    sessionId,
+                    requestId,
+                })
+
+            if (existing.assistantMessage) {
+
+                assistantMessage =
+                    existing
+                        .assistantMessage
+
+                reply =
+                    assistantMessage
+                        .content
+
+            } else {
+                throw assistantMessageError
+            }
+
+        } else {
+            throw assistantMessageError
+        }
+
+    } else {
+
+        assistantMessage =
+            insertedAssistantMessage
+    }
+
+
+    const {
+        error:
+        sessionUpdateError,
+    } =
+        await supabase
+            .from(
+                'sessions'
+            )
+            .update({
+                updated_at:
+                    new Date()
+                        .toISOString(),
+            })
+            .eq(
+                'id',
+                sessionId
+            )
+            .eq(
+                'user_id',
+                userId
+            )
+
+
+    if (sessionUpdateError) {
+        console.error(
+            '更新 session 时间失败：',
+            sessionUpdateError
+        )
+    }
+
+
+    return {
+        ok:
+            true,
+
+        session_id:
+            sessionId,
+
+        request_id:
+            requestId,
+
+        idempotent_replay:
+            false,
+
+        reply,
+
+        estimated_tokens:
+            finalEstimatedTokens,
+
+        compression,
+
+        user_message:
+            userMessage,
+
+        assistant_message:
+            assistantMessage,
+
+        reminder:
+            reminderResult
+                .status ===
+                'created'
+                ? reminderResult
+                    .reminder
+                : null,
+    }
+}
+
+
+// ======================================================
 // 核心 AI 对话
 // POST /api/chat
 // ======================================================
@@ -7066,13 +7886,12 @@ app.post(
             }
 
             const {
-
                 message,
-
                 session_id,
-
+                request_id,
             } =
                 req.body
+
 
             if (
                 typeof message !==
@@ -7083,57 +7902,87 @@ app.post(
                 return res
                     .status(400)
                     .json({
-
                         ok:
                             false,
-
                         error:
                             'message 不能为空',
-
                     })
-
             }
+
 
             const cleanMessage =
                 message.trim()
+
+
+            const suppliedRequestId =
+                request_id !==
+                    undefined &&
+                request_id !==
+                    null &&
+                request_id !==
+                    ''
+
+            const normalizedRequestId =
+                normalizeChatRequestId(
+                    request_id
+                )
+
+
+            if (
+                suppliedRequestId &&
+                !normalizedRequestId
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok:
+                            false,
+                        error:
+                            '无效的 request_id',
+                    })
+            }
+
+
+            // 兼容尚未更新的旧前端：
+            // 没传 request_id 时由后端补一个。
+            // 新前端会始终主动传入，因此正常使用时具有完整幂等能力。
+            const requestId =
+                normalizedRequestId ||
+                crypto.randomUUID()
+
 
             let sessionId =
                 null
 
             const hasSessionId =
                 session_id !==
-                undefined &&
+                    undefined &&
                 session_id !==
-                null &&
+                    null &&
                 session_id !==
-                ''
+                    ''
 
-            if (
-                hasSessionId
-            ) {
+
+            if (hasSessionId) {
 
                 const parsedSessionId =
                     parsePositiveSessionId(
                         session_id
                     )
 
-                if (
-                    !parsedSessionId
-                ) {
+                if (!parsedSessionId) {
 
                     return res
                         .status(400)
                         .json({
-
                             ok:
                                 false,
-
                             error:
                                 '无效的 session_id',
-
                         })
-
                 }
+
 
                 const session =
                     await getSessionById(
@@ -7147,15 +7996,11 @@ app.post(
                     return res
                         .status(404)
                         .json({
-
                             ok:
                                 false,
-
                             error:
                                 '会话不存在',
-
                         })
-
                 }
 
                 sessionId =
@@ -7190,11 +8035,10 @@ app.post(
                         )
                         .limit(1)
 
-                if (
-                    recentSessionError
-                ) {
+                if (recentSessionError) {
                     throw recentSessionError
                 }
+
 
                 if (
                     recentSessions &&
@@ -7221,13 +8065,10 @@ app.post(
                             )
                             .insert([
                                 {
-
                                     name:
                                         '新对话',
-
                                     user_id:
                                         req.userId,
-
                                 },
                             ])
                             .select(
@@ -7235,397 +8076,85 @@ app.post(
                             )
                             .single()
 
-                    if (
-                        newSessionError
-                    ) {
+                    if (newSessionError) {
                         throw newSessionError
                     }
 
                     sessionId =
                         newSession.id
-
                 }
-
             }
 
 
-            // ==================================================
-            // 保存真正的用户消息
-            // ==================================================
-
-            const {
-                data:
-                userMessage,
-
-                error:
-                userMessageError,
-            } =
-                await supabase
-                    .from(
-                        'messages'
-                    )
-                    .insert([
-                        {
-
-                            user_id:
-                                req.userId,
-
-                            session_id:
-                                sessionId,
-
-                            role:
-                                'user',
-
-                            content:
-                                cleanMessage,
-
-                            visible:
-                                true,
-
-                        },
-                    ])
-                    .select(
-                        'id, session_id, role, content, created_at, visible'
-                    )
-                    .single()
-
-            if (
-                userMessageError
-            ) {
-                throw userMessageError
-            }
+            const requestKey =
+                `${req.userId}:${sessionId}:${requestId}`
 
 
-            const settings =
-                await getGlobalSettings(
-                    req.userId
-                )
-
-
-            // ==================================================
-            // 检查当前消息是否包含提醒创建 / 查询 / 取消 / 修改请求
-            // ==================================================
-
-            const reminderRecentMessages =
-                await getRecentVisibleMessages(
-                    sessionId,
-                    settings
-                )
-
-
-            let reminderResult = {
-                status:
-                    'none',
-            }
-
-
-            if (
-                shouldAnalyzeReminderIntent(
-                    cleanMessage,
-                    reminderRecentMessages
-                )
-            ) {
-
-                try {
-
-                    reminderResult =
-                        await analyzeReminderIntent({
-
-                            sessionId,
-
-                            userId:
-                                req.userId,
-
-                            settings,
-
-                            cleanMessage,
-
-                            userMessageId:
-                                userMessage.id,
-
-                            recentMessages:
-                                reminderRecentMessages,
-
-                        })
-
-                } catch (
-                reminderError
-                ) {
-
-                    console.error(
-                        '提醒识别或保存失败：',
-                        reminderError
+            // 同一个 Node 进程里如果已经在处理同一 request_id，
+            // 后来的重复 HTTP 请求直接等待前一个 Promise。
+            const existingPromise =
+                chatRequestInFlight
+                    .get(
+                        requestKey
                     )
 
+            if (existingPromise) {
 
-                    // 很重要：
-                    // 失败时绝对不能让模型假装“提醒已经设置成功”
-                    reminderResult = {
+                const existingResult =
+                    await existingPromise
 
-                        status:
-                            'clarify',
-
-                        clarification:
-                            '这次提醒没有成功保存，请让用户重新确认一次具体时间。',
-
-                    }
-
-                }
-
+                return res
+                    .status(200)
+                    .json({
+                        ...existingResult,
+                        idempotent_replay:
+                            true,
+                    })
             }
 
 
-            const compression =
-                await compressMemoryIfNeeded(
-                    sessionId,
-                    settings,
-                    req.userId
-                )
-
-
-
-            const latestMemory =
-                await getLatestMemory(
-                    req.userId
-                )
-
-
-            const memorySummary =
-                typeof latestMemory
-                    ?.summary ===
-                    'string'
-                    ? latestMemory
-                        .summary
-                        .trim()
-                    : ''
-
-
-            const history =
-                await getRecentVisibleMessages(
-                    sessionId,
-                    settings
-                )
-
-
-            const characterLore =
-                await getCharacterLoreContext({
-
+            const requestPromise =
+                processChatRequestOnce({
                     userId:
                         req.userId,
-
-                    currentMessage:
-                        cleanMessage,
-
-                    recentMessages:
-                        history,
-
+                    sessionId,
+                    cleanMessage,
+                    requestId,
                 })
 
-
-            const baseModelInput =
-                buildModelContext({
-
-                    settings,
-
-                    memorySummary,
-
-                    messages:
-                        history,
-
-                    characterLoreContext:
-                        characterLore
-                            .context,
-
-                })
+            chatRequestInFlight.set(
+                requestKey,
+                requestPromise
+            )
 
 
-            const reminderReplyContext =
-                buildReminderReplyContext(
-                    reminderResult
-                )
+            try {
 
+                const result =
+                    await requestPromise
 
-            const modelInput =
-                reminderReplyContext
-                    ? `${baseModelInput}
-
-${reminderReplyContext}`
-                    : baseModelInput
-
-
-            const finalEstimatedTokens =
-                estimateTokens(
-                    modelInput
-                )
-
-
-            let reply =
-                ''
-
-
-            if (
-                reminderResult
-                    .status !==
-                'none'
-            ) {
-
-                // 提醒管理已经由后端真实执行，
-                // 直接返回确认，不再额外等待第二次模型请求。
-                reply =
-                    buildDirectReminderReply(
-                        reminderResult
+                return res
+                    .status(200)
+                    .json(
+                        result
                     )
 
-            } else {
+            } finally {
 
-                const response =
-                    await callModelWithRetry({
+                if (
+                    chatRequestInFlight
+                        .get(
+                            requestKey
+                        ) ===
+                    requestPromise
+                ) {
 
-                        model:
-                            'gpt-5.6-sol',
-
-                        input:
-                            modelInput,
-
-                    })
-
-
-                reply =
-                    typeof response
-                        .output_text ===
-                        'string'
-                        ? response
-                            .output_text
-                            .trim()
-                        : ''
-
+                    chatRequestInFlight
+                        .delete(
+                            requestKey
+                        )
+                }
             }
-
-
-            if (!reply) {
-
-                throw new Error(
-                    'AI 没有返回有效的文本回复'
-                )
-
-            }
-
-
-            const {
-                data:
-                assistantMessage,
-
-                error:
-                assistantMessageError,
-            } =
-                await supabase
-                    .from(
-                        'messages'
-                    )
-                    .insert([
-                        {
-
-                            user_id:
-                                req.userId,
-
-                            session_id:
-                                sessionId,
-
-                            role:
-                                'assistant',
-
-                            content:
-                                reply,
-
-                            visible:
-                                true,
-
-                        },
-                    ])
-                    .select(
-                        'id, session_id, role, content, created_at, visible'
-                    )
-                    .single()
-
-
-            if (
-                assistantMessageError
-            ) {
-                throw assistantMessageError
-            }
-
-
-            const {
-                error:
-                sessionUpdateError,
-            } =
-                await supabase
-                    .from(
-                        'sessions'
-                    )
-                    .update({
-
-                        updated_at:
-                            new Date()
-                                .toISOString(),
-
-                    })
-                    .eq(
-                        'id',
-                        sessionId
-                    )
-                    .eq(
-                        'user_id',
-                        req.userId
-                    )
-
-
-            if (
-                sessionUpdateError
-            ) {
-
-                console.error(
-                    '更新 session 时间失败：',
-                    sessionUpdateError
-                )
-
-            }
-
-
-            res
-                .status(200)
-                .json({
-
-                    ok:
-                        true,
-
-                    session_id:
-                        sessionId,
-
-                    reply,
-
-                    estimated_tokens:
-                        finalEstimatedTokens,
-
-                    compression,
-
-                    user_message:
-                        userMessage,
-
-                    assistant_message:
-                        assistantMessage,
-
-                    reminder:
-                        reminderResult
-                            .status ===
-                            'created'
-                            ? reminderResult
-                                .reminder
-                            : null,
-
-
-                })
-
 
         } catch (
         error
@@ -7636,26 +8165,38 @@ ${reminderReplyContext}`
                 error
             )
 
-            res
-                .status(500)
-                .json({
+            const statusCode =
+                Number(
+                    error
+                        ?.statusCode
+                )
 
+            res
+                .status(
+                    Number.isFinite(
+                        statusCode
+                    ) &&
+                        statusCode >= 400 &&
+                        statusCode <= 599
+                        ? statusCode
+                        : 500
+                )
+                .json({
                     ok:
                         false,
-
                     error:
                         'AI 对话处理失败',
-
                     detail:
                         error.message,
-
+                    request_id:
+                        normalizeChatRequestId(
+                            req.body
+                                ?.request_id
+                        ),
                 })
-
         }
-
     }
 )
-
 
 // ======================================================
 // 手动触发星星主动发消息
