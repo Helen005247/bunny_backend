@@ -20,9 +20,10 @@ const client = new OpenAI({
     apiKey: process.env.AI_API_KEY,
     baseURL: process.env.AI_BASE_URL,
 
-    // 单次上游请求最多等待 35 秒。
-    // 关闭 SDK 自带重试，避免和下面的自定义重试叠加成几分钟。
-    timeout: 35000,
+    // Aizex / 第三方线路偶尔比官方接口慢。
+    // 单次最多等 60 秒；仍关闭 SDK 自带隐藏重试，
+    // 避免一层 SDK 重试再叠一层业务重试。
+    timeout: 60000,
     maxRetries: 0,
 })
 // ======================================================
@@ -363,6 +364,46 @@ function getModelErrorCode(error) {
 }
 
 
+function isModelTimeoutError(error) {
+
+    const code =
+        getModelErrorCode(
+            error
+        )
+
+    const name =
+        String(
+            error?.name ||
+            ''
+        ).toUpperCase()
+
+    const message =
+        String(
+            error?.message ||
+            ''
+        ).toUpperCase()
+
+    return (
+        [
+            'ETIMEDOUT',
+            'UND_ERR_CONNECT_TIMEOUT',
+            'UND_ERR_HEADERS_TIMEOUT',
+        ].includes(
+            code
+        ) ||
+        name.includes(
+            'TIMEOUT'
+        ) ||
+        message.includes(
+            'TIMED OUT'
+        ) ||
+        message.includes(
+            'TIMEOUT'
+        )
+    )
+}
+
+
 function isRetryableModelError(error) {
 
     if (
@@ -536,38 +577,42 @@ ${integrityMarker}
 
 
             // ------------------------------------------
-            // 防串台检查
+            // 响应完整性标记：改成“软校验”
             //
-            // 如果发出去的是本次请求，
-            // 返回内容却没有本次唯一标记，
-            // 就认为响应不可信并自动重试。
+            // Aizex 这类 OpenAI 兼容代理并不保证模型会把
+            // 提示词末尾的校验标记逐字回显。
+            // 上一版把“没有回显 marker”直接当成失败，
+            // 会造成正常聊天全部返回 500。
+            //
+            // 现在：
+            // - 有 marker：删除后正常返回；
+            // - 没有 marker：只记一条 warning，不阻断聊天。
+            //
+            // 真正防重复仍由 request_id + 数据库唯一索引负责。
             // ------------------------------------------
+
+            const hasIntegrityMarker =
+                Boolean(
+                    integrityMarker &&
+                    outputText.includes(
+                        integrityMarker
+                    )
+                )
+
 
             if (
                 integrityMarker &&
-                !outputText.includes(
-                    integrityMarker
-                )
+                !hasIntegrityMarker
             ) {
 
-                const integrityError =
-                    new Error(
-                        `模型响应未通过完整性校验（${integrityId}）`
-                    )
-
-                integrityError.retryable =
-                    true
-
-                throw integrityError
+                console.warn(
+                    `模型响应没有回显完整性标记（${integrityId}），按兼容模式继续返回正文`
+                )
             }
 
 
-            // ------------------------------------------
-            // 校验成功以后，把标记删除
-            // ------------------------------------------
-
             const cleanedOutputText =
-                integrityMarker
+                hasIntegrityMarker
                     ? outputText
                         .split(
                             integrityMarker
@@ -613,6 +658,9 @@ ${integrityMarker}
                 error
 
             const canRetry =
+                !isModelTimeoutError(
+                    error
+                ) &&
                 isRetryableModelError(
                     error
                 )
