@@ -19,6 +19,11 @@ app.use(express.json({ limit: '1mb' }))
 const client = new OpenAI({
     apiKey: process.env.AI_API_KEY,
     baseURL: process.env.AI_BASE_URL,
+
+    // 单次上游请求最多等待 35 秒。
+    // 关闭 SDK 自带重试，避免和下面的自定义重试叠加成几分钟。
+    timeout: 35000,
+    maxRetries: 0,
 })
 // ======================================================
 // Web Push / VAPID
@@ -416,7 +421,7 @@ function isRetryableModelError(error) {
 
 async function callModelWithRetry(
     request,
-    maxAttempts = 3
+    maxAttempts = 2
 ) {
 
     let lastError =
@@ -2697,15 +2702,18 @@ remind_before_minutes = 30。
 
 
     const response =
-        await callModelWithRetry({
+        await callModelWithRetry(
+            {
 
-            model:
-                'gpt-5.6-sol',
+                model:
+                    'gpt-5.6-sol',
 
-            input:
-                parserInput,
+                input:
+                    parserInput,
 
-        })
+            },
+            1
+        )
 
 
     const parsed =
@@ -3794,6 +3802,241 @@ ${reminderResult.clarification}
 
 
     return ''
+}
+
+
+// ======================================================
+// 提醒管理操作的即时确认回复
+//
+// 创建 / 查询 / 修改 / 取消提醒已经由后端真实执行。
+// 这类操作不再为了生成一句确认文案额外调用第二次模型。
+// 真正“到点提醒”的消息仍然由角色模型生成。
+// ======================================================
+
+function buildDirectReminderReply(
+    reminderResult
+) {
+
+    const status =
+        reminderResult
+            ?.status
+
+
+    const formatReminderTime =
+        (
+            reminder
+        ) => {
+
+            const timeZone =
+                getValidTimeZone(
+                    reminder
+                        ?.timezone
+                ) ||
+                reminderResult
+                    ?.timeZone ||
+                'UTC'
+
+
+            const local =
+                DateTime
+                    .fromISO(
+                        reminder
+                            .event_at,
+                        {
+                            setZone:
+                                true,
+                        }
+                    )
+                    .setZone(
+                        timeZone
+                    )
+
+
+            return local
+                .isValid
+                ? local.toFormat(
+                    'LL月dd日 HH:mm'
+                )
+                : ''
+
+        }
+
+
+    const formatBefore =
+        (
+            minutes
+        ) => {
+
+            const value =
+                Math.max(
+                    0,
+                    Number(
+                        minutes
+                    ) || 0
+                )
+
+
+            if (
+                value === 0
+            ) {
+                return '到点'
+            }
+
+
+            if (
+                value % 60 === 0
+            ) {
+
+                const hours =
+                    value / 60
+
+                return (
+                    hours === 1
+                        ? '提前1小时'
+                        : `提前${hours}小时`
+                )
+            }
+
+
+            return `提前${value}分钟`
+
+        }
+
+
+    if (
+        status ===
+        'created'
+    ) {
+
+        const reminder =
+            reminderResult
+                .reminder
+
+        return [
+            '好，记下了。',
+            `${reminder.content}：${formatReminderTime(reminder)}，${formatBefore(reminder.remind_before_minutes)}提醒你。`,
+        ].join('\n')
+
+    }
+
+
+    if (
+        status ===
+        'listed'
+    ) {
+
+        const reminders =
+            reminderResult
+                .reminders ||
+            []
+
+
+        if (
+            reminders.length ===
+            0
+        ) {
+            return '现在没有还在等着的提醒。'
+        }
+
+
+        const lines =
+            reminders
+                .slice(
+                    0,
+                    10
+                )
+                .map(
+                    (
+                        reminder
+                    ) =>
+                        `${reminder.content}：${formatReminderTime(reminder)}，${formatBefore(reminder.remind_before_minutes)}。`
+                )
+
+
+        return [
+            '现在还有这些：',
+            ...lines,
+        ].join('\n')
+
+    }
+
+
+    if (
+        status ===
+        'cancelled'
+    ) {
+
+        return (
+            `好，${reminderResult.reminder.content}那个提醒取消了。`
+        )
+
+    }
+
+
+    if (
+        status ===
+        'cancelled_all'
+    ) {
+
+        const count =
+            Number(
+                reminderResult
+                    .cancelledCount
+            ) || 0
+
+
+        return (
+            count > 0
+                ? `好，${count}个待处理提醒都取消了。`
+                : '现在本来就没有待处理提醒。'
+        )
+
+    }
+
+
+    if (
+        status ===
+        'updated'
+    ) {
+
+        const reminder =
+            reminderResult
+                .reminder
+
+
+        return [
+            '改好了。',
+            `${reminder.content}：${formatReminderTime(reminder)}，${formatBefore(reminder.remind_before_minutes)}提醒你。`,
+        ].join('\n')
+
+    }
+
+
+    if (
+        status ===
+        'clarify'
+    ) {
+
+        const clarification =
+            String(
+                reminderResult
+                    .clarification ||
+                '还差一点信息。'
+            )
+                .trim()
+
+
+        return (
+            clarification
+                ? `我还差一点信息：${clarification}`
+                : '我还差一点信息，确认一下再帮你改。'
+        )
+
+    }
+
+
+    return ''
+
 }
 
 
@@ -7216,25 +7459,47 @@ ${reminderReplyContext}`
                 )
 
 
-            const response =
-                await callModelWithRetry({
+            let reply =
+                ''
 
-                    model:
-                        'gpt-5.6-sol',
 
-                    input:
-                        modelInput,
+            if (
+                reminderResult
+                    .status !==
+                'none'
+            ) {
 
-                })
+                // 提醒管理已经由后端真实执行，
+                // 直接返回确认，不再额外等待第二次模型请求。
+                reply =
+                    buildDirectReminderReply(
+                        reminderResult
+                    )
 
-            const reply =
-                typeof response
-                    .output_text ===
-                    'string'
-                    ? response
-                        .output_text
-                        .trim()
-                    : ''
+            } else {
+
+                const response =
+                    await callModelWithRetry({
+
+                        model:
+                            'gpt-5.6-sol',
+
+                        input:
+                            modelInput,
+
+                    })
+
+
+                reply =
+                    typeof response
+                        .output_text ===
+                        'string'
+                        ? response
+                            .output_text
+                            .trim()
+                        : ''
+
+            }
 
 
             if (!reply) {
