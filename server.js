@@ -1574,7 +1574,7 @@ function hasStoryRecallSignal(
     )
 }
 
-function isShortStoryFollowUp(
+function isStoryClarificationFollowUp(
     value
 ) {
 
@@ -1583,22 +1583,58 @@ function isShortStoryFollowUp(
             value ?? ''
         )
             .trim()
-            .replace(
-                /[\s，。！？!?、,.]/g,
-                ''
-            )
 
-    if (
-        !text ||
-        text.length > 14
-    ) {
+    if (!text) {
         return false
     }
 
-    return /^(然后呢|后来呢|那后来呢|那之后呢|之后呢|再后来呢|还有呢|继续|继续说|为什么|怎么会|真的吗|原来如此|那我呢|那你呢|所以呢|结果呢|嗯|嗯嗯|对|对呀|是吗)$/
+    // 允许用户在上一轮问旧剧情后，用更自然的方式补充线索，
+    // 不再只允许“然后呢”这种很短的追问。
+    //
+    // 例如：
+    // “就是你说要她抱抱、专门来让我误会的那只大肥兔容姬”
+    //
+    // 这种句子本身未必含“还记得”，但显然是在澄清上一轮旧剧情。
+    return /就是|我是说|我说的是|说的是|指的是|那个|那只|那位|那件|这件|当时|后来|然后|她|他|它|名字|叫做|叫|兔|谁|怎么|为什么|不是|对了|我记得|你说过|你当时/
         .test(
             text
         )
+}
+
+function getPreviousUserMessage(
+    recentMessages = []
+) {
+
+    const userMessages =
+        (recentMessages || [])
+            .filter(
+                (item) =>
+                    item?.role ===
+                    'user'
+            )
+            .map(
+                (item) =>
+                    String(
+                        item?.content ||
+                        ''
+                    )
+            )
+            .filter(
+                Boolean
+            )
+
+    if (
+        userMessages.length < 2
+    ) {
+        return ''
+    }
+
+    // getRecentVisibleMessages() 在普通聊天里已经包含当前刚保存的用户消息，
+    // 所以倒数第二条 user 才是“上一轮用户消息”。
+    return userMessages[
+        userMessages.length -
+        2
+    ] || ''
 }
 
 function shouldRetrieveLoreChunks({
@@ -1614,33 +1650,23 @@ function shouldRetrieveLoreChunks({
         return true
     }
 
-    if (
-        !isShortStoryFollowUp(
+    const previousUserMessage =
+        getPreviousUserMessage(
+            recentMessages
+        )
+
+    // 只承接“紧邻上一轮”的旧剧情澄清，
+    // 避免用户已经转回普通聊天后仍不断翻剧情库。
+    return (
+        Boolean(
+            previousUserMessage
+        ) &&
+        hasStoryRecallSignal(
+            previousUserMessage
+        ) &&
+        isStoryClarificationFollowUp(
             currentMessage
         )
-    ) {
-        return false
-    }
-
-    const recentText =
-        (recentMessages || [])
-            .slice(
-                -6,
-                -1
-            )
-            .map(
-                (item) =>
-                    String(
-                        item?.content ||
-                        ''
-                    )
-            )
-            .join(
-                '\n'
-            )
-
-    return hasStoryRecallSignal(
-        recentText
     )
 }
 
@@ -1734,6 +1760,168 @@ function extractStorySearchTerms(
     return [
         ...terms,
     ]
+}
+
+
+// ======================================================
+// 从“你还记得 X 吗”一类句子中提取真正的检索焦点。
+//
+// 之前的问题：
+// “你还记得容姬吗”虽然含有“容姬”，但普通 n-gram 得分只有几分，
+// 最近对话里大量旧词反而可能把别的卡顶到前面。
+//
+// 现在：
+// 如果能明确提取到 X，就给正文中精确出现 X 的片段一个非常高的优先级。
+// 这不是人工维护关键词，所以以后遇到别的人名 / 物件名也能生效。
+// ======================================================
+
+function extractStoryFocusTerms(
+    value
+) {
+
+    let text =
+        String(
+            value ?? ''
+        )
+            .trim()
+
+    if (!text) {
+        return []
+    }
+
+    // 去掉 emoji / 标点，只保留中英文、数字和常见连接符。
+    text =
+        text.replace(
+            /[^\u4e00-\u9fffA-Za-z0-9_-]+/g,
+            ''
+        )
+
+    // 去掉常见称呼。
+    text =
+        text.replace(
+            /^(?:星星|宝宝|沈星回)+/,
+            ''
+        )
+
+    // 去掉回忆提问外壳。
+    text =
+        text.replace(
+            /^(?:你)?(?:还)?(?:记不记得|记得|记不记得|还记不记得)/,
+            ''
+        )
+
+    // 去掉句尾语气。
+    text =
+        text.replace(
+            /(?:吗|嘛|么|呢|来着|呀|啊)+$/,
+            ''
+        )
+
+    const normalized =
+        normalizeStorySearchText(
+            text
+        )
+
+    if (
+        normalized.length >= 2 &&
+        normalized.length <= 12 &&
+        !STORY_STOP_TERMS.has(
+            normalized
+        )
+    ) {
+        return [
+            normalized,
+        ]
+    }
+
+    return []
+}
+
+function scoreLoreChunkFocus(
+    item,
+    focusTerms
+) {
+
+    if (
+        !Array.isArray(
+            focusTerms
+        ) ||
+        focusTerms.length === 0
+    ) {
+        return 0
+    }
+
+    const fields =
+        getLoreChunkFields(
+            item
+        )
+
+    let score = 0
+
+    for (
+        const rawTerm
+        of focusTerms
+    ) {
+
+        const term =
+            normalizeStorySearchText(
+                rawTerm
+            )
+
+        if (
+            !term ||
+            term.length < 2
+        ) {
+            continue
+        }
+
+        // 精确名字/物件名命中正文时必须压过最近聊天噪声。
+        if (
+            fields.content.includes(
+                term
+            )
+        ) {
+            score +=
+                120 +
+                Math.min(
+                    30,
+                    term.length * 5
+                )
+        }
+
+        if (
+            fields.keywords.some(
+                (keyword) =>
+                    keyword === term ||
+                    keyword.includes(
+                        term
+                    )
+            )
+        ) {
+            score += 150
+        }
+
+        if (
+            fields.sourceTitle ===
+                term ||
+            fields.sourceTitle.includes(
+                term
+            )
+        ) {
+            score += 170
+        }
+
+        if (
+            fields.sectionTitle &&
+            fields.sectionTitle.includes(
+                term
+            )
+        ) {
+            score += 140
+        }
+    }
+
+    return score
 }
 
 function getLoreChunkFields(
@@ -2319,10 +2507,28 @@ async function getLoreChunksContext({
             currentMessage
         )
 
+    const focusTerms =
+        extractStoryFocusTerms(
+            currentMessage
+        )
+
     const recentTerms =
         extractStorySearchTerms(
             recentText
         )
+
+    const directRecall =
+        hasStoryRecallSignal(
+            currentMessage
+        )
+
+    // 当前消息必须占绝对主导。
+    // 直接“还记得 X 吗”时，最近聊天只给极小辅助分；
+    // 澄清上一轮剧情时才略微提高，但依然不能压过当前线索。
+    const recentMultiplier =
+        directRecall
+            ? 0.02
+            : 0.08
 
     const scored =
         rows
@@ -2336,20 +2542,30 @@ async function getLoreChunksContext({
                             1
                         )
 
+                    const focusScore =
+                        scoreLoreChunkFocus(
+                            item,
+                            focusTerms
+                        )
+
                     const recentScore =
                         scoreLoreChunk(
                             item,
                             recentTerms,
-                            0.2
+                            recentMultiplier
                         )
 
                     const relevance =
                         currentScore +
+                        focusScore +
                         recentScore
 
                     return {
                         item,
                         relevance,
+                        currentScore,
+                        focusScore,
+                        recentScore,
                     }
                 }
             )
@@ -2494,6 +2710,12 @@ async function getLoreChunksContext({
                 (entry) =>
                     entry.item
             )
+
+    console.log(
+        'lore_chunks 检索：',
+        `模式=${directRecall ? '直接回忆' : '剧情澄清'}`,
+        `焦点=${focusTerms.length ? focusTerms.join('/') : '无明确短焦点'}`
+    )
 
     console.log(
         'lore_chunks 本轮召回：',
