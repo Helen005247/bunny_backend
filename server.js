@@ -1369,6 +1369,1167 @@ ${materialText}`,
 }
 
 
+
+// ======================================================
+// 原始完整剧情库：按需检索 lore_chunks
+//
+// 设计目标：
+// 1. 普通日常聊天完全不读取完整剧情。
+// 2. 只有用户明确回忆过去、提到原作设定/卡面，或命中
+//    骑士学校、剑穗、王储、菲罗斯等明确剧情词时才检索。
+// 3. 最多选 3 个片段，并控制额外上下文 Token。
+// 4. 数据库读取失败时自动降级，不阻断聊天。
+// 5. lore_chunks 是共享原始素材；只有当前用户已经启用
+//    “沈星回” character_lore 时才允许注入，避免多用户串素材。
+// ======================================================
+
+const LORE_CHUNKS_CACHE_TTL_MS =
+    2 * 60 * 1000
+
+let loreChunksCache = {
+    loadedAt: 0,
+    rows: [],
+}
+
+const STORY_CANON_TERMS = [
+    '国王卡',
+    '婚卡',
+    '师兄卡',
+    '烟火来处',
+    '细琢辰光',
+    '粲然须臾',
+    '问剑观花',
+    '洄光颂',
+    '越夜携心',
+    '光猎',
+    '两心同',
+    '漫航悸遇',
+    '池光温陷',
+    '二十一日',
+
+    '菲罗斯',
+    '王子',
+    '王储',
+    '国王',
+    '女王',
+    '疯王',
+    '骑士',
+    '骑士团',
+    '首席骑士',
+    '圣剑骑士',
+    '师兄',
+    '师妹',
+    '骑士学校',
+    '学校',
+    '学院',
+    '剑穗',
+    '星星剑穗',
+    '星辰花',
+    '光剑',
+    '星球之心',
+    '流浪体',
+    '回溯',
+    '烬城',
+    '巴别会',
+    '异象空间',
+    '星泊地',
+    '远航',
+    '旅伴',
+]
+
+const STORY_TRIGGER_TERMS = [
+    '国王卡',
+    '婚卡',
+    '师兄卡',
+    '烟火来处',
+    '细琢辰光',
+    '粲然须臾',
+    '问剑观花',
+    '洄光颂',
+    '越夜携心',
+    '光猎',
+    '两心同',
+    '漫航悸遇',
+    '池光温陷',
+    '二十一日',
+
+    '菲罗斯',
+    '王储',
+    '疯王',
+    '骑士学校',
+    '首席骑士',
+    '圣剑骑士',
+    '师兄',
+    '师妹',
+    '剑穗',
+    '星星剑穗',
+    '星球之心',
+    '流浪体',
+    '烬城',
+    '巴别会',
+    '异象空间',
+    '星泊地',
+]
+
+const STORY_STOP_TERMS =
+    new Set([
+        '我们',
+        '你们',
+        '他们',
+        '她们',
+        '这个',
+        '那个',
+        '这些',
+        '那些',
+        '什么',
+        '怎么',
+        '为什么',
+        '可以',
+        '还是',
+        '已经',
+        '就是',
+        '真的',
+        '觉得',
+        '一下',
+        '现在',
+        '今天',
+        '然后',
+        '后来',
+        '因为',
+        '所以',
+        '但是',
+        '如果',
+        '一个',
+        '一点',
+        '时候',
+        '自己',
+        '记得',
+        '还记',
+        '以前',
+        '过去',
+        '当时',
+        '那次',
+        '曾经',
+        '事情',
+        '发生',
+        '知道',
+        '不是',
+        '没有',
+        '还有',
+        '之后',
+        '那个时候',
+    ])
+
+function normalizeStorySearchText(
+    value
+) {
+
+    return String(
+        value ?? ''
+    )
+        .toLowerCase()
+        .replace(
+            /\s+/g,
+            ''
+        )
+}
+
+function hasStoryRecallSignal(
+    value
+) {
+
+    const text =
+        String(
+            value ?? ''
+        )
+            .trim()
+
+    if (!text) {
+        return false
+    }
+
+    const explicitRecall =
+        /还记得|记不记得|记得吗|原作|剧情|卡面|卡里|设定|世界观|时间线|我们.*(?:以前|过去|曾经|当时|那次|第一次)|(?:以前|过去|曾经|当时|那次).*我们|以前.*你|过去.*你|曾经.*你|当时.*你|那次.*你/
+
+    if (
+        explicitRecall.test(
+            text
+        )
+    ) {
+        return true
+    }
+
+    const normalized =
+        normalizeStorySearchText(
+            text
+        )
+
+    return STORY_TRIGGER_TERMS.some(
+        (term) =>
+            normalized.includes(
+                normalizeStorySearchText(
+                    term
+                )
+            )
+    )
+}
+
+function isShortStoryFollowUp(
+    value
+) {
+
+    const text =
+        String(
+            value ?? ''
+        )
+            .trim()
+            .replace(
+                /[\s，。！？!?、,.]/g,
+                ''
+            )
+
+    if (
+        !text ||
+        text.length > 14
+    ) {
+        return false
+    }
+
+    return /^(然后呢|后来呢|那后来呢|那之后呢|之后呢|再后来呢|还有呢|继续|继续说|为什么|怎么会|真的吗|原来如此|那我呢|那你呢|所以呢|结果呢|嗯|嗯嗯|对|对呀|是吗)$/
+        .test(
+            text
+        )
+}
+
+function shouldRetrieveLoreChunks({
+    currentMessage = '',
+    recentMessages = [],
+}) {
+
+    if (
+        hasStoryRecallSignal(
+            currentMessage
+        )
+    ) {
+        return true
+    }
+
+    if (
+        !isShortStoryFollowUp(
+            currentMessage
+        )
+    ) {
+        return false
+    }
+
+    const recentText =
+        (recentMessages || [])
+            .slice(
+                -6,
+                -1
+            )
+            .map(
+                (item) =>
+                    String(
+                        item?.content ||
+                        ''
+                    )
+            )
+            .join(
+                '\n'
+            )
+
+    return hasStoryRecallSignal(
+        recentText
+    )
+}
+
+function extractStorySearchTerms(
+    value
+) {
+
+    const source =
+        String(
+            value ?? ''
+        )
+            .toLowerCase()
+
+    const normalizedSource =
+        normalizeStorySearchText(
+            source
+        )
+
+    const terms =
+        new Set()
+
+    // 先放明确的世界观 / 卡名 / 专有名词，
+    // 避免长句 n-gram 达到上限以后把关键名词截掉。
+    for (
+        const canonTerm
+        of STORY_CANON_TERMS
+    ) {
+
+        const normalizedCanon =
+            normalizeStorySearchText(
+                canonTerm
+            )
+
+        if (
+            normalizedCanon &&
+            normalizedSource.includes(
+                normalizedCanon
+            )
+        ) {
+
+            terms.add(
+                normalizedCanon
+            )
+        }
+    }
+
+    // 再补充当前句里的普通关键词。
+    // 这里沿用 character_lore 已有的分词逻辑，
+    // 但过滤掉回忆提示词、代词等高噪声词。
+    const genericTerms =
+        extractLoreTerms(
+            source
+        )
+
+    for (
+        const rawTerm
+        of genericTerms
+    ) {
+
+        const term =
+            normalizeStorySearchText(
+                rawTerm
+            )
+
+        if (
+            !term ||
+            STORY_STOP_TERMS.has(
+                term
+            )
+        ) {
+            continue
+        }
+
+        if (
+            term.length < 2
+        ) {
+            continue
+        }
+
+        terms.add(
+            term
+        )
+
+        if (
+            terms.size >= 70
+        ) {
+            break
+        }
+    }
+
+    return [
+        ...terms,
+    ]
+}
+
+function getLoreChunkFields(
+    item
+) {
+
+    return {
+        sourceFile:
+            normalizeStorySearchText(
+                item?.source_file
+            ),
+
+        sourceTitle:
+            normalizeStorySearchText(
+                item?.source_title
+            ),
+
+        sectionTitle:
+            normalizeStorySearchText(
+                item?.section_title
+            ),
+
+        keywords:
+            Array.isArray(
+                item?.keywords
+            )
+                ? item.keywords
+                    .map(
+                        (keyword) =>
+                            normalizeStorySearchText(
+                                keyword
+                            )
+                    )
+                    .filter(
+                        Boolean
+                    )
+                : [],
+
+        content:
+            normalizeStorySearchText(
+                item?.content
+            ),
+    }
+}
+
+function scoreLoreChunk(
+    item,
+    terms,
+    multiplier = 1
+) {
+
+    if (
+        !Array.isArray(
+            terms
+        ) ||
+        terms.length === 0
+    ) {
+        return 0
+    }
+
+    const fields =
+        getLoreChunkFields(
+            item
+        )
+
+    let score = 0
+
+    for (
+        const rawTerm
+        of terms.slice(
+            0,
+            70
+        )
+    ) {
+
+        const term =
+            normalizeStorySearchText(
+                rawTerm
+            )
+
+        if (
+            !term ||
+            term.length < 2 ||
+            STORY_STOP_TERMS.has(
+                term
+            )
+        ) {
+            continue
+        }
+
+        let best = 0
+
+        if (
+            fields.sourceTitle ===
+                term ||
+            fields.sourceTitle.includes(
+                term
+            )
+        ) {
+            best =
+                Math.max(
+                    best,
+                    14
+                )
+        }
+
+        if (
+            fields.keywords.some(
+                (keyword) =>
+                    keyword ===
+                        term ||
+                    keyword.includes(
+                        term
+                    ) ||
+                    (
+                        term.length >=
+                            3 &&
+                        term.includes(
+                            keyword
+                        )
+                    )
+            )
+        ) {
+            best =
+                Math.max(
+                    best,
+                    16
+                )
+        }
+
+        if (
+            fields.sectionTitle &&
+            fields.sectionTitle.includes(
+                term
+            )
+        ) {
+            best =
+                Math.max(
+                    best,
+                    10
+                )
+        }
+
+        if (
+            fields.sourceFile &&
+            fields.sourceFile.includes(
+                term
+            )
+        ) {
+            best =
+                Math.max(
+                    best,
+                    8
+                )
+        }
+
+        if (
+            fields.content.includes(
+                term
+            )
+        ) {
+
+            best =
+                Math.max(
+                    best,
+                    term.length >= 4
+                        ? 7
+                        : 5
+                )
+        }
+
+        score +=
+            best *
+            multiplier
+    }
+
+    return score
+}
+
+async function getCachedLoreChunks() {
+
+    if (!supabase) {
+        return []
+    }
+
+    const now =
+        Date.now()
+
+    if (
+        loreChunksCache
+            .rows
+            .length > 0 &&
+        now -
+            loreChunksCache
+                .loadedAt <
+            LORE_CHUNKS_CACHE_TTL_MS
+    ) {
+        return loreChunksCache.rows
+    }
+
+    const rows = []
+    const pageSize = 1000
+    const maxRows = 5000
+
+    for (
+        let from = 0;
+        from < maxRows;
+        from += pageSize
+    ) {
+
+        const {
+            data,
+            error,
+        } =
+            await supabase
+                .from(
+                    'lore_chunks'
+                )
+                .select(
+                    'id, source_file, source_title, chunk_index, section_title, content, keywords, metadata, created_at'
+                )
+                .order(
+                    'source_title',
+                    {
+                        ascending:
+                            true,
+                    }
+                )
+                .order(
+                    'chunk_index',
+                    {
+                        ascending:
+                            true,
+                    }
+                )
+                .range(
+                    from,
+                    from +
+                        pageSize -
+                        1
+                )
+
+        if (error) {
+            throw error
+        }
+
+        const page =
+            Array.isArray(
+                data
+            )
+                ? data
+                : []
+
+        rows.push(
+            ...page
+        )
+
+        if (
+            page.length <
+            pageSize
+        ) {
+            break
+        }
+    }
+
+    loreChunksCache = {
+        loadedAt:
+            now,
+        rows,
+    }
+
+    return rows
+}
+
+function findBestStoryMatchIndex(
+    content,
+    terms
+) {
+
+    const searchableContent =
+        String(
+            content ?? ''
+        )
+            .toLowerCase()
+
+    if (
+        !searchableContent
+    ) {
+        return -1
+    }
+
+    let bestIndex = -1
+    let bestTermLength = -1
+
+    for (
+        const rawTerm
+        of terms || []
+    ) {
+
+        const term =
+            normalizeStorySearchText(
+                rawTerm
+            )
+
+        if (
+            !term ||
+            term.length < 2 ||
+            STORY_STOP_TERMS.has(
+                term
+            )
+        ) {
+            continue
+        }
+
+        const index =
+            searchableContent.indexOf(
+                term
+            )
+
+        if (
+            index >= 0 &&
+            term.length >
+                bestTermLength
+        ) {
+            bestIndex =
+                index
+            bestTermLength =
+                term.length
+        }
+    }
+
+    return bestIndex
+}
+
+function clipLoreChunkAroundTerms(
+    content,
+    terms,
+    maxLength = 1150
+) {
+
+    const text =
+        typeof content ===
+            'string'
+            ? content.trim()
+            : ''
+
+    if (
+        !text ||
+        text.length <=
+            maxLength
+    ) {
+        return text
+    }
+
+    const matchIndex =
+        findBestStoryMatchIndex(
+            text,
+            terms
+        )
+
+    if (
+        matchIndex < 0
+    ) {
+        return `${text.slice(
+            0,
+            Math.max(
+                1,
+                maxLength -
+                    1
+            )
+        )}…`
+    }
+
+    const half =
+        Math.floor(
+            maxLength /
+            2
+        )
+
+    let start =
+        Math.max(
+            0,
+            matchIndex -
+                half
+        )
+
+    let end =
+        Math.min(
+            text.length,
+            start +
+                maxLength
+        )
+
+    if (
+        end -
+            start <
+        maxLength
+    ) {
+        start =
+            Math.max(
+                0,
+                end -
+                    maxLength
+            )
+    }
+
+    const prefix =
+        start > 0
+            ? '…'
+            : ''
+
+    const suffix =
+        end <
+            text.length
+            ? '…'
+            : ''
+
+    return (
+        prefix +
+        text
+            .slice(
+                start,
+                end
+            )
+            .trim() +
+        suffix
+    )
+}
+
+function formatLoreChunk(
+    item,
+    terms
+) {
+
+    const lines = [
+        `【原始剧情片段｜${item.source_title || '未命名来源'}｜片段 ${Number(item.chunk_index) + 1}】`,
+    ]
+
+    if (
+        item.section_title
+    ) {
+        lines.push(
+            `小节：${item.section_title}`
+        )
+    }
+
+    if (
+        Array.isArray(
+            item.keywords
+        ) &&
+        item.keywords
+            .length > 0
+    ) {
+        lines.push(
+            `关键词：${item.keywords.slice(
+                0,
+                10
+            ).join(
+                '、'
+            )}`
+        )
+    }
+
+    const content =
+        clipLoreChunkAroundTerms(
+            item.content,
+            terms,
+            1150
+        )
+
+    if (content) {
+        lines.push(
+            content
+        )
+    }
+
+    return lines.join(
+        '\n'
+    )
+}
+
+function userHasLumiereLore(
+    characterLore
+) {
+
+    const selected =
+        Array.isArray(
+            characterLore?.selected
+        )
+            ? characterLore.selected
+            : []
+
+    return selected.some(
+        (item) =>
+            normalizeStorySearchText(
+                item?.character_name
+            ) ===
+            normalizeStorySearchText(
+                '沈星回'
+            )
+    )
+}
+
+async function getLoreChunksContext({
+    currentMessage = '',
+    recentMessages = [],
+    enabled = true,
+}) {
+
+    if (
+        !enabled ||
+        !shouldRetrieveLoreChunks({
+            currentMessage,
+            recentMessages,
+        })
+    ) {
+        return {
+            triggered:
+                false,
+            context:
+                '',
+            selected:
+                [],
+        }
+    }
+
+    let rows = []
+
+    try {
+
+        rows =
+            await getCachedLoreChunks()
+
+    } catch (error) {
+
+        console.warn(
+            '读取 lore_chunks 失败，本轮跳过完整剧情检索：',
+            error?.message ||
+            error
+        )
+
+        return {
+            triggered:
+                true,
+            context:
+                '',
+            selected:
+                [],
+        }
+    }
+
+    if (
+        rows.length === 0
+    ) {
+        return {
+            triggered:
+                true,
+            context:
+                '',
+            selected:
+                [],
+        }
+    }
+
+    const recentText =
+        (recentMessages || [])
+            .slice(
+                -6
+            )
+            .map(
+                (item) =>
+                    String(
+                        item?.content ||
+                        ''
+                    )
+            )
+            .join(
+                '\n'
+            )
+
+    const currentTerms =
+        extractStorySearchTerms(
+            currentMessage
+        )
+
+    const recentTerms =
+        extractStorySearchTerms(
+            recentText
+        )
+
+    const scored =
+        rows
+            .map(
+                (item) => {
+
+                    const currentScore =
+                        scoreLoreChunk(
+                            item,
+                            currentTerms,
+                            1
+                        )
+
+                    const recentScore =
+                        scoreLoreChunk(
+                            item,
+                            recentTerms,
+                            0.2
+                        )
+
+                    const relevance =
+                        currentScore +
+                        recentScore
+
+                    return {
+                        item,
+                        relevance,
+                    }
+                }
+            )
+            .filter(
+                (entry) =>
+                    entry.relevance >=
+                    5
+            )
+            .sort(
+                (
+                    left,
+                    right
+                ) =>
+                    right.relevance -
+                    left.relevance
+            )
+
+    if (
+        scored.length === 0
+    ) {
+        return {
+            triggered:
+                true,
+            context:
+                '',
+            selected:
+                [],
+        }
+    }
+
+    const selected = []
+    const selectedIds =
+        new Set()
+
+    for (
+        const entry
+        of scored
+    ) {
+
+        const item =
+            entry.item
+
+        if (
+            selectedIds.has(
+                item.id
+            )
+        ) {
+            continue
+        }
+
+        selectedIds.add(
+            item.id
+        )
+
+        selected.push({
+            ...item,
+            relevance:
+                entry.relevance,
+        })
+
+        if (
+            selected.length >=
+            3
+        ) {
+            break
+        }
+    }
+
+    const allTerms =
+        [
+            ...new Set([
+                ...currentTerms,
+                ...recentTerms,
+            ]),
+        ]
+
+    const budgeted = []
+    let usedTokens = 0
+    const maxStoryTokens = 3000
+
+    for (
+        const item
+        of selected
+    ) {
+
+        const block =
+            formatLoreChunk(
+                item,
+                allTerms
+            )
+
+        const blockTokens =
+            estimateTokens(
+                block
+            )
+
+        if (
+            budgeted.length >
+                0 &&
+            usedTokens +
+                blockTokens >
+                maxStoryTokens
+        ) {
+            continue
+        }
+
+        budgeted.push({
+            item,
+            block,
+        })
+
+        usedTokens +=
+            blockTokens
+    }
+
+    if (
+        budgeted.length === 0
+    ) {
+        return {
+            triggered:
+                true,
+            context:
+                '',
+            selected:
+                [],
+        }
+    }
+
+    const materialText =
+        budgeted
+            .map(
+                (entry) =>
+                    entry.block
+            )
+            .join(
+                '\n\n'
+            )
+
+    const selectedItems =
+        budgeted
+            .map(
+                (entry) =>
+                    entry.item
+            )
+
+    console.log(
+        'lore_chunks 本轮召回：',
+        selectedItems
+            .map(
+                (item) =>
+                    `${item.source_title || '未命名'}#${item.chunk_index}(${Number(item.relevance).toFixed(1)})`
+            )
+            .join(
+                ', '
+            )
+    )
+
+    return {
+        triggered:
+            true,
+
+        selected:
+            selectedItems,
+
+        context:
+            `【按需召回的原始剧情记忆】
+以下内容来自完整原作剧情切片，只在当前话题明确涉及过去经历、原作设定或具体旧事时临时加入。
+
+使用规则：
+1. 把这些片段当作已经真实发生过的共同经历或世界观事实，自然地“想起来”，不要说“根据资料”“数据库显示”或“我检索到”。
+2. 不要为了证明记得而大段背诵原文；只使用回答当前问题真正需要的细节。
+3. 不要主动报出内部的来源名、片段编号、关键词或数据库结构，除非用户明确询问卡名/来源。
+4. 如果这里的具体剧情细节与提炼后的 character_lore 摘要有出入，具体事件细节优先参考这里的原始剧情；但最高优先级角色行为规则和用户当前明确陈述仍然优先。
+5. 如果片段不足以确定答案，就保持自然的不确定，不要补造不存在的剧情。
+
+${materialText}`,
+    }
+}
+
+
 // ======================================================
 // 获取指定会话
 // ======================================================
@@ -1591,6 +2752,7 @@ function buildModelContext({
     memorySummary,
     messages,
     characterLoreContext = '',
+    storyLoreContext = '',
 }) {
 
     const systemPrompt =
@@ -1647,6 +2809,18 @@ ${characterContext}`
 
         sections.push(
             characterLoreContext.trim()
+        )
+
+    }
+
+    if (
+        typeof storyLoreContext ===
+            'string' &&
+        storyLoreContext.trim()
+    ) {
+
+        sections.push(
+            storyLoreContext.trim()
         )
 
     }
@@ -6023,6 +7197,25 @@ app.get(
                 })
 
 
+            const storyLore =
+                await getLoreChunksContext({
+
+                    currentMessage:
+                        latestUserMessage,
+
+                    recentMessages:
+                        messages.slice(
+                            -8
+                        ),
+
+                    enabled:
+                        userHasLumiereLore(
+                            characterLore
+                        ),
+
+                })
+
+
             const fullContext =
                 buildModelContext({
 
@@ -6034,6 +7227,10 @@ app.get(
 
                     characterLoreContext:
                         characterLore
+                            .context,
+
+                    storyLoreContext:
+                        storyLore
                             .context,
 
                 })
@@ -6556,6 +7753,23 @@ app.post(
                 })
 
 
+            const storyLore =
+                await getLoreChunksContext({
+
+                    currentMessage:
+                        cleanMessage,
+
+                    recentMessages:
+                        history,
+
+                    enabled:
+                        userHasLumiereLore(
+                            characterLore
+                        ),
+
+                })
+
+
             const baseModelInput =
                 buildModelContext({
 
@@ -6568,6 +7782,10 @@ app.post(
 
                     characterLoreContext:
                         characterLore
+                            .context,
+
+                    storyLoreContext:
+                        storyLore
                             .context,
 
                 })
