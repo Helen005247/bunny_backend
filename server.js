@@ -4964,6 +4964,310 @@ ${rawContent || '未成功提取正文'}`
         )
 }
 
+
+function sanitizePrivateGameSocialDiagnosticText(
+    value
+) {
+
+    let text =
+        String(
+            value ?? ''
+        )
+
+    const replacements = [
+        [
+            PRIVATE_GAME_SEARCH_NAME,
+            '那个游戏',
+        ],
+        [
+            PRIVATE_GAME_XHS_ACCOUNT_NAME,
+            '官方小红书账号',
+        ],
+        [
+            PRIVATE_GAME_BILIBILI_ACCOUNT_NAME,
+            '官方B站账号',
+        ],
+    ]
+
+    for (
+        const [
+            original,
+            replacement,
+        ]
+        of replacements
+    ) {
+
+        if (!original) {
+            continue
+        }
+
+        const escaped =
+            original
+                .replace(
+                    /[.*+?^${}()|[\]\\]/g,
+                    '\\$&'
+                )
+
+        text =
+            text.replace(
+                new RegExp(
+                    escaped,
+                    'gi'
+                ),
+                replacement
+            )
+    }
+
+    return text
+}
+
+function getPrivateGameSocialKeywordHits(
+    value
+) {
+
+    const text =
+        String(
+            value ?? ''
+        )
+            .toLowerCase()
+
+    const candidates = [
+        ...PRIVATE_GAME_RERUN_KEYWORDS,
+        '卡池',
+        '祈愿',
+        '招募',
+        '召唤',
+        '返场',
+        '复刻',
+        '再次开放',
+        '再次开启',
+        '限时回归',
+        '重新开放',
+        '回归',
+    ]
+
+    return [
+        ...new Set(
+            candidates
+                .filter(
+                    (keyword) =>
+                        keyword &&
+                        text.includes(
+                            keyword.toLowerCase()
+                        )
+                )
+        ),
+    ]
+}
+
+function getPrivateGameSocialExcerpt(
+    value,
+    keywords
+) {
+
+    const text =
+        String(
+            value ?? ''
+        )
+            .replace(
+                /\s+/g,
+                ' '
+            )
+            .trim()
+
+    if (
+        !text ||
+        !Array.isArray(
+            keywords
+        ) ||
+        keywords.length === 0
+    ) {
+        return ''
+    }
+
+    const lower =
+        text.toLowerCase()
+
+    let bestIndex = -1
+    let bestKeyword = ''
+
+    for (
+        const keyword
+        of keywords
+    ) {
+
+        const index =
+            lower.indexOf(
+                String(
+                    keyword
+                )
+                    .toLowerCase()
+            )
+
+        if (
+            index >= 0 &&
+            (
+                bestIndex < 0 ||
+                index < bestIndex
+            )
+        ) {
+            bestIndex =
+                index
+            bestKeyword =
+                keyword
+        }
+    }
+
+    if (
+        bestIndex < 0
+    ) {
+        return ''
+    }
+
+    const start =
+        Math.max(
+            0,
+            bestIndex -
+                160
+        )
+
+    const end =
+        Math.min(
+            text.length,
+            bestIndex +
+                String(
+                    bestKeyword
+                )
+                    .length +
+                420
+        )
+
+    return sanitizePrivateGameSocialDiagnosticText(
+        `${start > 0 ? '…' : ''}${text.slice(
+            start,
+            end
+        )}${end < text.length ? '…' : ''}`
+    )
+}
+
+function buildPrivateGameSocialDiagnostics(
+    results = []
+) {
+
+    return results
+        .slice(
+            0,
+            20
+        )
+        .map(
+            (
+                item,
+                index
+            ) => {
+
+                const sourceKind =
+                    String(
+                        item?._watch_source ||
+                        'unknown'
+                    )
+
+                const title =
+                    sanitizePrivateGameSocialDiagnosticText(
+                        String(
+                            item?.title ||
+                            ''
+                        )
+                            .replace(
+                                /\s+/g,
+                                ' '
+                            )
+                            .trim()
+                    )
+                        .slice(
+                            0,
+                            240
+                        )
+
+                const rawContent =
+                    String(
+                        item?.raw_content ||
+                        item?.rawContent ||
+                        ''
+                    )
+
+                const summary =
+                    String(
+                        item?.content ||
+                        ''
+                    )
+
+                const combined =
+                    `${title}\n${summary}\n${rawContent}`
+
+                const keywordHits =
+                    getPrivateGameSocialKeywordHits(
+                        combined
+                    )
+
+                let domain = ''
+
+                try {
+
+                    domain =
+                        new URL(
+                            String(
+                                item?.url ||
+                                ''
+                            )
+                        )
+                            .hostname
+
+                } catch (
+                error
+                ) {
+
+                    domain = ''
+                }
+
+                return {
+                    index:
+                        index + 1,
+
+                    source:
+                        sourceKind,
+
+                    title:
+                        title ||
+                        '未命名',
+
+                    domain:
+                        domain ||
+                        '未知',
+
+                    has_raw_content:
+                        rawContent
+                            .trim()
+                            .length > 0,
+
+                    raw_chars:
+                        rawContent
+                            .length,
+
+                    keyword_hits:
+                        keywordHits,
+
+                    excerpt:
+                        getPrivateGameSocialExcerpt(
+                            rawContent ||
+                            summary,
+                            keywordHits
+                        ),
+                }
+            }
+        )
+}
+
+
 async function analyzePrivateGameRerunEvents(
     results
 ) {
@@ -6176,6 +6480,7 @@ function isPrivateGameWatcherDue(
 
 async function runPrivateGameRerunCheck({
     force = false,
+    debug = false,
 } = {}) {
 
     const {
@@ -6245,6 +6550,11 @@ async function runPrivateGameRerunCheck({
 
             results:
                 [],
+
+            diagnostics:
+                debug
+                    ? []
+                    : undefined,
         }
     }
 
@@ -6398,6 +6708,13 @@ async function runPrivateGameRerunCheck({
                 .length,
 
         results,
+
+        diagnostics:
+            debug
+                ? buildPrivateGameSocialDiagnostics(
+                    officialResults
+                )
+                : undefined,
     }
 }
 
@@ -12652,9 +12969,15 @@ app.post(
                     ?.force ===
                 true
 
+            const debug =
+                req.body
+                    ?.debug ===
+                true
+
             const result =
                 await runPrivateGameRerunCheck({
                     force,
+                    debug,
                 })
 
             console.log(
@@ -12667,6 +12990,8 @@ app.post(
                     ok: true,
 
                     force,
+
+                    debug,
 
                     interval_hours:
                         PRIVATE_GAME_WATCH_INTERVAL_HOURS,
