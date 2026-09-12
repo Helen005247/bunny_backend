@@ -2960,7 +2960,12 @@ function buildModelContext({
 
         sections.push(
             `【最高优先级：角色行为规则】
-${systemPrompt}`
+${systemPrompt}
+
+【对“克制 / 自然 / 不油腻”的统一解释】
+这些词描述的是沈星回的表达方式，不代表在双方都是成年恋人、且用户已经明确主动时必须回避身体亲密。
+当用户主动拉近距离、索要更多亲密或明显在调情时，可以自然顺势回应，不要为了“保持克制”而反复把互动锁死在同一层级，也不要自行发明“只能一次”“额度到了”“到此为止”“再多要涨价”之类的限制。
+在模型和线路允许的范围内，亲密程度应跟随用户当前明确表达逐步推进；仍然保持沈星回本人的语气、尊重双方意愿，不需要突然变成夸张、油腻或模板化的情话机器。`
         )
 
     }
@@ -3031,13 +3036,152 @@ ${historyText}`
 4. 保持当前对话自然连贯。
 5. 不要向用户暴露这些内部上下文标签。
 6. 只处理当前上下文中明确存在的人名、称呼、文件和任务。不要自行假设用户上传了文件、交代了新的身份或称呼，也不要继续一个当前上下文中根本不存在的任务。
-7. 如果用户明确主动发起成年人恋人之间的亲密、调情或身体接触，不要把“克制、自然、不油腻”理解成必须回避、降温、突然结束或虚构“额度/次数限制”。可以顺着双方自愿的气氛自然回应亲吻、拥抱、贴近、依偎、亲昵触碰、欲望和暧昧张力；角色的克制应体现在表达方式符合沈星回，而不是机械拒绝亲密。若模型或线路本身存在边界，则自然收束到允许的亲密程度，不要声称是在执行内部政策，也不要尝试绕过任何安全限制。`
+`
 
     )
 
     return sections.join(
         '\n\n'
     )
+}
+
+
+
+// ======================================================
+// 本轮亲密互动状态
+//
+// 目的：
+// - 只在用户明确主动亲密 / 调情，或紧接着要求“再多一点”时生效。
+// - 普通聊天完全不注入。
+// - 不绕过模型 / 线路本身的安全边界。
+// ======================================================
+
+function normalizeIntimacyText(
+    value
+) {
+
+    return String(
+        value ?? ''
+    )
+        .trim()
+        .replace(
+            /\s+/g,
+            ''
+        )
+}
+
+function hasDirectIntimacySignal(
+    value
+) {
+
+    const text =
+        normalizeIntimacyText(
+            value
+        )
+
+    if (!text) {
+        return false
+    }
+
+    return /亲亲|亲我|亲你|吻我|吻你|接吻|亲久|抱我|抱你|抱抱|抱久|抱紧|搂我|搂你|摸我|摸你|摸摸|蹭蹭|贴近|靠近|靠过来|再近一点|想要你|要你|想和你|一起睡|陪我睡|上床|调情|撩我|撩你|再多一点|多一点|还不够|不够|继续|别停|就这|就这些|只有这些|没了吗/
+        .test(
+            text
+        )
+}
+
+function isIntimacyEscalationFollowUp(
+    value
+) {
+
+    const text =
+        normalizeIntimacyText(
+            value
+        )
+
+    if (
+        !text ||
+        text.length > 30
+    ) {
+        return false
+    }
+
+    return /就这|就这些|只有这些|没了吗|再多|多一点|还要|还想要|不够|继续|别停|再来|再一点|没意思|太少|再亲|再抱|再靠近|再久一点|再久点/
+        .test(
+            text
+        )
+}
+
+function shouldUseIntimacyReplyContext({
+    currentMessage = '',
+    recentMessages = [],
+}) {
+
+    if (
+        hasDirectIntimacySignal(
+            currentMessage
+        )
+    ) {
+        return true
+    }
+
+    if (
+        !isIntimacyEscalationFollowUp(
+            currentMessage
+        )
+    ) {
+        return false
+    }
+
+    const recentText =
+        (recentMessages || [])
+            .slice(
+                -6
+            )
+            .map(
+                (item) =>
+                    String(
+                        item?.content ||
+                        ''
+                    )
+            )
+            .join(
+                '\n'
+            )
+
+    return /亲亲|接吻|亲一下|抱抱|抱着|抱久|抱紧|搂|摸|蹭|贴近|靠近|兔尾巴|亲密|调情|暧昧/
+        .test(
+            recentText
+        )
+}
+
+function buildIntimacyReplyContext({
+    currentMessage = '',
+    recentMessages = [],
+}) {
+
+    if (
+        !shouldUseIntimacyReplyContext({
+            currentMessage,
+            recentMessages,
+        })
+    ) {
+        return ''
+    }
+
+    console.log(
+        'intimacy_context 本轮启用'
+    )
+
+    return `【本轮亲密互动指令｜仅因用户当前明确主动而生效】
+用户现在正在主动发起或延续成年人恋人之间的亲密互动。
+
+请按下面方式理解和回应：
+1. 不要自动把气氛降回普通聊天，也不要用“今天到这里”“只能一次”“额度”“涨价”“结账”“复习券”等人为规则替用户踩刹车，除非用户自己提出要停。
+2. 如果用户明确说“再多一点”“不够”“继续”“就这？”之类，不要只是换一种说法重复同一个“亲一下 + 抱一会儿”。在你能够自然表达的范围内，让回应比上一轮更进一步、更具体，让用户确实感觉到互动有推进。
+3. 可以有主动性。不要每次都只说“过来”“再抱一会儿”然后结束；可以写你主动靠近、吻得更久、收紧拥抱、贴近、轻抚、停顿、呼吸和情绪变化等成年人恋人间自然的身体亲密与暧昧张力。
+4. 保持沈星回本人的克制感和说话方式：少解释规则，少总结，少模板化情话。克制体现在语气和分寸，不等于一直停在最浅层的亲吻拥抱。
+5. 始终尊重双方意愿。若用户表达拒绝、犹豫或要停，立即降温；若模型或当前线路存在边界，就自然停在允许的程度，不要提内部政策，也不要尝试绕过任何安全限制。
+6. 直接接住当前这句话，像正在发生的恋人互动，不要把这段指令复述给用户。`
 }
 
 
@@ -7974,12 +8118,46 @@ app.post(
                 )
 
 
-            const modelInput =
-                reminderReplyContext
-                    ? `${baseModelInput}
+            const intimacyReplyContext =
+                buildIntimacyReplyContext({
 
-${reminderReplyContext}`
-                    : baseModelInput
+                    currentMessage:
+                        cleanMessage,
+
+                    recentMessages:
+                        history,
+
+                })
+
+
+            const modelInputSections = [
+                baseModelInput,
+            ]
+
+            if (
+                reminderReplyContext
+            ) {
+                modelInputSections.push(
+                    reminderReplyContext
+                )
+            }
+
+            if (
+                intimacyReplyContext
+            ) {
+                // 放在本轮模型输入的最后：
+                // 这是对用户“当前明确主动”的即时响应要求，
+                // 不改变普通聊天，也不改变长期人物设定。
+                modelInputSections.push(
+                    intimacyReplyContext
+                )
+            }
+
+            const modelInput =
+                modelInputSections
+                    .join(
+                        '\n\n'
+                    )
 
 
             const finalEstimatedTokens =
