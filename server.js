@@ -4787,25 +4787,69 @@ function getBilibiliDynamicItemTitle(
     return 'B站官方动态'
 }
 
-async function fetchBilibiliOfficialRecentPosts() {
+async function fetchBilibiliJson(
+    url,
+    referer
+) {
 
-    if (
-        !PRIVATE_GAME_BILIBILI_ACCOUNT_NAME ||
-        !PRIVATE_GAME_BILIBILI_PROFILE_URL
-    ) {
-        return []
-    }
+    const controller =
+        new AbortController()
 
-    const hostMid =
-        parseBilibiliUidFromProfileUrl(
-            PRIVATE_GAME_BILIBILI_PROFILE_URL
+    const timeout =
+        setTimeout(
+            () =>
+                controller.abort(),
+            10000
         )
 
-    if (!hostMid) {
-        throw new Error(
-            'PRIVATE_GAME_BILIBILI_PROFILE_URL 中没有识别到 B站 UID'
+    try {
+
+        const response =
+            await fetch(
+                url,
+                {
+                    method:
+                        'GET',
+
+                    headers: {
+                        Accept:
+                            'application/json, text/plain, */*',
+
+                        'User-Agent':
+                            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36',
+
+                        Referer:
+                            referer,
+                    },
+
+                    signal:
+                        controller
+                            .signal,
+                }
+            )
+
+        if (
+            !response.ok
+        ) {
+            throw new Error(
+                `Bilibili HTTP ${response.status}`
+            )
+        }
+
+        return await response
+            .json()
+
+    } finally {
+
+        clearTimeout(
+            timeout
         )
     }
+}
+
+async function fetchBilibiliDynamicFeedByUid(
+    hostMid
+) {
 
     const cutoff =
         DateTime
@@ -4824,7 +4868,7 @@ async function fetchBilibiliOfficialRecentPosts() {
         new Set()
 
     while (
-        page < 6
+        page < 5
     ) {
 
         const url =
@@ -4862,62 +4906,27 @@ async function fetchBilibiliOfficialRecentPosts() {
                 )
         }
 
-        const controller =
-            new AbortController()
-
-        const timeout =
-            setTimeout(
-                () =>
-                    controller.abort(),
-                10000
-            )
-
-        let response
         let data
 
         try {
 
-            response =
-                await fetch(
-                    url,
-                    {
-                        method:
-                            'GET',
-
-                        headers: {
-                            Accept:
-                                'application/json, text/plain, */*',
-
-                            'User-Agent':
-                                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36',
-
-                            Referer:
-                                PRIVATE_GAME_BILIBILI_PROFILE_URL,
-                        },
-
-                        signal:
-                            controller
-                                .signal,
-                    }
-                )
-
-            if (
-                !response.ok
-            ) {
-                throw new Error(
-                    `Bilibili HTTP ${response.status}`
-                )
-            }
-
             data =
-                await response
-                    .json()
+                await fetchBilibiliJson(
+                    url,
+                    PRIVATE_GAME_BILIBILI_PROFILE_URL
+                )
 
-        } finally {
+        } catch (
+        error
+        ) {
 
-            clearTimeout(
-                timeout
+            console.warn(
+                'private_game_rerun_bilibili：普通动态接口请求失败，准备尝试 opus fallback：',
+                error?.message ||
+                error
             )
+
+            return []
         }
 
         if (
@@ -4926,9 +4935,11 @@ async function fetchBilibiliOfficialRecentPosts() {
             ) !== 0
         ) {
 
-            throw new Error(
-                `Bilibili API ${data?.code}: ${data?.message || 'unknown error'}`
+            console.warn(
+                `private_game_rerun_bilibili：普通动态接口 code=${data?.code}，message=${data?.message || ''}，准备尝试 opus fallback`
             )
+
+            return []
         }
 
         const items =
@@ -4969,44 +4980,13 @@ async function fetchBilibiliOfficialRecentPosts() {
                     ''
                 )
 
-            const authorName =
-                String(
-                    author
-                        ?.name ||
-                    ''
-                )
-                    .trim()
-
-            // 先用 UID 严格验证来源。
+            // UID 来自用户自己配置的官方主页 URL，
+            // 所以 UID 是来源身份的最高可信依据。
             if (
+                authorMid &&
                 authorMid !==
-                hostMid
+                    hostMid
             ) {
-                continue
-            }
-
-            // 再用用户自己配置的官方账号名做第二层验证。
-            const expectedName =
-                normalizeBilibiliAccountName(
-                    PRIVATE_GAME_BILIBILI_ACCOUNT_NAME
-                )
-
-            const actualName =
-                normalizeBilibiliAccountName(
-                    authorName
-                )
-
-            if (
-                expectedName &&
-                actualName &&
-                actualName !==
-                    expectedName
-            ) {
-
-                console.warn(
-                    'private_game_rerun_bilibili：UID 正确，但账号名与 Render 配置不一致，本条跳过'
-                )
-
                 continue
             }
 
@@ -5018,24 +4998,27 @@ async function fetchBilibiliOfficialRecentPosts() {
                 )
 
             if (
-                !Number
+                Number
                     .isFinite(
                         pubTs
-                    ) ||
-                pubTs <= 0
+                    ) &&
+                pubTs > 0 &&
+                pubTs <
+                    cutoff
             ) {
                 continue
             }
 
             if (
-                pubTs <
-                cutoff
+                Number
+                    .isFinite(
+                        pubTs
+                    ) &&
+                pubTs > 0
             ) {
-                continue
+                pageHasRecent =
+                    true
             }
-
-            pageHasRecent =
-                true
 
             const id =
                 String(
@@ -5069,15 +5052,23 @@ async function fetchBilibiliOfficialRecentPosts() {
             }
 
             const publishedDate =
-                DateTime
-                    .fromSeconds(
-                        pubTs,
-                        {
-                            zone:
-                                'utc',
-                        }
-                    )
-                    .toISO()
+                (
+                    Number
+                        .isFinite(
+                            pubTs
+                        ) &&
+                    pubTs > 0
+                )
+                    ? DateTime
+                        .fromSeconds(
+                            pubTs,
+                            {
+                                zone:
+                                    'utc',
+                            }
+                        )
+                        .toISO()
+                    : ''
 
             const title =
                 getBilibiliDynamicItemTitle(
@@ -5120,7 +5111,12 @@ async function fetchBilibiliOfficialRecentPosts() {
                     hostMid,
 
                 _verified_author_name:
-                    authorName,
+                    String(
+                        author
+                            ?.name ||
+                        ''
+                    )
+                        .trim(),
 
                 _dynamic_id:
                     id,
@@ -5152,7 +5148,6 @@ async function fetchBilibiliOfficialRecentPosts() {
             break
         }
 
-        // 如果这一页完全没有最近 30 天内容，后续更旧，直接停。
         if (
             !pageHasRecent &&
             page > 0
@@ -5166,29 +5161,350 @@ async function fetchBilibiliOfficialRecentPosts() {
         page += 1
     }
 
-    recentItems.sort(
-        (
-            a,
-            b
-        ) =>
-            new Date(
-                b
-                    .published_date
-            )
-                .getTime() -
-            new Date(
-                a
-                    .published_date
-            )
-                .getTime()
-    )
-
-    console.log(
-        `private_game_rerun_bilibili：UID=${hostMid}，近30天官方动态=${recentItems.length}`
-    )
-
     return recentItems
 }
+
+async function fetchBilibiliOpusFeedByUid(
+    hostMid
+) {
+
+    const results = []
+    const seenIds =
+        new Set()
+
+    let offset = ''
+    let page = 1
+
+    while (
+        page <= 4 &&
+        results.length < 40
+    ) {
+
+        const url =
+            new URL(
+                'https://api.bilibili.com/x/polymer/web-dynamic/v1/opus/feed/space'
+            )
+
+        url
+            .searchParams
+            .set(
+                'host_mid',
+                hostMid
+            )
+
+        url
+            .searchParams
+            .set(
+                'page',
+                String(
+                    page
+                )
+            )
+
+        url
+            .searchParams
+            .set(
+                'type',
+                'all'
+            )
+
+        if (offset) {
+            url
+                .searchParams
+                .set(
+                    'offset',
+                    offset
+                )
+        }
+
+        let data
+
+        try {
+
+            data =
+                await fetchBilibiliJson(
+                    url,
+                    PRIVATE_GAME_BILIBILI_PROFILE_URL
+                )
+
+        } catch (
+        error
+        ) {
+
+            console.warn(
+                'private_game_rerun_bilibili：opus feed 请求失败：',
+                error?.message ||
+                error
+            )
+
+            break
+        }
+
+        if (
+            Number(
+                data?.code
+            ) !== 0
+        ) {
+
+            console.warn(
+                `private_game_rerun_bilibili：opus feed code=${data?.code}，message=${data?.message || ''}`
+            )
+
+            break
+        }
+
+        const items =
+            Array.isArray(
+                data
+                    ?.data
+                    ?.items
+            )
+                ? data
+                    .data
+                    .items
+                : []
+
+        if (
+            items.length === 0
+        ) {
+            break
+        }
+
+        for (
+            const item
+            of items
+        ) {
+
+            const opusId =
+                String(
+                    item
+                        ?.opus_id ||
+                    ''
+                )
+                    .trim()
+
+            if (
+                !opusId ||
+                seenIds
+                    .has(
+                        opusId
+                    )
+            ) {
+                continue
+            }
+
+            seenIds.add(
+                opusId
+            )
+
+            const bodyText =
+                String(
+                    item
+                        ?.content ||
+                    ''
+                )
+                    .replace(
+                        /\r\n/g,
+                        '\n'
+                    )
+                    .replace(
+                        /\r/g,
+                        '\n'
+                    )
+                    .trim()
+
+            if (!bodyText) {
+                continue
+            }
+
+            let jumpUrl =
+                String(
+                    item
+                        ?.jump_url ||
+                    ''
+                )
+                    .trim()
+
+            if (
+                jumpUrl
+                    .startsWith(
+                        '//'
+                    )
+            ) {
+                jumpUrl =
+                    `https:${jumpUrl}`
+            }
+
+            if (!jumpUrl) {
+                jumpUrl =
+                    `https://www.bilibili.com/opus/${opusId}`
+            }
+
+            results.push({
+                title:
+                    bodyText
+                        .split(
+                            '\n'
+                        )[0]
+                        .replace(
+                            /\s+/g,
+                            ' '
+                        )
+                        .trim()
+                        .slice(
+                            0,
+                            220
+                        ) ||
+                    'B站官方图文动态',
+
+                url:
+                    jumpUrl,
+
+                // opus feed 本身没有稳定公开发布时间字段。
+                // 这里不伪造日期；识别器继续从正文里判断活动时间。
+                published_date:
+                    '',
+
+                content:
+                    bodyText
+                        .slice(
+                            0,
+                            1800
+                        ),
+
+                raw_content:
+                    bodyText
+                        .slice(
+                            0,
+                            12000
+                        ),
+
+                _watch_source:
+                    'bilibili',
+
+                _retrieval_mode:
+                    'direct_opus_feed',
+
+                _expected_account_name:
+                    PRIVATE_GAME_BILIBILI_ACCOUNT_NAME,
+
+                _official_profile_url:
+                    PRIVATE_GAME_BILIBILI_PROFILE_URL,
+
+                // 这个 feed 本身就是按 host_mid 获取，
+                // 所以来源 UID 已经由请求参数限定。
+                _verified_author_mid:
+                    hostMid,
+
+                _verified_author_name:
+                    PRIVATE_GAME_BILIBILI_ACCOUNT_NAME,
+
+                _dynamic_id:
+                    opusId,
+            })
+        }
+
+        const hasMore =
+            Boolean(
+                data
+                    ?.data
+                    ?.has_more
+            )
+
+        const nextOffset =
+            String(
+                data
+                    ?.data
+                    ?.offset ||
+                ''
+            )
+                .trim()
+
+        if (
+            !hasMore ||
+            !nextOffset ||
+            nextOffset ===
+                offset
+        ) {
+            break
+        }
+
+        offset =
+            nextOffset
+
+        page += 1
+    }
+
+    return results
+}
+
+async function fetchBilibiliOfficialRecentPosts() {
+
+    if (
+        !PRIVATE_GAME_BILIBILI_ACCOUNT_NAME ||
+        !PRIVATE_GAME_BILIBILI_PROFILE_URL
+    ) {
+        return []
+    }
+
+    const hostMid =
+        parseBilibiliUidFromProfileUrl(
+            PRIVATE_GAME_BILIBILI_PROFILE_URL
+        )
+
+    if (!hostMid) {
+        throw new Error(
+            'PRIVATE_GAME_BILIBILI_PROFILE_URL 中没有识别到 B站 UID'
+        )
+    }
+
+    const dynamicItems =
+        await fetchBilibiliDynamicFeedByUid(
+            hostMid
+        )
+
+    if (
+        dynamicItems.length > 0
+    ) {
+
+        dynamicItems.sort(
+            (
+                a,
+                b
+            ) =>
+                new Date(
+                    b
+                        .published_date ||
+                    0
+                )
+                    .getTime() -
+                new Date(
+                    a
+                        .published_date ||
+                    0
+                )
+                    .getTime()
+        )
+
+        console.log(
+            `private_game_rerun_bilibili：UID=${hostMid}，普通动态接口近30天=${dynamicItems.length}`
+        )
+
+        return dynamicItems
+    }
+
+    const opusItems =
+        await fetchBilibiliOpusFeedByUid(
+            hostMid
+        )
+
+    console.log(
+        `private_game_rerun_bilibili：UID=${hostMid}，普通动态接口=0，opus fallback=${opusItems.length}`
+    )
+
+    return opusItems
+}
+
 
 
 function getPrivateGameSourceBreakdown(
@@ -5228,6 +5544,58 @@ function getPrivateGameSourceBreakdown(
 
     return breakdown
 }
+
+
+function hasPrivateGameRerunSignal(
+    item
+) {
+
+    const text =
+        [
+            item?.title,
+            item?.content,
+            item?.raw_content,
+            item?.rawContent,
+        ]
+            .map(
+                (value) =>
+                    String(
+                        value ||
+                        ''
+                    )
+                        .toLowerCase()
+            )
+            .join(
+                '\n'
+            )
+
+    const requiredSignals = [
+        ...PRIVATE_GAME_RERUN_KEYWORDS,
+        '卡池',
+        '祈愿',
+        '招募',
+        '召唤',
+        '返场',
+        '复刻',
+        '再次开放',
+        '再次开启',
+        '限时回归',
+        '重新开放',
+    ]
+
+    return requiredSignals
+        .some(
+            (keyword) =>
+                keyword &&
+                text.includes(
+                    String(
+                        keyword
+                    )
+                        .toLowerCase()
+                )
+        )
+}
+
 
 async function searchPrivateGameOfficialReruns() {
 
@@ -5324,8 +5692,15 @@ async function searchPrivateGameOfficialReruns() {
                         PRIVATE_GAME_OFFICIAL_DOMAINS,
 
                     maxResults:
-                        6,
-                }),
+                        8,
+                })
+                    .then(
+                        (items) =>
+                            items
+                                .filter(
+                                    hasPrivateGameRerunSignal
+                                )
+                    ),
         })
     }
 
@@ -5966,7 +6341,7 @@ async function analyzePrivateGameRerunEvents(
 【重要判定规则】
 
 0. 先验证来源身份：
-   - 如果“来源类型”是 bilibili 且“获取方式”是 direct_space_feed，说明后端已经通过官方账号主页 UID 直接读取该账号空间动态，并校验了作者 UID；这类内容可以视为指定官方 B站账号本人发布，不要再因为正文没有重复账号名而排除。
+   - 如果“来源类型”是 bilibili 且“获取方式”是 direct_space_feed 或 direct_opus_feed，说明后端已经用用户配置的官方 B站主页 UID 定向读取该账号内容；这类内容可以视为指定官方 B站账号本人发布，不要再因为正文没有重复账号名而排除。
    - 如果“来源类型”是 xiaohongshu，仍必须确认页面标题/摘要/正文中的发布者、作者、账号信息与“期望官方账号”相符；仅仅是玩家帖子提到官方账号名，不算官方发布。
    - 如果“来源类型”是 website，则因为已经受官方域名白名单限制，可以按官网内容继续判断。
 1. 只保留卡池、角色、卡牌、祈愿、召唤等抽取内容的复刻/返场/rerun。
