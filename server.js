@@ -3974,7 +3974,7 @@ const PRIVATE_GAME_OFFICIAL_DOMAINS =
 const PRIVATE_GAME_RERUN_KEYWORDS =
     String(
         process.env.PRIVATE_GAME_RERUN_KEYWORDS ||
-        '复刻,返场,rerun,re-run'
+        '复刻,返场,再次开放,再次开启,限时回归,重新开放,rerun,re-run'
     )
         .split(
             /[,，\n]+/
@@ -4354,6 +4354,8 @@ async function searchPrivateGameOfficialReruns() {
                             topic:
                                 'general',
 
+                            // 用户确认一个月的官方公告窗口足够，
+                            // 所以继续保留 month，不扩大历史范围。
                             time_range:
                                 'month',
 
@@ -4363,8 +4365,10 @@ async function searchPrivateGameOfficialReruns() {
                             include_answer:
                                 false,
 
+                            // v8.2：除了搜索摘要，也把官方页面清洗后的正文带回来。
+                            // 复刻对象、池名、开始/结束时间经常只在正文里出现。
                             include_raw_content:
-                                false,
+                                'markdown',
 
                             include_domains:
                                 PRIVATE_GAME_OFFICIAL_DOMAINS,
@@ -4397,15 +4401,53 @@ async function searchPrivateGameOfficialReruns() {
         const data =
             await response.json()
 
-        return Array.isArray(
-            data?.results
-        )
-            ? data.results
-                .slice(
-                    0,
-                    10
+        const results =
+            Array.isArray(
+                data?.results
+            )
+                ? data.results
+                    .slice(
+                        0,
+                        10
+                    )
+                : []
+
+        const rawReadyCount =
+            results
+                .filter(
+                    (item) =>
+                        String(
+                            item?.raw_content ||
+                            item?.rawContent ||
+                            ''
+                        )
+                            .trim()
+                            .length > 0
                 )
-            : []
+                .length
+
+        const rawChars =
+            results
+                .reduce(
+                    (
+                        total,
+                        item
+                    ) =>
+                        total +
+                        String(
+                            item?.raw_content ||
+                            item?.rawContent ||
+                            ''
+                        )
+                            .length,
+                    0
+                )
+
+        console.log(
+            `private_game_rerun_search：官方结果=${results.length}，正文可用=${rawReadyCount}，正文字符≈${rawChars}`
+        )
+
+        return results
 
     } finally {
 
@@ -4476,14 +4518,41 @@ function formatPrivateGameSearchResults(
                         .trim()
                         .slice(
                             0,
-                            1600
+                            1800
+                        )
+
+                const rawContent =
+                    String(
+                        item?.raw_content ||
+                        item?.rawContent ||
+                        ''
+                    )
+                        .replace(
+                            /\r\n/g,
+                            '\n'
+                        )
+                        .replace(
+                            /\r/g,
+                            '\n'
+                        )
+                        .replace(
+                            /\n{3,}/g,
+                            '\n\n'
+                        )
+                        .trim()
+                        .slice(
+                            0,
+                            6500
                         )
 
                 return `【官方搜索结果 ${index + 1}】
 标题：${title || '无'}
 发布日期：${published || '未知'}
 URL：${url || '无'}
-摘要：${content || '无'}`
+搜索摘要：${content || '无'}
+
+【官方页面正文】
+${rawContent || '未成功提取正文'}`
             }
         )
         .join(
@@ -4504,8 +4573,15 @@ async function analyzePrivateGameRerunEvents(
         return []
     }
 
+    const analyzerNow =
+        DateTime
+            .utc()
+            .toISO()
+
     const input =
         `你是“游戏官方卡池复刻事件识别器”。
+
+当前 UTC 时间：${analyzerNow}
 
 下面的内容来自已经限制为“官方域名”的网页搜索结果。
 你的任务不是聊天，而是把“真正的卡池/角色/卡牌复刻或返场事件”提取出来，并把同一个复刻事件的多条官方宣传合并。
@@ -4513,21 +4589,24 @@ async function analyzePrivateGameRerunEvents(
 【重要判定规则】
 
 1. 只保留卡池、角色、卡牌、祈愿、召唤等抽取内容的复刻/返场/rerun。
-2. 普通活动复刻、剧情回顾、皮肤返场、周边返场、商城商品、PV 回顾等，如果不是卡池复刻，排除。
-3. 只是提到历史上的旧复刻、总结往期、玩家猜测、未来预测，不算“新的官方复刻消息”。
-4. 同一批卡池的：
+2. 判断时必须优先阅读每条结果里的【官方页面正文】，不要只看标题或搜索摘要。复刻对象、卡池名、开放时间经常只写在正文。
+3. 官方不一定使用“复刻”两个字。只要正文明确表达“曾经上线过的卡池/角色/卡牌再次开放抽取”，例如“返场、再次开放、再次开启、限时回归、重新开放”等，也可以判定为复刻。
+4. 普通活动复刻、剧情回顾、皮肤返场、周边返场、商城商品、PV 回顾等，如果不是抽取卡池复刻，排除。
+5. 只是提到历史上的旧复刻、总结往期、玩家猜测、未来预测，不算“当前新的官方复刻消息”。
+6. 如果正文给出了开始/结束时间，优先用时间判断这是“当前正在进行 / 即将开始”的卡池；已经明确结束的旧复刻不要输出。
+7. 同一批卡池的：
    - 预告
    - 详情
    - PV
    - 开启提醒
    - 倒计时
    即使是多条网页，也必须合并成一个 event。
-5. event_title 可以概括这次复刻，但不要编造官方没有的信息。
-6. rerun_targets 尽量列出真正被复刻的角色/卡牌/卡池核心名字。
-7. 如果无法确认具体 target，就不要输出那个 event。
-8. start_at / end_at 只有网页明确给出时才填写，格式尽量使用 ISO 8601；否则 null。
-9. source_urls 合并同一事件对应的官方 URL。
-10. 不要因为搜索结果来自官方域名，就把所有结果都当成复刻。
+8. event_title 可以概括这次复刻，但不要编造官方没有的信息。
+9. rerun_targets 必须尽量从正文中提取真正被复刻的角色/卡牌/卡池核心名字；不要因为标题没写名字就放弃，继续读正文。
+10. 如果正文已经明确是卡池复刻，但存在多个卡牌/角色名，rerun_targets 可以列多个；如果确实无法确认任何 target，才不要输出那个 event。
+11. start_at / end_at 只有网页明确给出时才填写，格式尽量使用 ISO 8601；否则 null。
+12. source_urls 合并同一事件对应的官方 URL。
+13. 不要因为搜索结果来自官方域名，就把所有结果都当成复刻。
 
 只输出一个 JSON 对象，不要 Markdown，不要解释：
 
