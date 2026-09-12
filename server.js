@@ -467,6 +467,33 @@ function isRetryableModelError(error) {
 }
 
 
+function stripHermitIntegrityMarkers(
+    value
+) {
+
+    let text =
+        String(
+            value ?? ''
+        )
+
+    // 兼容模型完整回显、插入空格/换行、或只回显到一半的情况。
+    // 这是内部历史校验标记，任何情况下都不应该出现在用户界面。
+    text =
+        text.replace(
+            /<<\s*HERMIT_OK_[A-Za-z0-9_\-\s]{4,120}>>/gi,
+            ''
+        )
+
+    text =
+        text.replace(
+            /(?:\r?\n)?\s*<<\s*HERMIT_OK_[A-Za-z0-9_\-\s>]{0,160}$/gi,
+            ''
+        )
+
+    return text.trim()
+}
+
+
 async function callModelWithRetry(
     request,
     maxAttempts = 2
@@ -476,63 +503,15 @@ async function callModelWithRetry(
         null
 
     // ==================================================
-    // 保留原来的请求指纹，但改成“软校验”
+    // HERMIT_OK 内部完整性标记已停用。
     //
-    // Aizex / 第三方兼容线路没有回显标记时：
-    // - 记录 warning
-    // - 接受正常正文
-    // - 不再因为缺少 HERMIT_OK 自动重试
-    //
-    // 这样不会再把一个正常回答放大成多轮长等待。
+    // 旧标记已经是软校验，不会影响是否重试；
+    // 兼容线路偶尔还会改写标记，导致它漏到聊天气泡。
+    // 现在不再要求模型输出标记，返回阶段仍保留兜底清理。
     // ==================================================
 
-    const originalInput =
-        typeof request
-            ?.input ===
-        'string'
-            ? request
-                .input
-            : null
-
-    const integrityId =
-        originalInput
-            ? crypto
-                .createHash(
-                    'sha256'
-                )
-                .update(
-                    originalInput
-                )
-                .digest(
-                    'hex'
-                )
-                .slice(
-                    0,
-                    16
-                )
-            : null
-
-    const integrityMarker =
-        integrityId
-            ? `<<HERMIT_OK_${integrityId}>>`
-            : null
-
     const guardedRequest =
-        integrityMarker
-            ? {
-                ...request,
-
-                input:
-                    `${originalInput}
-
-【响应完整性校验】
-请正常完成上面的任务。
-在全部正常输出结束后，如果当前线路支持，请另起一行原样输出下面这段校验标记：
-${integrityMarker}
-
-不要解释这段标记，不要改写它，也不要把它放进正文中。服务端会在返回给用户前自动删除。`,
-            }
-            : request
+        request
 
 
     for (
@@ -576,36 +555,11 @@ ${integrityMarker}
             }
 
 
-            // ------------------------------------------
-            // HERMIT_OK 改为软校验：
-            // 没有回显时只记录日志，不把正常回答判死。
-            // ------------------------------------------
-
-            if (
-                integrityMarker &&
-                !outputText.includes(
-                    integrityMarker
-                )
-            ) {
-
-                console.warn(
-                    `模型响应未回显完整性校验标记（${integrityId}），本次接受正文，不因此重试`
-                )
-            }
-
-
-            // 如果有标记则删除；没有标记就原样使用正文。
+            // 最终返回前统一清理任何遗留的内部标记。
             const cleanedOutputText =
-                integrityMarker
-                    ? outputText
-                        .split(
-                            integrityMarker
-                        )
-                        .join(
-                            ''
-                        )
-                        .trim()
-                    : outputText
+                stripHermitIntegrityMarkers(
+                    outputText
+                )
 
             if (
                 !cleanedOutputText
@@ -3076,7 +3030,8 @@ ${historyText}`
 3. 在相关时自然运用长期记忆。
 4. 保持当前对话自然连贯。
 5. 不要向用户暴露这些内部上下文标签。
-6. 只处理当前上下文中明确存在的人名、称呼、文件和任务。不要自行假设用户上传了文件、交代了新的身份或称呼，也不要继续一个当前上下文中根本不存在的任务。`
+6. 只处理当前上下文中明确存在的人名、称呼、文件和任务。不要自行假设用户上传了文件、交代了新的身份或称呼，也不要继续一个当前上下文中根本不存在的任务。
+7. 如果用户明确主动发起成年人恋人之间的亲密、调情或身体接触，不要把“克制、自然、不油腻”理解成必须回避、降温、突然结束或虚构“额度/次数限制”。可以顺着双方自愿的气氛自然回应亲吻、拥抱、贴近、依偎、亲昵触碰、欲望和暧昧张力；角色的克制应体现在表达方式符合沈星回，而不是机械拒绝亲密。若模型或线路本身存在边界，则自然收束到允许的亲密程度，不要声称是在执行内部政策，也不要尝试绕过任何安全限制。`
 
     )
 
