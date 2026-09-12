@@ -3926,6 +3926,1938 @@ async function getWebSearchContext({
 }
 
 
+
+// ======================================================
+// “那个游戏”复刻监控 v8（手动检查阶段）
+//
+// 本阶段只做：
+// - 官方来源搜索
+// - 复刻事件识别
+// - 同一复刻事件去重
+// - 新事件主动消息 + Web Push
+// - 48 小时检查间隔门控
+//
+// 暂时不接 Cron；先手动调用检查接口验证几次。
+// ======================================================
+
+const PRIVATE_GAME_SEARCH_NAME =
+    String(
+        process.env.PRIVATE_GAME_SEARCH_NAME ||
+        ''
+    ).trim()
+
+const PRIVATE_GAME_OFFICIAL_DOMAINS =
+    String(
+        process.env.PRIVATE_GAME_OFFICIAL_DOMAINS ||
+        ''
+    )
+        .split(
+            /[,，\n]+/
+        )
+        .map(
+            (item) =>
+                item
+                    .trim()
+                    .replace(
+                        /^https?:\/\//i,
+                        ''
+                    )
+                    .replace(
+                        /\/.*$/,
+                        ''
+                    )
+        )
+        .filter(
+            Boolean
+        )
+
+const PRIVATE_GAME_RERUN_KEYWORDS =
+    String(
+        process.env.PRIVATE_GAME_RERUN_KEYWORDS ||
+        '复刻,返场,rerun,re-run'
+    )
+        .split(
+            /[,，\n]+/
+        )
+        .map(
+            (item) =>
+                item.trim()
+        )
+        .filter(
+            Boolean
+        )
+
+const PRIVATE_GAME_WATCH_INTERVAL_HOURS =
+    Math.max(
+        24,
+        Number(
+            process.env.PRIVATE_GAME_WATCH_INTERVAL_HOURS
+        ) || 48
+    )
+
+const PRIVATE_GAME_EVENT_MERGE_DAYS =
+    Math.max(
+        14,
+        Number(
+            process.env.PRIVATE_GAME_EVENT_MERGE_DAYS
+        ) || 60
+    )
+
+const PRIVATE_GAME_WATCH_SECRET =
+    String(
+        process.env.PRIVATE_GAME_WATCH_SECRET ||
+        process.env.PROACTIVE_CRON_SECRET ||
+        ''
+    ).trim()
+
+function getPrivateGameWatchConfigStatus() {
+
+    return {
+        has_search_name:
+            Boolean(
+                PRIVATE_GAME_SEARCH_NAME
+            ),
+
+        official_domain_count:
+            PRIVATE_GAME_OFFICIAL_DOMAINS
+                .length,
+
+        has_search_key:
+            Boolean(
+                TAVILY_API_KEY
+            ),
+
+        has_watch_secret:
+            Boolean(
+                PRIVATE_GAME_WATCH_SECRET
+            ),
+    }
+}
+
+async function registerPrivateGameWatch(
+    userId,
+    sessionId
+) {
+
+    if (
+        !supabase ||
+        !userId ||
+        !sessionId
+    ) {
+        return
+    }
+
+    const now =
+        new Date()
+            .toISOString()
+
+    const {
+        error,
+    } =
+        await supabase
+            .from(
+                'private_game_watch_settings'
+            )
+            .upsert(
+                {
+                    user_id:
+                        userId,
+
+                    session_id:
+                        sessionId,
+
+                    enabled:
+                        true,
+
+                    check_interval_hours:
+                        PRIVATE_GAME_WATCH_INTERVAL_HOURS,
+
+                    updated_at:
+                        now,
+                },
+                {
+                    onConflict:
+                        'user_id',
+                }
+            )
+
+    if (error) {
+        throw error
+    }
+
+    console.log(
+        'private_game_watch 已登记当前会话'
+    )
+}
+
+function normalizePrivateGameIdentityText(
+    value
+) {
+
+    let text =
+        String(
+            value ?? ''
+        )
+            .toLowerCase()
+
+    if (
+        PRIVATE_GAME_SEARCH_NAME
+    ) {
+        text =
+            text
+                .split(
+                    PRIVATE_GAME_SEARCH_NAME
+                        .toLowerCase()
+                )
+                .join(
+                    ''
+                )
+    }
+
+    return text
+        .replace(
+            /复刻|返场|rerun|re-run|卡池|祈愿|招募|召唤|活动|限时/gi,
+            ''
+        )
+        .replace(
+            /[^\u4e00-\u9fffA-Za-z0-9]+/g,
+            ''
+        )
+        .trim()
+}
+
+function makePrivateGameTargetFingerprint(
+    event
+) {
+
+    const targets =
+        Array.isArray(
+            event?.rerun_targets
+        )
+            ? event.rerun_targets
+            : []
+
+    const normalizedTargets =
+        [
+            ...new Set(
+                targets
+                    .map(
+                        (item) =>
+                            normalizePrivateGameIdentityText(
+                                item
+                            )
+                    )
+                    .filter(
+                        (item) =>
+                            item.length >= 2
+                    )
+            ),
+        ]
+            .sort()
+
+    let identity =
+        normalizedTargets
+            .join(
+                '|'
+            )
+
+    if (!identity) {
+
+        identity =
+            normalizePrivateGameIdentityText(
+                event?.pool_name ||
+                event?.event_title ||
+                ''
+            )
+    }
+
+    if (
+        !identity ||
+        identity.length < 2
+    ) {
+        return ''
+    }
+
+    return crypto
+        .createHash(
+            'sha256'
+        )
+        .update(
+            identity
+        )
+        .digest(
+            'hex'
+        )
+        .slice(
+            0,
+            24
+        )
+}
+
+function makePrivateGameEventKey(
+    targetFingerprint
+) {
+
+    const monthKey =
+        DateTime
+            .utc()
+            .toFormat(
+                'yyyy-LL'
+            )
+
+    return `${targetFingerprint}:${monthKey}`
+}
+
+function cleanPrivateGameDate(
+    value
+) {
+
+    const text =
+        String(
+            value ?? ''
+        )
+            .trim()
+
+    if (!text) {
+        return null
+    }
+
+    const parsed =
+        DateTime.fromISO(
+            text,
+            {
+                zone:
+                    'utc',
+            }
+        )
+
+    if (!parsed.isValid) {
+        return null
+    }
+
+    return parsed
+        .toUTC()
+        .toISO()
+}
+
+function parsePrivateGameAnalyzerJson(
+    text
+) {
+
+    if (
+        typeof text !==
+        'string'
+    ) {
+        return null
+    }
+
+    const start =
+        text.indexOf(
+            '{'
+        )
+
+    const end =
+        text.lastIndexOf(
+            '}'
+        )
+
+    if (
+        start < 0 ||
+        end < start
+    ) {
+        return null
+    }
+
+    try {
+
+        return JSON.parse(
+            text.slice(
+                start,
+                end + 1
+            )
+        )
+
+    } catch (
+    error
+    ) {
+
+        return null
+    }
+}
+
+async function searchPrivateGameOfficialReruns() {
+
+    if (
+        !TAVILY_API_KEY
+    ) {
+        throw new Error(
+            '缺少 TAVILY_API_KEY'
+        )
+    }
+
+    if (
+        !PRIVATE_GAME_SEARCH_NAME
+    ) {
+        throw new Error(
+            '缺少 PRIVATE_GAME_SEARCH_NAME'
+        )
+    }
+
+    if (
+        PRIVATE_GAME_OFFICIAL_DOMAINS
+            .length === 0
+    ) {
+        throw new Error(
+            '缺少 PRIVATE_GAME_OFFICIAL_DOMAINS'
+        )
+    }
+
+    const query =
+        `${PRIVATE_GAME_SEARCH_NAME} ${PRIVATE_GAME_RERUN_KEYWORDS.join(
+            ' '
+        )}`
+
+    const controller =
+        new AbortController()
+
+    const timeout =
+        setTimeout(
+            () =>
+                controller.abort(),
+            10000
+        )
+
+    try {
+
+        const response =
+            await fetch(
+                'https://api.tavily.com/search',
+                {
+                    method:
+                        'POST',
+
+                    headers: {
+                        'Content-Type':
+                            'application/json',
+
+                        Authorization:
+                            `Bearer ${TAVILY_API_KEY}`,
+                    },
+
+                    body:
+                        JSON.stringify({
+                            query,
+
+                            search_depth:
+                                'basic',
+
+                            topic:
+                                'general',
+
+                            time_range:
+                                'month',
+
+                            max_results:
+                                10,
+
+                            include_answer:
+                                false,
+
+                            include_raw_content:
+                                false,
+
+                            include_domains:
+                                PRIVATE_GAME_OFFICIAL_DOMAINS,
+                        }),
+
+                    signal:
+                        controller.signal,
+                }
+            )
+
+        if (
+            !response.ok
+        ) {
+
+            const detail =
+                await response
+                    .text()
+                    .catch(
+                        () => ''
+                    )
+
+            throw new Error(
+                `Tavily HTTP ${response.status}: ${detail.slice(
+                    0,
+                    300
+                )}`
+            )
+        }
+
+        const data =
+            await response.json()
+
+        return Array.isArray(
+            data?.results
+        )
+            ? data.results
+                .slice(
+                    0,
+                    10
+                )
+            : []
+
+    } finally {
+
+        clearTimeout(
+            timeout
+        )
+    }
+}
+
+function formatPrivateGameSearchResults(
+    results = []
+) {
+
+    return results
+        .map(
+            (
+                item,
+                index
+            ) => {
+
+                const title =
+                    String(
+                        item?.title ||
+                        ''
+                    )
+                        .replace(
+                            /\s+/g,
+                            ' '
+                        )
+                        .trim()
+                        .slice(
+                            0,
+                            220
+                        )
+
+                const url =
+                    String(
+                        item?.url ||
+                        ''
+                    )
+                        .trim()
+                        .slice(
+                            0,
+                            600
+                        )
+
+                const published =
+                    String(
+                        item?.published_date ||
+                        item?.publishedDate ||
+                        ''
+                    )
+                        .trim()
+                        .slice(
+                            0,
+                            80
+                        )
+
+                const content =
+                    String(
+                        item?.content ||
+                        ''
+                    )
+                        .replace(
+                            /\s+/g,
+                            ' '
+                        )
+                        .trim()
+                        .slice(
+                            0,
+                            1600
+                        )
+
+                return `【官方搜索结果 ${index + 1}】
+标题：${title || '无'}
+发布日期：${published || '未知'}
+URL：${url || '无'}
+摘要：${content || '无'}`
+            }
+        )
+        .join(
+            '\n\n'
+        )
+}
+
+async function analyzePrivateGameRerunEvents(
+    results
+) {
+
+    if (
+        !Array.isArray(
+            results
+        ) ||
+        results.length === 0
+    ) {
+        return []
+    }
+
+    const input =
+        `你是“游戏官方卡池复刻事件识别器”。
+
+下面的内容来自已经限制为“官方域名”的网页搜索结果。
+你的任务不是聊天，而是把“真正的卡池/角色/卡牌复刻或返场事件”提取出来，并把同一个复刻事件的多条官方宣传合并。
+
+【重要判定规则】
+
+1. 只保留卡池、角色、卡牌、祈愿、召唤等抽取内容的复刻/返场/rerun。
+2. 普通活动复刻、剧情回顾、皮肤返场、周边返场、商城商品、PV 回顾等，如果不是卡池复刻，排除。
+3. 只是提到历史上的旧复刻、总结往期、玩家猜测、未来预测，不算“新的官方复刻消息”。
+4. 同一批卡池的：
+   - 预告
+   - 详情
+   - PV
+   - 开启提醒
+   - 倒计时
+   即使是多条网页，也必须合并成一个 event。
+5. event_title 可以概括这次复刻，但不要编造官方没有的信息。
+6. rerun_targets 尽量列出真正被复刻的角色/卡牌/卡池核心名字。
+7. 如果无法确认具体 target，就不要输出那个 event。
+8. start_at / end_at 只有网页明确给出时才填写，格式尽量使用 ISO 8601；否则 null。
+9. source_urls 合并同一事件对应的官方 URL。
+10. 不要因为搜索结果来自官方域名，就把所有结果都当成复刻。
+
+只输出一个 JSON 对象，不要 Markdown，不要解释：
+
+{
+  "events": [
+    {
+      "event_title": "string",
+      "pool_name": "string or null",
+      "rerun_targets": ["string"],
+      "start_at": "ISO string or null",
+      "end_at": "ISO string or null",
+      "summary": "1-3句简短事实摘要",
+      "source_urls": ["https://..."]
+    }
+  ]
+}
+
+如果没有新的、明确的卡池复刻事件：
+
+{
+  "events": []
+}
+
+【官方搜索结果】
+${formatPrivateGameSearchResults(
+            results
+        )}`
+
+    const response =
+        await callModelWithRetry({
+
+            model:
+                'gpt-5.6-sol',
+
+            input,
+
+        })
+
+    const parsed =
+        parsePrivateGameAnalyzerJson(
+            response
+                ?.output_text
+        )
+
+    if (
+        !parsed ||
+        !Array.isArray(
+            parsed.events
+        )
+    ) {
+        throw new Error(
+            '复刻事件识别器没有返回有效 JSON'
+        )
+    }
+
+    return parsed.events
+        .map(
+            (event) => {
+
+                const eventTitle =
+                    typeof event
+                        ?.event_title ===
+                        'string'
+                        ? event
+                            .event_title
+                            .trim()
+                        : ''
+
+                const poolName =
+                    typeof event
+                        ?.pool_name ===
+                        'string' &&
+                    event
+                        .pool_name
+                        .trim()
+                        ? event
+                            .pool_name
+                            .trim()
+                        : null
+
+                const targets =
+                    Array.isArray(
+                        event
+                            ?.rerun_targets
+                    )
+                        ? [
+                            ...new Set(
+                                event
+                                    .rerun_targets
+                                    .map(
+                                        (item) =>
+                                            String(
+                                                item ||
+                                                ''
+                                            )
+                                                .trim()
+                                    )
+                                    .filter(
+                                        Boolean
+                                    )
+                            ),
+                        ]
+                        : []
+
+                const summary =
+                    typeof event
+                        ?.summary ===
+                        'string'
+                        ? event
+                            .summary
+                            .trim()
+                        : ''
+
+                const sourceUrls =
+                    Array.isArray(
+                        event
+                            ?.source_urls
+                    )
+                        ? [
+                            ...new Set(
+                                event
+                                    .source_urls
+                                    .map(
+                                        (item) =>
+                                            String(
+                                                item ||
+                                                ''
+                                            )
+                                                .trim()
+                                    )
+                                    .filter(
+                                        (item) =>
+                                            /^https?:\/\//i
+                                                .test(
+                                                    item
+                                                )
+                                    )
+                            ),
+                        ]
+                        : []
+
+                return {
+                    event_title:
+                        eventTitle,
+
+                    pool_name:
+                        poolName,
+
+                    rerun_targets:
+                        targets,
+
+                    start_at:
+                        cleanPrivateGameDate(
+                            event?.start_at
+                        ),
+
+                    end_at:
+                        cleanPrivateGameDate(
+                            event?.end_at
+                        ),
+
+                    summary,
+
+                    source_urls:
+                        sourceUrls,
+                }
+            }
+        )
+        .filter(
+            (event) =>
+                event
+                    .event_title &&
+                event
+                    .rerun_targets
+                    .length > 0 &&
+                event
+                    .source_urls
+                    .length > 0
+        )
+}
+
+function mergePrivateGameCandidates(
+    events = []
+) {
+
+    const map =
+        new Map()
+
+    for (
+        const event
+        of events
+    ) {
+
+        const fingerprint =
+            makePrivateGameTargetFingerprint(
+                event
+            )
+
+        if (!fingerprint) {
+            continue
+        }
+
+        if (
+            !map.has(
+                fingerprint
+            )
+        ) {
+
+            map.set(
+                fingerprint,
+                {
+                    ...event,
+
+                    target_fingerprint:
+                        fingerprint,
+                }
+            )
+
+            continue
+        }
+
+        const existing =
+            map.get(
+                fingerprint
+            )
+
+        existing.source_urls =
+            [
+                ...new Set([
+                    ...(
+                        existing
+                            .source_urls ||
+                        []
+                    ),
+                    ...(
+                        event
+                            .source_urls ||
+                        []
+                    ),
+                ]),
+            ]
+
+        existing.rerun_targets =
+            [
+                ...new Set([
+                    ...(
+                        existing
+                            .rerun_targets ||
+                        []
+                    ),
+                    ...(
+                        event
+                            .rerun_targets ||
+                        []
+                    ),
+                ]),
+            ]
+
+        if (
+            !existing.start_at &&
+            event.start_at
+        ) {
+            existing.start_at =
+                event.start_at
+        }
+
+        if (
+            !existing.end_at &&
+            event.end_at
+        ) {
+            existing.end_at =
+                event.end_at
+        }
+
+        if (
+            event
+                .summary
+                .length >
+            existing
+                .summary
+                .length
+        ) {
+            existing.summary =
+                event.summary
+        }
+    }
+
+    return [
+        ...map.values(),
+    ]
+}
+
+async function upsertPrivateGameRerunForUser({
+    userId,
+    event,
+}) {
+
+    const now =
+        new Date()
+            .toISOString()
+
+    const cutoff =
+        DateTime
+            .utc()
+            .minus({
+                days:
+                    PRIVATE_GAME_EVENT_MERGE_DAYS,
+            })
+            .toISO()
+
+    const fingerprint =
+        event
+            .target_fingerprint ||
+        makePrivateGameTargetFingerprint(
+            event
+        )
+
+    if (!fingerprint) {
+
+        return {
+            event:
+                null,
+
+            should_notify:
+                false,
+
+            status:
+                'invalid_fingerprint',
+        }
+    }
+
+    const {
+        data:
+        existingRows,
+
+        error:
+        existingError,
+    } =
+        await supabase
+            .from(
+                'private_game_rerun_events'
+            )
+            .select(
+                'id, user_id, watch_key, event_key, target_fingerprint, event_title, pool_name, target_names, start_at, end_at, summary, source_urls, first_seen_at, last_seen_at, notified_at, metadata'
+            )
+            .eq(
+                'user_id',
+                userId
+            )
+            .eq(
+                'watch_key',
+                'private_game_rerun'
+            )
+            .eq(
+                'target_fingerprint',
+                fingerprint
+            )
+            .gte(
+                'last_seen_at',
+                cutoff
+            )
+            .order(
+                'last_seen_at',
+                {
+                    ascending:
+                        false,
+                }
+            )
+            .limit(
+                1
+            )
+
+    if (existingError) {
+        throw existingError
+    }
+
+    const existing =
+        existingRows &&
+        existingRows.length > 0
+            ? existingRows[0]
+            : null
+
+    if (existing) {
+
+        const mergedUrls =
+            [
+                ...new Set([
+                    ...(
+                        Array.isArray(
+                            existing
+                                .source_urls
+                        )
+                            ? existing
+                                .source_urls
+                            : []
+                    ),
+                    ...(
+                        event
+                            .source_urls ||
+                        []
+                    ),
+                ]),
+            ]
+
+        const mergedTargets =
+            [
+                ...new Set([
+                    ...(
+                        Array.isArray(
+                            existing
+                                .target_names
+                        )
+                            ? existing
+                                .target_names
+                            : []
+                    ),
+                    ...(
+                        event
+                            .rerun_targets ||
+                        []
+                    ),
+                ]),
+            ]
+
+        const {
+            data:
+            updated,
+
+            error:
+            updateError,
+        } =
+            await supabase
+                .from(
+                    'private_game_rerun_events'
+                )
+                .update({
+                    event_title:
+                        event
+                            .event_title ||
+                        existing
+                            .event_title,
+
+                    pool_name:
+                        event
+                            .pool_name ||
+                        existing
+                            .pool_name,
+
+                    target_names:
+                        mergedTargets,
+
+                    start_at:
+                        event
+                            .start_at ||
+                        existing
+                            .start_at,
+
+                    end_at:
+                        event
+                            .end_at ||
+                        existing
+                            .end_at,
+
+                    summary:
+                        event
+                            .summary ||
+                        existing
+                            .summary,
+
+                    source_urls:
+                        mergedUrls,
+
+                    last_seen_at:
+                        now,
+
+                    metadata: {
+                        ...(existing
+                            .metadata ||
+                        {}),
+
+                        last_updated_by:
+                            'official_rerun_watch_v8',
+                    },
+                })
+                .eq(
+                    'id',
+                    existing.id
+                )
+                .eq(
+                    'user_id',
+                    userId
+                )
+                .select(
+                    'id, user_id, watch_key, event_key, target_fingerprint, event_title, pool_name, target_names, start_at, end_at, summary, source_urls, first_seen_at, last_seen_at, notified_at, metadata'
+                )
+                .single()
+
+        if (updateError) {
+            throw updateError
+        }
+
+        return {
+            event:
+                updated,
+
+            should_notify:
+                !updated
+                    .notified_at,
+
+            status:
+                updated
+                    .notified_at
+                    ? 'existing_already_notified'
+                    : 'existing_waiting_notification',
+        }
+    }
+
+    const eventKey =
+        makePrivateGameEventKey(
+            fingerprint
+        )
+
+    const {
+        data:
+        inserted,
+
+        error:
+        insertError,
+    } =
+        await supabase
+            .from(
+                'private_game_rerun_events'
+            )
+            .insert([
+                {
+                    user_id:
+                        userId,
+
+                    watch_key:
+                        'private_game_rerun',
+
+                    event_key:
+                        eventKey,
+
+                    target_fingerprint:
+                        fingerprint,
+
+                    event_title:
+                        event
+                            .event_title,
+
+                    pool_name:
+                        event
+                            .pool_name,
+
+                    target_names:
+                        event
+                            .rerun_targets ||
+                        [],
+
+                    start_at:
+                        event
+                            .start_at,
+
+                    end_at:
+                        event
+                            .end_at,
+
+                    summary:
+                        event
+                            .summary,
+
+                    source_urls:
+                        event
+                            .source_urls ||
+                        [],
+
+                    first_seen_at:
+                        now,
+
+                    last_seen_at:
+                        now,
+
+                    metadata: {
+                        created_by:
+                            'official_rerun_watch_v8',
+                    },
+                },
+            ])
+            .select(
+                'id, user_id, watch_key, event_key, target_fingerprint, event_title, pool_name, target_names, start_at, end_at, summary, source_urls, first_seen_at, last_seen_at, notified_at, metadata'
+            )
+            .single()
+
+    if (insertError) {
+
+        if (
+            String(
+                insertError
+                    .code ||
+                ''
+            ) ===
+            '23505'
+        ) {
+
+            return {
+                event:
+                    null,
+
+                should_notify:
+                    false,
+
+                status:
+                    'duplicate_race',
+            }
+        }
+
+        throw insertError
+    }
+
+    return {
+        event:
+            inserted,
+
+        should_notify:
+            true,
+
+        status:
+            'new_event',
+    }
+}
+
+function sanitizePrivateGameUserFacingText(
+    value
+) {
+
+    let text =
+        String(
+            value ?? ''
+        )
+
+    if (
+        PRIVATE_GAME_SEARCH_NAME
+    ) {
+
+        const escaped =
+            PRIVATE_GAME_SEARCH_NAME
+                .replace(
+                    /[.*+?^${}()|[\]\\]/g,
+                    '\\$&'
+                )
+
+        text =
+            text.replace(
+                new RegExp(
+                    escaped,
+                    'gi'
+                ),
+                '那个游戏'
+            )
+    }
+
+    return text
+        .trim()
+}
+
+function formatPrivateGameNotificationFacts(
+    events = []
+) {
+
+    return events
+        .map(
+            (
+                event,
+                index
+            ) => {
+
+                const targets =
+                    Array.isArray(
+                        event
+                            .target_names
+                    )
+                        ? event
+                            .target_names
+                            .join(
+                                '、'
+                            )
+                        : ''
+
+                const start =
+                    event
+                        .start_at
+                        ? DateTime
+                            .fromISO(
+                                event
+                                    .start_at
+                            )
+                            .toFormat(
+                                'yyyy-LL-dd'
+                            )
+                        : '未明确'
+
+                const end =
+                    event
+                        .end_at
+                        ? DateTime
+                            .fromISO(
+                                event
+                                    .end_at
+                            )
+                            .toFormat(
+                                'yyyy-LL-dd'
+                            )
+                        : '未明确'
+
+                return `复刻事件 ${index + 1}
+复刻对象：${targets || '未明确'}
+卡池/事件：${event.pool_name || event.event_title || '未命名'}
+开始：${start}
+结束：${end}
+摘要：${event.summary || '无'}`
+            }
+        )
+        .join(
+            '\n\n'
+        )
+}
+
+async function generatePrivateGameRerunNotificationText({
+    userId,
+    events,
+}) {
+
+    const settings =
+        await getGlobalSettings(
+            userId
+        )
+
+    const systemPrompt =
+        typeof settings
+            ?.system_prompt ===
+            'string'
+            ? settings
+                .system_prompt
+                .trim()
+            : ''
+
+    const characterContext =
+        typeof settings
+            ?.character_context ===
+            'string'
+            ? settings
+                .character_context
+                .trim()
+            : ''
+
+    const facts =
+        formatPrivateGameNotificationFacts(
+            events
+        )
+
+    const input =
+        `【最高优先级：角色行为规则】
+${systemPrompt}
+
+【固定人物设定、关系背景与共同经历】
+${characterContext}
+
+【当前任务】
+你刚刚替用户留意到了“那个游戏”的新卡池复刻官方消息，现在要主动告诉她。
+
+事实如下：
+${facts}
+
+要求：
+1. 永远只称它为“那个游戏”，绝对不要说出真实游戏名。
+2. 这是手机即时聊天。写 1～3 条简短消息，不要写成公告机器人或新闻播报。
+3. 清楚告诉用户“有新的复刻消息了”，再自然带出复刻对象和已确认的时间。
+4. 如果开始/结束时间是“未明确”，不要编造日期。
+5. 不要说“我监控到了”“系统检测到”“定时任务”等内部机制。
+6. 不要把 URL 发给用户，除非她之后明确要出处。
+7. 不要夸大“最新”“刚刚”之类时间词；只说你看到了新的官方复刻消息。
+8. 多个新复刻时合并在一条主动消息里，不要连发很多条。
+9. 输出只能是能直接发给用户的聊天正文。`
+
+    try {
+
+        const response =
+            await callModelWithRetry({
+
+                model:
+                    'gpt-5.6-sol',
+
+                input,
+
+            })
+
+        const reply =
+            sanitizePrivateGameUserFacingText(
+                response
+                    ?.output_text
+            )
+
+        if (reply) {
+            return reply
+        }
+
+    } catch (
+    error
+    ) {
+
+        console.warn(
+            '复刻主动消息生成失败，使用兜底文案：',
+            error?.message ||
+            error
+        )
+    }
+
+    const targetText =
+        events
+            .flatMap(
+                (event) =>
+                    Array.isArray(
+                        event
+                            .target_names
+                    )
+                        ? event
+                            .target_names
+                        : []
+            )
+
+    const uniqueTargets =
+        [
+            ...new Set(
+                targetText
+            ),
+        ]
+
+    return sanitizePrivateGameUserFacingText(
+        `宝宝，那个游戏有新的复刻消息了。${
+            uniqueTargets.length
+                ? `这次是${uniqueTargets.join('、')}。`
+                : ''
+        }我先替你记着。`
+    )
+}
+
+async function savePrivateGameRerunNotification({
+    userId,
+    sessionId,
+    events,
+}) {
+
+    if (
+        !events ||
+        events.length === 0
+    ) {
+        return null
+    }
+
+    const reply =
+        await generatePrivateGameRerunNotificationText({
+            userId,
+            events,
+        })
+
+    const {
+        data:
+        assistantMessage,
+
+        error:
+        messageError,
+    } =
+        await supabase
+            .from(
+                'messages'
+            )
+            .insert([
+                {
+                    user_id:
+                        userId,
+
+                    session_id:
+                        sessionId,
+
+                    role:
+                        'assistant',
+
+                    content:
+                        reply,
+
+                    visible:
+                        true,
+
+                    reasoning_content:
+                        'private_game_rerun',
+                },
+            ])
+            .select(
+                'id, session_id, role, content, created_at, visible, reasoning_content'
+            )
+            .single()
+
+    if (messageError) {
+        throw messageError
+    }
+
+    const now =
+        new Date()
+            .toISOString()
+
+    const eventIds =
+        events
+            .map(
+                (event) =>
+                    event.id
+            )
+            .filter(
+                Boolean
+            )
+
+    if (
+        eventIds.length > 0
+    ) {
+
+        const {
+            error:
+            notifiedError,
+        } =
+            await supabase
+                .from(
+                    'private_game_rerun_events'
+                )
+                .update({
+                    notified_at:
+                        now,
+                })
+                .eq(
+                    'user_id',
+                    userId
+                )
+                .in(
+                    'id',
+                    eventIds
+                )
+
+        if (notifiedError) {
+            throw notifiedError
+        }
+    }
+
+    let pushResult = {
+        sent: 0,
+        failed: 0,
+        removed: 0,
+        reason:
+            'not_attempted',
+    }
+
+    try {
+
+        pushResult =
+            await sendPushNotification(
+                sessionId
+            )
+
+    } catch (
+    error
+    ) {
+
+        console.error(
+            '复刻消息已保存，但 Push 发送失败：',
+            error
+        )
+
+        pushResult = {
+            sent: 0,
+            failed: 1,
+            removed: 0,
+            reason:
+                'push_error',
+        }
+    }
+
+    return {
+        reply,
+        assistantMessage,
+        pushResult,
+    }
+}
+
+async function processPrivateGameRerunEventsForWatcher({
+    watcher,
+    events,
+}) {
+
+    const toNotify = []
+    const statuses = []
+
+    for (
+        const event
+        of events
+    ) {
+
+        const result =
+            await upsertPrivateGameRerunForUser({
+
+                userId:
+                    watcher
+                        .user_id,
+
+                event,
+
+            })
+
+        statuses.push({
+            title:
+                event
+                    .event_title,
+
+            status:
+                result
+                    .status,
+
+            event_id:
+                result
+                    .event
+                    ?.id ||
+                null,
+        })
+
+        if (
+            result
+                .should_notify &&
+            result
+                .event
+        ) {
+            toNotify.push(
+                result
+                    .event
+            )
+        }
+    }
+
+    let notification = null
+
+    if (
+        toNotify.length > 0
+    ) {
+
+        notification =
+            await savePrivateGameRerunNotification({
+
+                userId:
+                    watcher
+                        .user_id,
+
+                sessionId:
+                    watcher
+                        .session_id,
+
+                events:
+                    toNotify,
+
+            })
+    }
+
+    return {
+        new_event_count:
+            toNotify.length,
+
+        statuses,
+
+        notification,
+    }
+}
+
+function isPrivateGameWatcherDue(
+    watcher,
+    force = false
+) {
+
+    if (force) {
+        return true
+    }
+
+    if (
+        !watcher
+            ?.last_checked_at
+    ) {
+        return true
+    }
+
+    const last =
+        DateTime.fromISO(
+            watcher
+                .last_checked_at
+        )
+
+    if (!last.isValid) {
+        return true
+    }
+
+    const intervalHours =
+        Math.max(
+            24,
+            Number(
+                watcher
+                    .check_interval_hours
+            ) ||
+            PRIVATE_GAME_WATCH_INTERVAL_HOURS
+        )
+
+    return DateTime
+        .utc()
+        .diff(
+            last
+                .toUTC(),
+            'hours'
+        )
+        .hours >=
+        intervalHours
+}
+
+async function runPrivateGameRerunCheck({
+    force = false,
+} = {}) {
+
+    const {
+        data:
+        watchers,
+
+        error:
+        watchersError,
+    } =
+        await supabase
+            .from(
+                'private_game_watch_settings'
+            )
+            .select(
+                'user_id, session_id, enabled, check_interval_hours, last_checked_at, created_at, updated_at'
+            )
+            .eq(
+                'enabled',
+                true
+            )
+
+    if (watchersError) {
+        throw watchersError
+    }
+
+    const dueWatchers =
+        (watchers || [])
+            .filter(
+                (watcher) =>
+                    isPrivateGameWatcherDue(
+                        watcher,
+                        force
+                    )
+            )
+
+    if (
+        dueWatchers.length === 0
+    ) {
+
+        return {
+            watchers_total:
+                (watchers || [])
+                    .length,
+
+            watchers_due:
+                0,
+
+            searched:
+                false,
+
+            official_results:
+                0,
+
+            candidate_events:
+                0,
+
+            results:
+                [],
+        }
+    }
+
+    const officialResults =
+        await searchPrivateGameOfficialReruns()
+
+    const analyzed =
+        await analyzePrivateGameRerunEvents(
+            officialResults
+        )
+
+    const events =
+        mergePrivateGameCandidates(
+            analyzed
+        )
+
+    const results = []
+    const now =
+        new Date()
+            .toISOString()
+
+    for (
+        const watcher
+        of dueWatchers
+    ) {
+
+        try {
+
+            const result =
+                await processPrivateGameRerunEventsForWatcher({
+                    watcher,
+                    events,
+                })
+
+            const {
+                error:
+                settingError,
+            } =
+                await supabase
+                    .from(
+                        'private_game_watch_settings'
+                    )
+                    .update({
+                        last_checked_at:
+                            now,
+
+                        updated_at:
+                            now,
+                    })
+                    .eq(
+                        'user_id',
+                        watcher
+                            .user_id
+                    )
+
+            if (settingError) {
+                throw settingError
+            }
+
+            results.push({
+                user_id:
+                    watcher
+                        .user_id,
+
+                session_id:
+                    watcher
+                        .session_id,
+
+                ok:
+                    true,
+
+                new_event_count:
+                    result
+                        .new_event_count,
+
+                event_statuses:
+                    result
+                        .statuses,
+
+                assistant_message_id:
+                    result
+                        .notification
+                        ?.assistantMessage
+                        ?.id ||
+                    null,
+
+                push_result:
+                    result
+                        .notification
+                        ?.pushResult ||
+                    null,
+            })
+
+        } catch (
+        userError
+        ) {
+
+            console.error(
+                '处理私密游戏复刻 watcher 失败：',
+                userError
+            )
+
+            results.push({
+                user_id:
+                    watcher
+                        .user_id,
+
+                session_id:
+                    watcher
+                        .session_id,
+
+                ok:
+                    false,
+
+                error:
+                    userError
+                        .message,
+            })
+        }
+    }
+
+    return {
+        watchers_total:
+            (watchers || [])
+                .length,
+
+        watchers_due:
+            dueWatchers
+                .length,
+
+        searched:
+            true,
+
+        official_results:
+            officialResults
+                .length,
+
+        candidate_events:
+            events
+                .length,
+
+        results,
+    }
+}
+
+
 // ======================================================
 // 获取最大历史消息数
 // ======================================================
@@ -7705,6 +9637,34 @@ app.get(
                 return
             }
 
+            if (
+                isPrivateGameAliasMessage(
+                    cleanMessage
+                )
+            ) {
+
+                try {
+
+                    await registerPrivateGameWatch(
+                        req.userId,
+                        sessionId
+                    )
+
+                } catch (
+                watchRegisterError
+                ) {
+
+                    // Watch 表尚未创建或临时写入失败时，
+                    // 不能影响正常聊天。
+                    console.warn(
+                        'private_game_watch 登记失败，本轮继续正常聊天：',
+                        watchRegisterError?.message ||
+                        watchRegisterError
+                    )
+                }
+            }
+
+
             const settings =
                 await getGlobalSettings(
                     req.userId
@@ -10010,6 +11970,177 @@ app.post(
 
     }
 )
+
+
+// ======================================================
+// “那个游戏”复刻手动检查
+// POST /api/private-game-rerun-check
+//
+// Header:
+// x-private-game-secret: <PRIVATE_GAME_WATCH_SECRET>
+// 或复用已有 PROACTIVE_CRON_SECRET
+//
+// Body:
+// {
+//   "force": true
+// }
+//
+// force=true 仅用于手动测试，忽略 48 小时间隔。
+// 正式 Cron 阶段不要传 force=true。
+// ======================================================
+
+app.post(
+    '/api/private-game-rerun-check',
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+            if (
+                !requireAIConfig(
+                    res
+                )
+            ) {
+                return
+            }
+
+            const configStatus =
+                getPrivateGameWatchConfigStatus()
+
+            if (
+                !configStatus
+                    .has_search_key ||
+                !configStatus
+                    .has_search_name ||
+                configStatus
+                    .official_domain_count === 0
+            ) {
+
+                return res
+                    .status(500)
+                    .json({
+                        ok: false,
+
+                        error:
+                            '私密游戏复刻监控环境变量尚未配置完整',
+
+                        config: {
+                            has_tavily_key:
+                                configStatus
+                                    .has_search_key,
+
+                            has_private_game_name:
+                                configStatus
+                                    .has_search_name,
+
+                            official_domain_count:
+                                configStatus
+                                    .official_domain_count,
+                        },
+                    })
+            }
+
+            if (
+                !PRIVATE_GAME_WATCH_SECRET
+            ) {
+
+                return res
+                    .status(500)
+                    .json({
+                        ok: false,
+
+                        error:
+                            '服务器没有配置 PRIVATE_GAME_WATCH_SECRET 或 PROACTIVE_CRON_SECRET',
+                    })
+            }
+
+            const receivedSecret =
+                String(
+                    req.headers[
+                        'x-private-game-secret'
+                    ] ||
+                    ''
+                )
+
+            if (
+                receivedSecret !==
+                PRIVATE_GAME_WATCH_SECRET
+            ) {
+
+                return res
+                    .status(401)
+                    .json({
+                        ok: false,
+                        error:
+                            'Unauthorized',
+                    })
+            }
+
+            const force =
+                req.body
+                    ?.force ===
+                true
+
+            const result =
+                await runPrivateGameRerunCheck({
+                    force,
+                })
+
+            console.log(
+                `private_game_rerun_check 完成：due=${result.watchers_due}, candidates=${result.candidate_events}`
+            )
+
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+
+                    force,
+
+                    interval_hours:
+                        PRIVATE_GAME_WATCH_INTERVAL_HOURS,
+
+                    merge_days:
+                        PRIVATE_GAME_EVENT_MERGE_DAYS,
+
+                    ...result,
+                })
+
+        } catch (
+        error
+        ) {
+
+            console.error(
+                'private_game_rerun_check 失败：',
+                error
+            )
+
+            return res
+                .status(500)
+                .json({
+                    ok: false,
+
+                    error:
+                        '复刻检查失败',
+
+                    detail:
+                        error
+                            .message,
+                })
+        }
+    }
+)
+
 
 // ======================================================
 // 启动服务器
