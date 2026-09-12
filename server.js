@@ -9637,34 +9637,6 @@ app.get(
                 return
             }
 
-            if (
-                isPrivateGameAliasMessage(
-                    cleanMessage
-                )
-            ) {
-
-                try {
-
-                    await registerPrivateGameWatch(
-                        req.userId,
-                        sessionId
-                    )
-
-                } catch (
-                watchRegisterError
-                ) {
-
-                    // Watch 表尚未创建或临时写入失败时，
-                    // 不能影响正常聊天。
-                    console.warn(
-                        'private_game_watch 登记失败，本轮继续正常聊天：',
-                        watchRegisterError?.message ||
-                        watchRegisterError
-                    )
-                }
-            }
-
-
             const settings =
                 await getGlobalSettings(
                     req.userId
@@ -10626,6 +10598,39 @@ app.post(
                 userMessageError
             ) {
                 throw userMessageError
+            }
+
+
+            // ==================================================
+            // 如果用户在真实聊天消息里提到“那个游戏”，
+            // 将当前 user_id + session_id 登记为复刻提醒接收会话。
+            //
+            // 这一步只更新 watch settings，不触发搜索，也不影响正常聊天。
+            // ==================================================
+
+            if (
+                isPrivateGameAliasMessage(
+                    cleanMessage
+                )
+            ) {
+
+                try {
+
+                    await registerPrivateGameWatch(
+                        req.userId,
+                        sessionId
+                    )
+
+                } catch (
+                watchRegisterError
+                ) {
+
+                    console.warn(
+                        'private_game_watch 登记失败，本轮继续正常聊天：',
+                        watchRegisterError?.message ||
+                        watchRegisterError
+                    )
+                }
             }
 
 
