@@ -3189,6 +3189,208 @@ function buildIntimacyReplyContext({
 }
 
 
+
+// ======================================================
+// 游戏聊天模式
+//
+// 第一阶段目标：
+// - 用户同时玩多个游戏时，优先保持“当前游戏”隔离。
+// - “那个游戏”是一个固定私密别名；若上下文/长期记忆能解析，
+//   只在内部理解，不主动把真实游戏名说出来。
+// - 默认像恋人聊共同兴趣，不自动变成攻略助手。
+// - 本阶段不接联网；遇到必须依赖最新版本的信息时不要瞎编。
+// ======================================================
+
+function normalizeGameChatText(
+    value
+) {
+
+    return String(
+        value ?? ''
+    )
+        .trim()
+        .replace(
+            /\s+/g,
+            ''
+        )
+}
+
+function hasDirectGameSignal(
+    value
+) {
+
+    const text =
+        normalizeGameChatText(
+            value
+        )
+
+    if (!text) {
+        return false
+    }
+
+    return /那个游戏|这个游戏|游戏里|玩游戏|打游戏|开黑|联机|抽卡|卡池|池子|歪了|歪池|保底|十连|单抽|出金|出货|爆率|掉率|副本|周本|日常本|boss|BOSS|Boss|首领|版本|新版本|更新|赛季|活动|复刻|角色池|武器池|配队|阵容|练度|养成|装备|圣遗物|遗器|词条|技能|大招|平A|普攻|buff|debuff|奶妈|治疗|坦克|主C|副C|DPS|段位|排位|竞技场|公会|工会|战令|体力|刷本|掉落|主线|支线|成就|地图|皮肤|时装|坐骑|氪金|充值/
+        .test(
+            text
+        )
+}
+
+function isGameFollowUp(
+    value
+) {
+
+    const text =
+        normalizeGameChatText(
+            value
+        )
+
+    if (
+        !text ||
+        text.length > 36
+    ) {
+        return false
+    }
+
+    return /又|还|这个|那个|他|她|它|这次|上次|刚才|刚刚|今天|昨天|终于|怎么|为什么|是不是|好难|好烦|气死|笑死|抽到了|没出|歪了|过了|打过了|打不过|想抽|要不要抽|值不值|强不强|好不好用|哪个好|选谁/
+        .test(
+            text
+        )
+}
+
+function recentConversationHasGameSignal(
+    recentMessages = []
+) {
+
+    const recentText =
+        (recentMessages || [])
+            .slice(
+                -8
+            )
+            .map(
+                (item) =>
+                    String(
+                        item?.content ||
+                        ''
+                    )
+            )
+            .join(
+                '\n'
+            )
+
+    return hasDirectGameSignal(
+        recentText
+    )
+}
+
+function shouldUseGameReplyContext({
+    currentMessage = '',
+    recentMessages = [],
+}) {
+
+    if (
+        hasDirectGameSignal(
+            currentMessage
+        )
+    ) {
+        return true
+    }
+
+    if (
+        !isGameFollowUp(
+            currentMessage
+        )
+    ) {
+        return false
+    }
+
+    return recentConversationHasGameSignal(
+        recentMessages
+    )
+}
+
+function buildGameReplyContext({
+    currentMessage = '',
+    recentMessages = [],
+    memorySummary = '',
+}) {
+
+    if (
+        !shouldUseGameReplyContext({
+            currentMessage,
+            recentMessages,
+        })
+    ) {
+        return ''
+    }
+
+    const currentText =
+        String(
+            currentMessage ||
+            ''
+        )
+
+    const privateAliasMentioned =
+        /那个游戏/
+            .test(
+                currentText
+            )
+
+    console.log(
+        'game_context 本轮启用：',
+        privateAliasMentioned
+            ? 'private_alias=那个游戏'
+            : 'normal_game_scope'
+    )
+
+    const memoryHint =
+        typeof memorySummary ===
+            'string' &&
+        memorySummary.trim()
+            ? '长期记忆中可能同时包含多个游戏的信息；只取与当前游戏明确匹配的那部分。'
+            : '当前没有可用的长期记忆摘要时，只根据最近聊天判断，不要凭空补一个游戏身份。'
+
+    return `【本轮游戏聊天模式】
+用户现在是在和你聊自己玩的游戏。这里首先是恋人之间的共同兴趣聊天，不是攻略客服窗口。
+
+【当前游戏隔离】
+1. 用户会同时玩多个游戏。不要把不同游戏的人物、装备、抽卡、机制、剧情、版本、活动或用户进度串在一起。
+2. 确定“当前在聊哪个游戏”的优先级：
+   a. 用户这句话明确说出的游戏名或唯一专有名词；
+   b. 用户使用的固定私密别名“那个游戏”；
+   c. 最近几轮明确延续的同一个游戏；
+   d. 与当前线索明确匹配的长期记忆。
+3. ${memoryHint}
+4. 如果只是吐槽、炫耀、分享经历，即使游戏身份还不完全确定，也先正常接话，不要动不动追问“你说的是哪个游戏？”。
+5. 只有当用户真的在问具体机制、人物、版本或攻略，而且无法可靠确定是哪一个游戏时，才用一句很短、很自然的问题确认；不要列候选，也不要装作已经知道。
+
+【“那个游戏”是私密别名】
+6. 用户说“那个游戏”时，把它视为已经约定好的某一个特定游戏代称。
+7. 如果长期记忆或最近聊天能解析它实际指向哪个游戏，可以只在内部用来理解；回复里继续称“那个游戏”，不要主动还原、点破或重复真实游戏名。
+8. 如果暂时无法解析，也不要擅自猜真实名称。能不依赖名称继续聊天就直接继续。
+
+【聊天方式】
+9. 默认先接用户本人：她的开心、郁闷、得意、吐槽、欧非、卡关、喜欢谁、嫌弃谁。像在听恋人讲今天玩的东西，而不是像搜索结果摘要。
+10. 不要主动进入“讲解模式”。除非用户明确问攻略、机制、配队、数值或让你分析，否则不要一上来给建议。
+11. 避免客服/攻略口吻，例如：
+   - “建议你……”
+   - “你可以尝试……”
+   - “以下几点……”
+   - “从机制上来说……”
+   - 无缘无故列 1、2、3。
+12. 可以吐槽、偏心、接梗、追问一个自然的小问题，但不要每句话都反问。
+13. 用户明确问攻略或机制时，可以认真回答，但仍然像聊天：先给最关键的结论，再解释两三句；除非她要求详细攻略，否则不要写成攻略文章。
+14. 用户说“我终于过了”“又歪了”“被这个 boss 气死了”时，优先回应这件事本身和她前面的经历，不要突然科普游戏基础知识。
+15. 不要炫耀自己知道游戏；知道的细节自然带一句就够了。
+
+【时效性】
+16. 本阶段没有可靠联网检索。凡是“今天 / 刚更新 / 新版本 / 当前卡池 / 这周活动 / 现在强度 / 最新改动”这类可能变化的信息，如果现有上下文和长期记忆没有明确依据，不要装作知道最新事实。
+17. 遇到这种情况，保持聊天口吻简短说明“这个我不敢拿旧信息骗你”，等后续联网模块接入后再查；不要因此把整段聊天变成免责声明。
+
+【回复形式】
+18. 继续遵守手机即时聊天风格：自然、短句、口语化。用户没要求详细分析时，通常 1～4 个聊天气泡的内容就够了。
+19. 不要复述以上规则，也不要说“我进入了游戏模式”。`
+}
+
+
 // ======================================================
 // 获取最大历史消息数
 // ======================================================
@@ -8122,6 +8324,20 @@ app.post(
                 )
 
 
+            const gameReplyContext =
+                buildGameReplyContext({
+
+                    currentMessage:
+                        cleanMessage,
+
+                    recentMessages:
+                        history,
+
+                    memorySummary,
+
+                })
+
+
             const intimacyReplyContext =
                 buildIntimacyReplyContext({
 
@@ -8143,6 +8359,14 @@ app.post(
             ) {
                 modelInputSections.push(
                     reminderReplyContext
+                )
+            }
+
+            if (
+                gameReplyContext
+            ) {
+                modelInputSections.push(
+                    gameReplyContext
                 )
             }
 
