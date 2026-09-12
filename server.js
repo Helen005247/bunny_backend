@@ -4543,6 +4543,654 @@ async function searchPrivateGameSource({
     }
 }
 
+
+function parseBilibiliUidFromProfileUrl(
+    value
+) {
+
+    const text =
+        String(
+            value ?? ''
+        )
+            .trim()
+
+    const match =
+        text.match(
+            /space\.bilibili\.com\/(\d+)/i
+        )
+
+    return match
+        ? match[1]
+        : ''
+}
+
+function normalizeBilibiliAccountName(
+    value
+) {
+
+    return String(
+        value ?? ''
+    )
+        .replace(
+            /\s+/g,
+            ''
+        )
+        .trim()
+        .toLowerCase()
+}
+
+function collectBilibiliDynamicText(
+    node,
+    output = [],
+    depth = 0
+) {
+
+    if (
+        node == null ||
+        depth > 8
+    ) {
+        return output
+    }
+
+    if (
+        Array.isArray(
+            node
+        )
+    ) {
+
+        for (
+            const item
+            of node
+        ) {
+            collectBilibiliDynamicText(
+                item,
+                output,
+                depth + 1
+            )
+        }
+
+        return output
+    }
+
+    if (
+        typeof node !==
+        'object'
+    ) {
+        return output
+    }
+
+    for (
+        const [
+            key,
+            value,
+        ]
+        of Object.entries(
+            node
+        )
+    ) {
+
+        const keyLower =
+            String(
+                key
+            )
+                .toLowerCase()
+
+        const wanted =
+            [
+                'text',
+                'title',
+                'desc',
+                'summary',
+            ]
+                .includes(
+                    keyLower
+                )
+
+        if (
+            wanted &&
+            typeof value ===
+                'string'
+        ) {
+
+            const text =
+                value
+                    .replace(
+                        /\s+/g,
+                        ' '
+                    )
+                    .trim()
+
+            if (
+                text.length >= 2 &&
+                text.length <= 5000
+            ) {
+                output.push(
+                    text
+                )
+            }
+        }
+
+        if (
+            value &&
+            typeof value ===
+                'object'
+        ) {
+            collectBilibiliDynamicText(
+                value,
+                output,
+                depth + 1
+            )
+        }
+    }
+
+    return output
+}
+
+function getBilibiliDynamicItemText(
+    item
+) {
+
+    const dynamicModule =
+        item
+            ?.modules
+            ?.module_dynamic ||
+        {}
+
+    const pieces =
+        collectBilibiliDynamicText(
+            dynamicModule
+        )
+
+    const unique =
+        [
+            ...new Set(
+                pieces
+                    .map(
+                        (text) =>
+                            String(
+                                text ||
+                                ''
+                            )
+                                .trim()
+                    )
+                    .filter(
+                        Boolean
+                    )
+            ),
+        ]
+
+    return unique
+        .join(
+            '\n'
+        )
+        .slice(
+            0,
+            12000
+        )
+}
+
+function getBilibiliDynamicItemTitle(
+    item,
+    bodyText
+) {
+
+    const major =
+        item
+            ?.modules
+            ?.module_dynamic
+            ?.major
+
+    const candidates = [
+        major
+            ?.archive
+            ?.title,
+
+        major
+            ?.opus
+            ?.title,
+
+        major
+            ?.article
+            ?.title,
+
+        bodyText
+            .split(
+                '\n'
+            )[0],
+    ]
+
+    for (
+        const value
+        of candidates
+    ) {
+
+        const title =
+            String(
+                value ||
+                ''
+            )
+                .replace(
+                    /\s+/g,
+                    ' '
+                )
+                .trim()
+
+        if (title) {
+            return title
+                .slice(
+                    0,
+                    220
+                )
+        }
+    }
+
+    return 'B站官方动态'
+}
+
+async function fetchBilibiliOfficialRecentPosts() {
+
+    if (
+        !PRIVATE_GAME_BILIBILI_ACCOUNT_NAME ||
+        !PRIVATE_GAME_BILIBILI_PROFILE_URL
+    ) {
+        return []
+    }
+
+    const hostMid =
+        parseBilibiliUidFromProfileUrl(
+            PRIVATE_GAME_BILIBILI_PROFILE_URL
+        )
+
+    if (!hostMid) {
+        throw new Error(
+            'PRIVATE_GAME_BILIBILI_PROFILE_URL 中没有识别到 B站 UID'
+        )
+    }
+
+    const cutoff =
+        DateTime
+            .utc()
+            .minus({
+                days:
+                    30,
+            })
+            .toSeconds()
+
+    let offset = ''
+    let page = 0
+
+    const recentItems = []
+    const seenIds =
+        new Set()
+
+    while (
+        page < 6
+    ) {
+
+        const url =
+            new URL(
+                'https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space'
+            )
+
+        url
+            .searchParams
+            .set(
+                'host_mid',
+                hostMid
+            )
+
+        url
+            .searchParams
+            .set(
+                'timezone_offset',
+                '-480'
+            )
+
+        url
+            .searchParams
+            .set(
+                'features',
+                'itemOpusStyle'
+            )
+
+        if (offset) {
+            url
+                .searchParams
+                .set(
+                    'offset',
+                    offset
+                )
+        }
+
+        const controller =
+            new AbortController()
+
+        const timeout =
+            setTimeout(
+                () =>
+                    controller.abort(),
+                10000
+            )
+
+        let response
+        let data
+
+        try {
+
+            response =
+                await fetch(
+                    url,
+                    {
+                        method:
+                            'GET',
+
+                        headers: {
+                            Accept:
+                                'application/json, text/plain, */*',
+
+                            'User-Agent':
+                                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36',
+
+                            Referer:
+                                PRIVATE_GAME_BILIBILI_PROFILE_URL,
+                        },
+
+                        signal:
+                            controller
+                                .signal,
+                    }
+                )
+
+            if (
+                !response.ok
+            ) {
+                throw new Error(
+                    `Bilibili HTTP ${response.status}`
+                )
+            }
+
+            data =
+                await response
+                    .json()
+
+        } finally {
+
+            clearTimeout(
+                timeout
+            )
+        }
+
+        if (
+            Number(
+                data?.code
+            ) !== 0
+        ) {
+
+            throw new Error(
+                `Bilibili API ${data?.code}: ${data?.message || 'unknown error'}`
+            )
+        }
+
+        const items =
+            Array.isArray(
+                data
+                    ?.data
+                    ?.items
+            )
+                ? data
+                    .data
+                    .items
+                : []
+
+        if (
+            items.length === 0
+        ) {
+            break
+        }
+
+        let pageHasRecent =
+            false
+
+        for (
+            const item
+            of items
+        ) {
+
+            const author =
+                item
+                    ?.modules
+                    ?.module_author ||
+                {}
+
+            const authorMid =
+                String(
+                    author
+                        ?.mid ||
+                    ''
+                )
+
+            const authorName =
+                String(
+                    author
+                        ?.name ||
+                    ''
+                )
+                    .trim()
+
+            // 先用 UID 严格验证来源。
+            if (
+                authorMid !==
+                hostMid
+            ) {
+                continue
+            }
+
+            // 再用用户自己配置的官方账号名做第二层验证。
+            const expectedName =
+                normalizeBilibiliAccountName(
+                    PRIVATE_GAME_BILIBILI_ACCOUNT_NAME
+                )
+
+            const actualName =
+                normalizeBilibiliAccountName(
+                    authorName
+                )
+
+            if (
+                expectedName &&
+                actualName &&
+                actualName !==
+                    expectedName
+            ) {
+
+                console.warn(
+                    'private_game_rerun_bilibili：UID 正确，但账号名与 Render 配置不一致，本条跳过'
+                )
+
+                continue
+            }
+
+            const pubTs =
+                Number(
+                    author
+                        ?.pub_ts ||
+                    0
+                )
+
+            if (
+                !Number
+                    .isFinite(
+                        pubTs
+                    ) ||
+                pubTs <= 0
+            ) {
+                continue
+            }
+
+            if (
+                pubTs <
+                cutoff
+            ) {
+                continue
+            }
+
+            pageHasRecent =
+                true
+
+            const id =
+                String(
+                    item
+                        ?.id_str ||
+                    ''
+                )
+                    .trim()
+
+            if (
+                !id ||
+                seenIds
+                    .has(
+                        id
+                    )
+            ) {
+                continue
+            }
+
+            seenIds.add(
+                id
+            )
+
+            const bodyText =
+                getBilibiliDynamicItemText(
+                    item
+                )
+
+            if (!bodyText) {
+                continue
+            }
+
+            const publishedDate =
+                DateTime
+                    .fromSeconds(
+                        pubTs,
+                        {
+                            zone:
+                                'utc',
+                        }
+                    )
+                    .toISO()
+
+            const title =
+                getBilibiliDynamicItemTitle(
+                    item,
+                    bodyText
+                )
+
+            recentItems.push({
+                title,
+
+                url:
+                    `https://t.bilibili.com/${id}`,
+
+                published_date:
+                    publishedDate,
+
+                content:
+                    bodyText
+                        .slice(
+                            0,
+                            1800
+                        ),
+
+                raw_content:
+                    bodyText,
+
+                _watch_source:
+                    'bilibili',
+
+                _retrieval_mode:
+                    'direct_space_feed',
+
+                _expected_account_name:
+                    PRIVATE_GAME_BILIBILI_ACCOUNT_NAME,
+
+                _official_profile_url:
+                    PRIVATE_GAME_BILIBILI_PROFILE_URL,
+
+                _verified_author_mid:
+                    hostMid,
+
+                _verified_author_name:
+                    authorName,
+
+                _dynamic_id:
+                    id,
+            })
+        }
+
+        const hasMore =
+            Boolean(
+                data
+                    ?.data
+                    ?.has_more
+            )
+
+        const nextOffset =
+            String(
+                data
+                    ?.data
+                    ?.offset ||
+                ''
+            )
+                .trim()
+
+        if (
+            !hasMore ||
+            !nextOffset ||
+            nextOffset ===
+                offset
+        ) {
+            break
+        }
+
+        // 如果这一页完全没有最近 30 天内容，后续更旧，直接停。
+        if (
+            !pageHasRecent &&
+            page > 0
+        ) {
+            break
+        }
+
+        offset =
+            nextOffset
+
+        page += 1
+    }
+
+    recentItems.sort(
+        (
+            a,
+            b
+        ) =>
+            new Date(
+                b
+                    .published_date
+            )
+                .getTime() -
+            new Date(
+                a
+                    .published_date
+            )
+                .getTime()
+    )
+
+    console.log(
+        `private_game_rerun_bilibili：UID=${hostMid}，近30天官方动态=${recentItems.length}`
+    )
+
+    return recentItems
+}
+
+
 function getPrivateGameSourceBreakdown(
     results = []
 ) {
@@ -4650,26 +5298,7 @@ async function searchPrivateGameOfficialReruns() {
                 'bilibili',
 
             promise:
-                searchPrivateGameSource({
-                    sourceKind:
-                        'bilibili',
-
-                    query:
-                        `"${PRIVATE_GAME_BILIBILI_ACCOUNT_NAME}" "${PRIVATE_GAME_SEARCH_NAME}" ${keywordText} 卡池`,
-
-                    includeDomains: [
-                        'bilibili.com',
-                    ],
-
-                    expectedAccountName:
-                        PRIVATE_GAME_BILIBILI_ACCOUNT_NAME,
-
-                    profileUrl:
-                        PRIVATE_GAME_BILIBILI_PROFILE_URL,
-
-                    maxResults:
-                        10,
-                }),
+                fetchBilibiliOfficialRecentPosts(),
         })
     }
 
@@ -4828,7 +5457,7 @@ async function searchPrivateGameOfficialReruns() {
             )
 
     console.log(
-        `private_game_rerun_search：小红书=${breakdown.xiaohongshu}，B站=${breakdown.bilibili}，官网=${breakdown.website}，合计=${results.length}，正文可用=${rawReadyCount}，正文字符≈${rawChars}`
+        `private_game_rerun_search：小红书搜索=${breakdown.xiaohongshu}，B站直读=${breakdown.bilibili}，官网搜索=${breakdown.website}，合计=${results.length}，正文可用=${rawReadyCount}，正文字符≈${rawChars}`
     )
 
     return {
@@ -4932,6 +5561,12 @@ function formatPrivateGameSearchResults(
                         'unknown'
                     )
 
+                const retrievalMode =
+                    String(
+                        item?._retrieval_mode ||
+                        'search'
+                    )
+
                 const expectedAccount =
                     String(
                         item?._expected_account_name ||
@@ -4946,10 +5581,27 @@ function formatPrivateGameSearchResults(
                     )
                         .trim()
 
+                const verifiedAuthorName =
+                    String(
+                        item?._verified_author_name ||
+                        ''
+                    )
+                        .trim()
+
+                const verifiedAuthorMid =
+                    String(
+                        item?._verified_author_mid ||
+                        ''
+                    )
+                        .trim()
+
                 return `【官方搜索结果 ${index + 1}】
 来源类型：${sourceKind}
+获取方式：${retrievalMode}
 期望官方账号：${expectedAccount || '官网域名白名单'}
 官方账号主页：${officialProfile || '无'}
+已验证作者名：${verifiedAuthorName || '无'}
+已验证作者UID：${verifiedAuthorMid || '无'}
 标题：${title || '无'}
 发布日期：${published || '未知'}
 URL：${url || '无'}
@@ -5236,6 +5888,19 @@ function buildPrivateGameSocialDiagnostics(
                     source:
                         sourceKind,
 
+                    retrieval_mode:
+                        String(
+                            item?._retrieval_mode ||
+                            'search'
+                        ),
+
+                    published_date:
+                        String(
+                            item?.published_date ||
+                            item?.publishedDate ||
+                            ''
+                        ),
+
                     title:
                         title ||
                         '未命名',
@@ -5301,9 +5966,8 @@ async function analyzePrivateGameRerunEvents(
 【重要判定规则】
 
 0. 先验证来源身份：
-   - 如果“来源类型”是 xiaohongshu 或 bilibili，必须确认页面标题/摘要/正文中的发布者、作者、账号信息与“期望官方账号”相符。
-   - 仅仅是玩家帖子里提到了官方账号名，不算官方发布。
-   - 如果无法确认社媒帖子确实由指定官方账号发布，宁可排除，不要误报。
+   - 如果“来源类型”是 bilibili 且“获取方式”是 direct_space_feed，说明后端已经通过官方账号主页 UID 直接读取该账号空间动态，并校验了作者 UID；这类内容可以视为指定官方 B站账号本人发布，不要再因为正文没有重复账号名而排除。
+   - 如果“来源类型”是 xiaohongshu，仍必须确认页面标题/摘要/正文中的发布者、作者、账号信息与“期望官方账号”相符；仅仅是玩家帖子提到官方账号名，不算官方发布。
    - 如果“来源类型”是 website，则因为已经受官方域名白名单限制，可以按官网内容继续判断。
 1. 只保留卡池、角色、卡牌、祈愿、召唤等抽取内容的复刻/返场/rerun。
 2. 判断时必须优先阅读每条结果里的【官方页面正文】，不要只看标题或搜索摘要。复刻对象、卡池名、开放时间经常只写在正文。
