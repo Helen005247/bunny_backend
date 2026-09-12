@@ -3971,6 +3971,33 @@ const PRIVATE_GAME_OFFICIAL_DOMAINS =
             Boolean
         )
 
+
+const PRIVATE_GAME_XHS_ACCOUNT_NAME =
+    String(
+        process.env.PRIVATE_GAME_XHS_ACCOUNT_NAME ||
+        ''
+    ).trim()
+
+const PRIVATE_GAME_XHS_PROFILE_URL =
+    String(
+        process.env.PRIVATE_GAME_XHS_PROFILE_URL ||
+        ''
+    ).trim()
+
+const PRIVATE_GAME_BILIBILI_ACCOUNT_NAME =
+    String(
+        process.env.PRIVATE_GAME_BILIBILI_ACCOUNT_NAME ||
+        process.env.PRIVATE_GAME_BILI_ACCOUNT_NAME ||
+        ''
+    ).trim()
+
+const PRIVATE_GAME_BILIBILI_PROFILE_URL =
+    String(
+        process.env.PRIVATE_GAME_BILIBILI_PROFILE_URL ||
+        process.env.PRIVATE_GAME_BILI_PROFILE_URL ||
+        ''
+    ).trim()
+
 const PRIVATE_GAME_RERUN_KEYWORDS =
     String(
         process.env.PRIVATE_GAME_RERUN_KEYWORDS ||
@@ -4012,6 +4039,22 @@ const PRIVATE_GAME_WATCH_SECRET =
 
 function getPrivateGameWatchConfigStatus() {
 
+    const xhsConfigured =
+        Boolean(
+            PRIVATE_GAME_XHS_ACCOUNT_NAME &&
+            PRIVATE_GAME_XHS_PROFILE_URL
+        )
+
+    const bilibiliConfigured =
+        Boolean(
+            PRIVATE_GAME_BILIBILI_ACCOUNT_NAME &&
+            PRIVATE_GAME_BILIBILI_PROFILE_URL
+        )
+
+    const websiteConfigured =
+        PRIVATE_GAME_OFFICIAL_DOMAINS
+            .length > 0
+
     return {
         has_search_name:
             Boolean(
@@ -4020,6 +4063,26 @@ function getPrivateGameWatchConfigStatus() {
 
         official_domain_count:
             PRIVATE_GAME_OFFICIAL_DOMAINS
+                .length,
+
+        xhs_configured:
+            xhsConfigured,
+
+        bilibili_configured:
+            bilibiliConfigured,
+
+        website_configured:
+            websiteConfigured,
+
+        source_count:
+            [
+                xhsConfigured,
+                bilibiliConfigured,
+                websiteConfigured,
+            ]
+                .filter(
+                    Boolean
+                )
                 .length,
 
         has_search_key:
@@ -4285,37 +4348,66 @@ function parsePrivateGameAnalyzerJson(
     }
 }
 
-async function searchPrivateGameOfficialReruns() {
+function normalizePrivateGameSearchValue(
+    value
+) {
 
-    if (
-        !TAVILY_API_KEY
-    ) {
-        throw new Error(
-            '缺少 TAVILY_API_KEY'
-        )
-    }
-
-    if (
-        !PRIVATE_GAME_SEARCH_NAME
-    ) {
-        throw new Error(
-            '缺少 PRIVATE_GAME_SEARCH_NAME'
-        )
-    }
-
-    if (
-        PRIVATE_GAME_OFFICIAL_DOMAINS
-            .length === 0
-    ) {
-        throw new Error(
-            '缺少 PRIVATE_GAME_OFFICIAL_DOMAINS'
-        )
-    }
-
-    const query =
-        `${PRIVATE_GAME_SEARCH_NAME} ${PRIVATE_GAME_RERUN_KEYWORDS.join(
+    return String(
+        value ?? ''
+    )
+        .replace(
+            /\s+/g,
             ' '
-        )}`
+        )
+        .trim()
+}
+
+function privateGameResultMentionsAccount(
+    item,
+    accountName
+) {
+
+    const account =
+        normalizePrivateGameSearchValue(
+            accountName
+        )
+            .toLowerCase()
+
+    if (!account) {
+        return false
+    }
+
+    const haystack =
+        [
+            item?.title,
+            item?.content,
+            item?.raw_content,
+            item?.rawContent,
+        ]
+            .map(
+                (value) =>
+                    normalizePrivateGameSearchValue(
+                        value
+                    )
+                        .toLowerCase()
+            )
+            .join(
+                '\n'
+            )
+
+    return haystack.includes(
+        account
+    )
+}
+
+async function searchPrivateGameSource({
+    sourceKind,
+    query,
+    includeDomains,
+    expectedAccountName = '',
+    profileUrl = '',
+    maxResults = 8,
+}) {
 
     const controller =
         new AbortController()
@@ -4354,24 +4446,20 @@ async function searchPrivateGameOfficialReruns() {
                             topic:
                                 'general',
 
-                            // 用户确认一个月的官方公告窗口足够，
-                            // 所以继续保留 month，不扩大历史范围。
                             time_range:
                                 'month',
 
                             max_results:
-                                10,
+                                maxResults,
 
                             include_answer:
                                 false,
 
-                            // v8.2：除了搜索摘要，也把官方页面清洗后的正文带回来。
-                            // 复刻对象、池名、开始/结束时间经常只在正文里出现。
                             include_raw_content:
                                 'markdown',
 
                             include_domains:
-                                PRIVATE_GAME_OFFICIAL_DOMAINS,
+                                includeDomains,
                         }),
 
                     signal:
@@ -4401,59 +4489,352 @@ async function searchPrivateGameOfficialReruns() {
         const data =
             await response.json()
 
-        const results =
+        let results =
             Array.isArray(
                 data?.results
             )
                 ? data.results
                     .slice(
                         0,
-                        10
+                        maxResults
                     )
                 : []
 
-        const rawReadyCount =
-            results
-                .filter(
-                    (item) =>
-                        String(
-                            item?.raw_content ||
-                            item?.rawContent ||
-                            ''
-                        )
-                            .trim()
-                            .length > 0
-                )
-                .length
+        // 社媒域名是整个平台，不能仅靠 domain 白名单。
+        // 必须再要求搜索结果正文/标题中明确出现用户配置的官方账号名。
+        if (
+            expectedAccountName
+        ) {
 
-        const rawChars =
-            results
-                .reduce(
-                    (
-                        total,
-                        item
-                    ) =>
-                        total +
-                        String(
-                            item?.raw_content ||
-                            item?.rawContent ||
-                            ''
-                        )
-                            .length,
-                    0
-                )
-
-        console.log(
-            `private_game_rerun_search：官方结果=${results.length}，正文可用=${rawReadyCount}，正文字符≈${rawChars}`
-        )
+            results =
+                results
+                    .filter(
+                        (item) =>
+                            privateGameResultMentionsAccount(
+                                item,
+                                expectedAccountName
+                            )
+                    )
+        }
 
         return results
+            .map(
+                (item) => ({
+                    ...item,
+
+                    _watch_source:
+                        sourceKind,
+
+                    _expected_account_name:
+                        expectedAccountName ||
+                        null,
+
+                    _official_profile_url:
+                        profileUrl ||
+                        null,
+                })
+            )
 
     } finally {
 
         clearTimeout(
             timeout
         )
+    }
+}
+
+function getPrivateGameSourceBreakdown(
+    results = []
+) {
+
+    const breakdown = {
+        xiaohongshu: 0,
+        bilibili: 0,
+        website: 0,
+    }
+
+    for (
+        const item
+        of results
+    ) {
+
+        const sourceKind =
+            String(
+                item?._watch_source ||
+                ''
+            )
+
+        if (
+            Object.prototype
+                .hasOwnProperty
+                .call(
+                    breakdown,
+                    sourceKind
+                )
+        ) {
+            breakdown[
+                sourceKind
+            ] += 1
+        }
+    }
+
+    return breakdown
+}
+
+async function searchPrivateGameOfficialReruns() {
+
+    if (
+        !TAVILY_API_KEY
+    ) {
+        throw new Error(
+            '缺少 TAVILY_API_KEY'
+        )
+    }
+
+    if (
+        !PRIVATE_GAME_SEARCH_NAME
+    ) {
+        throw new Error(
+            '缺少 PRIVATE_GAME_SEARCH_NAME'
+        )
+    }
+
+    const jobs = []
+
+    const keywordText =
+        PRIVATE_GAME_RERUN_KEYWORDS
+            .join(
+                ' '
+            )
+
+    if (
+        PRIVATE_GAME_XHS_ACCOUNT_NAME &&
+        PRIVATE_GAME_XHS_PROFILE_URL
+    ) {
+
+        jobs.push({
+            sourceKind:
+                'xiaohongshu',
+
+            promise:
+                searchPrivateGameSource({
+                    sourceKind:
+                        'xiaohongshu',
+
+                    query:
+                        `"${PRIVATE_GAME_XHS_ACCOUNT_NAME}" "${PRIVATE_GAME_SEARCH_NAME}" ${keywordText} 卡池`,
+
+                    includeDomains: [
+                        'xiaohongshu.com',
+                    ],
+
+                    expectedAccountName:
+                        PRIVATE_GAME_XHS_ACCOUNT_NAME,
+
+                    profileUrl:
+                        PRIVATE_GAME_XHS_PROFILE_URL,
+
+                    maxResults:
+                        10,
+                }),
+        })
+    }
+
+    if (
+        PRIVATE_GAME_BILIBILI_ACCOUNT_NAME &&
+        PRIVATE_GAME_BILIBILI_PROFILE_URL
+    ) {
+
+        jobs.push({
+            sourceKind:
+                'bilibili',
+
+            promise:
+                searchPrivateGameSource({
+                    sourceKind:
+                        'bilibili',
+
+                    query:
+                        `"${PRIVATE_GAME_BILIBILI_ACCOUNT_NAME}" "${PRIVATE_GAME_SEARCH_NAME}" ${keywordText} 卡池`,
+
+                    includeDomains: [
+                        'bilibili.com',
+                    ],
+
+                    expectedAccountName:
+                        PRIVATE_GAME_BILIBILI_ACCOUNT_NAME,
+
+                    profileUrl:
+                        PRIVATE_GAME_BILIBILI_PROFILE_URL,
+
+                    maxResults:
+                        10,
+                }),
+        })
+    }
+
+    // 官网降级为辅助来源。即使官网配置为空，社媒监控也能独立工作。
+    if (
+        PRIVATE_GAME_OFFICIAL_DOMAINS
+            .length > 0
+    ) {
+
+        jobs.push({
+            sourceKind:
+                'website',
+
+            promise:
+                searchPrivateGameSource({
+                    sourceKind:
+                        'website',
+
+                    query:
+                        `${PRIVATE_GAME_SEARCH_NAME} ${keywordText} 卡池`,
+
+                    includeDomains:
+                        PRIVATE_GAME_OFFICIAL_DOMAINS,
+
+                    maxResults:
+                        6,
+                }),
+        })
+    }
+
+    if (
+        jobs.length === 0
+    ) {
+        throw new Error(
+            '没有配置任何复刻监控来源'
+        )
+    }
+
+    const settled =
+        await Promise.allSettled(
+            jobs.map(
+                (job) =>
+                    job.promise
+            )
+        )
+
+    const combined = []
+
+    for (
+        let index = 0;
+        index < settled.length;
+        index += 1
+    ) {
+
+        const result =
+            settled[
+                index
+            ]
+
+        const sourceKind =
+            jobs[
+                index
+            ]
+                .sourceKind
+
+        if (
+            result.status ===
+            'fulfilled'
+        ) {
+
+            combined.push(
+                ...result.value
+            )
+
+            continue
+        }
+
+        console.warn(
+            `private_game_rerun_search：${sourceKind} 搜索失败，本轮跳过该来源：`,
+            result.reason?.message ||
+            result.reason
+        )
+    }
+
+    // 同一个 URL 可能被多个 query 命中，只保留一次。
+    const byUrl =
+        new Map()
+
+    for (
+        const item
+        of combined
+    ) {
+
+        const url =
+            String(
+                item?.url ||
+                ''
+            )
+                .trim()
+
+        const key =
+            url ||
+            `${item?._watch_source || 'unknown'}:${item?.title || ''}`
+
+        if (
+            !byUrl.has(
+                key
+            )
+        ) {
+            byUrl.set(
+                key,
+                item
+            )
+        }
+    }
+
+    const results =
+        [
+            ...byUrl.values(),
+        ]
+
+    const breakdown =
+        getPrivateGameSourceBreakdown(
+            results
+        )
+
+    const rawReadyCount =
+        results
+            .filter(
+                (item) =>
+                    String(
+                        item?.raw_content ||
+                        item?.rawContent ||
+                        ''
+                    )
+                        .trim()
+                        .length > 0
+            )
+            .length
+
+    const rawChars =
+        results
+            .reduce(
+                (
+                    total,
+                    item
+                ) =>
+                    total +
+                    String(
+                        item?.raw_content ||
+                        item?.rawContent ||
+                        ''
+                    )
+                        .length,
+                0
+            )
+
+    console.log(
+        `private_game_rerun_search：小红书=${breakdown.xiaohongshu}，B站=${breakdown.bilibili}，官网=${breakdown.website}，合计=${results.length}，正文可用=${rawReadyCount}，正文字符≈${rawChars}`
+    )
+
+    return {
+        results,
+        source_breakdown:
+            breakdown,
     }
 }
 
@@ -4545,13 +4926,36 @@ function formatPrivateGameSearchResults(
                             6500
                         )
 
+                const sourceKind =
+                    String(
+                        item?._watch_source ||
+                        'unknown'
+                    )
+
+                const expectedAccount =
+                    String(
+                        item?._expected_account_name ||
+                        ''
+                    )
+                        .trim()
+
+                const officialProfile =
+                    String(
+                        item?._official_profile_url ||
+                        ''
+                    )
+                        .trim()
+
                 return `【官方搜索结果 ${index + 1}】
+来源类型：${sourceKind}
+期望官方账号：${expectedAccount || '官网域名白名单'}
+官方账号主页：${officialProfile || '无'}
 标题：${title || '无'}
 发布日期：${published || '未知'}
 URL：${url || '无'}
 搜索摘要：${content || '无'}
 
-【官方页面正文】
+【页面正文】
 ${rawContent || '未成功提取正文'}`
             }
         )
@@ -4583,11 +4987,20 @@ async function analyzePrivateGameRerunEvents(
 
 当前 UTC 时间：${analyzerNow}
 
-下面的内容来自已经限制为“官方域名”的网页搜索结果。
-你的任务不是聊天，而是把“真正的卡池/角色/卡牌复刻或返场事件”提取出来，并把同一个复刻事件的多条官方宣传合并。
+下面的内容来自三个可能来源：
+- 用户指定的官方小红书账号；
+- 用户指定的官方 B 站账号；
+- 用户指定的游戏官网域名（辅助来源）。
+
+你的任务不是聊天，而是把“真正由这些官方来源发布的卡池/角色/卡牌复刻或返场事件”提取出来，并把同一个复刻事件的多条官方宣传合并。
 
 【重要判定规则】
 
+0. 先验证来源身份：
+   - 如果“来源类型”是 xiaohongshu 或 bilibili，必须确认页面标题/摘要/正文中的发布者、作者、账号信息与“期望官方账号”相符。
+   - 仅仅是玩家帖子里提到了官方账号名，不算官方发布。
+   - 如果无法确认社媒帖子确实由指定官方账号发布，宁可排除，不要误报。
+   - 如果“来源类型”是 website，则因为已经受官方域名白名单限制，可以按官网内容继续判断。
 1. 只保留卡池、角色、卡牌、祈愿、召唤等抽取内容的复刻/返场/rerun。
 2. 判断时必须优先阅读每条结果里的【官方页面正文】，不要只看标题或搜索摘要。复刻对象、卡池名、开放时间经常只写在正文。
 3. 官方不一定使用“复刻”两个字。只要正文明确表达“曾经上线过的卡池/角色/卡牌再次开放抽取”，例如“返场、再次开放、再次开启、限时回归、重新开放”等，也可以判定为复刻。
@@ -5269,6 +5682,36 @@ function sanitizePrivateGameUserFacingText(
             )
     }
 
+    const privateAccountNames = [
+        PRIVATE_GAME_XHS_ACCOUNT_NAME,
+        PRIVATE_GAME_BILIBILI_ACCOUNT_NAME,
+    ]
+        .filter(
+            Boolean
+        )
+
+    for (
+        const accountName
+        of privateAccountNames
+    ) {
+
+        const escaped =
+            accountName
+                .replace(
+                    /[.*+?^${}()|[\]\\]/g,
+                    '\\$&'
+                )
+
+        text =
+            text.replace(
+                new RegExp(
+                    escaped,
+                    'gi'
+                ),
+                '官方账号'
+            )
+    }
+
     return text
         .trim()
 }
@@ -5786,6 +6229,17 @@ async function runPrivateGameRerunCheck({
             official_results:
                 0,
 
+            source_breakdown: {
+                xiaohongshu:
+                    0,
+
+                bilibili:
+                    0,
+
+                website:
+                    0,
+            },
+
             candidate_events:
                 0,
 
@@ -5794,8 +6248,16 @@ async function runPrivateGameRerunCheck({
         }
     }
 
-    const officialResults =
+    const searchBundle =
         await searchPrivateGameOfficialReruns()
+
+    const officialResults =
+        searchBundle
+            .results
+
+    const sourceBreakdown =
+        searchBundle
+            .source_breakdown
 
     const analyzed =
         await analyzePrivateGameRerunEvents(
@@ -5927,6 +6389,9 @@ async function runPrivateGameRerunCheck({
         official_results:
             officialResults
                 .length,
+
+        source_breakdown:
+            sourceBreakdown,
 
         candidate_events:
             events
@@ -12107,7 +12572,7 @@ app.post(
                 !configStatus
                     .has_search_name ||
                 configStatus
-                    .official_domain_count === 0
+                    .source_count === 0
             ) {
 
                 return res
@@ -12130,6 +12595,18 @@ app.post(
                             official_domain_count:
                                 configStatus
                                     .official_domain_count,
+
+                            xhs_configured:
+                                configStatus
+                                    .xhs_configured,
+
+                            bilibili_configured:
+                                configStatus
+                                    .bilibili_configured,
+
+                            source_count:
+                                configStatus
+                                    .source_count,
                         },
                     })
             }
