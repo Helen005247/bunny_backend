@@ -13082,20 +13082,6 @@ app.post(
                             call_session_id:
                                 callSessionId,
 
-                            voice_style:
-                                messageChannel ===
-                                    'voice'
-                                    ? voiceReply
-                                        .style
-                                    : null,
-
-                            voice_intensity:
-                                messageChannel ===
-                                    'voice'
-                                    ? voiceReply
-                                        .intensity
-                                    : null,
-
                         },
                     ])
                     .select(
@@ -13511,6 +13497,20 @@ app.post(
 
                             call_session_id:
                                 callSessionId,
+
+                            voice_style:
+                                messageChannel ===
+                                    'voice'
+                                    ? voiceReply
+                                        .style
+                                    : null,
+
+                            voice_intensity:
+                                messageChannel ===
+                                    'voice'
+                                    ? voiceReply
+                                        .intensity
+                                    : null,
 
                         },
                     ])
