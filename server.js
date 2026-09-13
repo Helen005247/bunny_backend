@@ -10935,6 +10935,336 @@ function getMiniMaxVoiceIdForAgent(
 }
 
 
+// ======================================================
+// v5.2：角色基础声音也由 Voice Lab 管理
+//
+// DB 中留空时继续继承 Render 环境变量，保证向后兼容。
+// 一旦在 Voice Lab 保存，就不需要再为了换基础 voice_id
+// 或默认 TTS model 去改 Render / 重新部署。
+// ======================================================
+
+const VOICE_AGENT_SETTINGS_CACHE_MS =
+    5000
+
+const voiceAgentSettingsCache =
+    new Map()
+
+
+function normalizeAgentKey(
+    value
+) {
+
+    return value ===
+        'guai'
+        ? 'guai'
+        : 'xingxing'
+}
+
+
+function getEnvAgentVoiceId(
+    agentKey
+) {
+
+    return getMiniMaxVoiceIdForAgent(
+        normalizeAgentKey(
+            agentKey
+        )
+    ) || ''
+}
+
+
+function getEnvDefaultTtsModel() {
+
+    return MINIMAX_TTS_MODEL ||
+        'speech-2.8-hd'
+}
+
+
+function normalizeVoiceAgentSettings(
+    row,
+    agentKey
+) {
+
+    const agent =
+        normalizeAgentKey(
+            agentKey ||
+            row
+                ?.agent_key
+        )
+
+    const storedBaseVoiceId =
+        typeof row
+            ?.base_voice_id ===
+            'string'
+            ? row
+                .base_voice_id
+                .trim()
+            : ''
+
+    const storedDefaultModel =
+        typeof row
+            ?.default_tts_model ===
+            'string'
+            ? row
+                .default_tts_model
+                .trim()
+            : ''
+
+    const envBaseVoiceId =
+        getEnvAgentVoiceId(
+            agent
+        )
+
+    const envDefaultModel =
+        getEnvDefaultTtsModel()
+
+    return {
+        agent_key:
+            agent,
+
+        base_voice_id:
+            storedBaseVoiceId,
+
+        default_tts_model:
+            storedDefaultModel,
+
+        effective_base_voice_id:
+            storedBaseVoiceId ||
+            envBaseVoiceId ||
+            '',
+
+        effective_tts_model:
+            storedDefaultModel ||
+            envDefaultModel,
+
+        base_voice_source:
+            storedBaseVoiceId
+                ? 'voice_lab'
+                : envBaseVoiceId
+                    ? 'render'
+                    : 'none',
+
+        tts_model_source:
+            storedDefaultModel
+                ? 'voice_lab'
+                : 'render',
+
+        updated_at:
+            row
+                ?.updated_at ||
+            null,
+    }
+}
+
+
+function clearVoiceAgentSettingsCache(
+    agentKey =
+        null
+) {
+
+    if (
+        agentKey
+    ) {
+
+        voiceAgentSettingsCache
+            .delete(
+                normalizeAgentKey(
+                    agentKey
+                )
+            )
+
+        return
+    }
+
+    voiceAgentSettingsCache
+        .clear()
+}
+
+
+async function loadVoiceAgentSettings(
+    agentKey,
+    {
+        force =
+            false,
+    } = {}
+) {
+
+    const agent =
+        normalizeAgentKey(
+            agentKey
+        )
+
+    const cached =
+        voiceAgentSettingsCache
+            .get(
+                agent
+            )
+
+    const now =
+        Date.now()
+
+    if (
+        !force &&
+        cached &&
+        now -
+            cached.loadedAt <
+            VOICE_AGENT_SETTINGS_CACHE_MS
+    ) {
+        return cached.settings
+    }
+
+    try {
+
+        const {
+            data,
+            error,
+        } =
+            await supabase
+                .from(
+                    'voice_agent_settings'
+                )
+                .select(
+                    'agent_key, base_voice_id, default_tts_model, updated_at'
+                )
+                .eq(
+                    'agent_key',
+                    agent
+                )
+                .maybeSingle()
+
+        if (error) {
+            throw error
+        }
+
+        const settings =
+            normalizeVoiceAgentSettings(
+                data || {
+                    agent_key:
+                        agent,
+                },
+                agent
+            )
+
+        voiceAgentSettingsCache
+            .set(
+                agent,
+                {
+                    loadedAt:
+                        now,
+
+                    settings,
+                }
+            )
+
+        return settings
+
+    } catch (
+    error
+    ) {
+
+        console.warn(
+            '读取 voice_agent_settings 失败，临时继承 Render 配置：',
+            error
+                ?.message ||
+            error
+        )
+
+        const settings =
+            normalizeVoiceAgentSettings(
+                {
+                    agent_key:
+                        agent,
+                },
+                agent
+            )
+
+        voiceAgentSettingsCache
+            .set(
+                agent,
+                {
+                    loadedAt:
+                        now,
+
+                    settings,
+                }
+            )
+
+        return settings
+    }
+}
+
+
+async function saveVoiceAgentSettings({
+    agentKey,
+    baseVoiceId,
+    defaultTtsModel,
+}) {
+
+    const agent =
+        normalizeAgentKey(
+            agentKey
+        )
+
+    const payload = {
+        agent_key:
+            agent,
+
+        base_voice_id:
+            String(
+                baseVoiceId ||
+                ''
+            )
+                .trim() ||
+            null,
+
+        default_tts_model:
+            String(
+                defaultTtsModel ||
+                ''
+            )
+                .trim() ||
+            null,
+
+        updated_at:
+            new Date()
+                .toISOString(),
+    }
+
+    const {
+        data,
+        error,
+    } =
+        await supabase
+            .from(
+                'voice_agent_settings'
+            )
+            .upsert(
+                payload,
+                {
+                    onConflict:
+                        'agent_key',
+                }
+            )
+            .select(
+                'agent_key, base_voice_id, default_tts_model, updated_at'
+            )
+            .single()
+
+    if (error) {
+        throw error
+    }
+
+    clearVoiceAgentSettingsCache(
+        agent
+    )
+
+    return normalizeVoiceAgentSettings(
+        data,
+        agent
+    )
+}
+
+
 function clampNumber(value, min, max, fallback) {
     const number = Number(value)
     if (!Number.isFinite(number)) return fallback
@@ -11287,10 +11617,55 @@ app.get('/api/voice-lab/config',async(req,res)=>{
     try {
         if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
         const agent=req.query?.agent_key==='guai'?'guai':'xingxing'
-        const presets=await loadVoicePresets(agent,{force:true})
-        res.json({ok:true,agent_key:agent,base_voice_id:getMiniMaxVoiceIdForAgent(agent)||'',default_tts_model:MINIMAX_TTS_MODEL,presets})
+
+        const [presets, agentSettings] =
+            await Promise.all([
+                loadVoicePresets(agent,{force:true}),
+                loadVoiceAgentSettings(agent,{force:true}),
+            ])
+
+        res.json({
+            ok:true,
+            agent_key:agent,
+
+            // 新接口
+            agent_settings:agentSettings,
+
+            // 保留旧字段，兼容可能缓存着的旧前端。
+            base_voice_id:agentSettings.effective_base_voice_id||'',
+            default_tts_model:agentSettings.effective_tts_model||MINIMAX_TTS_MODEL,
+
+            presets,
+        })
     } catch(error) { console.error('Voice Lab 读取失败：',error); res.status(500).json({ok:false,error:'Voice Lab 读取失败',detail:error.message}) }
 })
+
+app.put('/api/voice-lab/agent-settings',async(req,res)=>{
+    try {
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
+
+        const agent=req.body?.agent_key==='guai'?'guai':'xingxing'
+
+        const settings=await saveVoiceAgentSettings({
+            agentKey:agent,
+            baseVoiceId:req.body?.base_voice_id,
+            defaultTtsModel:req.body?.default_tts_model,
+        })
+
+        res.json({
+            ok:true,
+            agent_settings:settings,
+        })
+    } catch(error) {
+        console.error('Voice Lab 保存角色基础声音失败：',error)
+        res.status(400).json({
+            ok:false,
+            error:'保存角色基础声音失败',
+            detail:error.message,
+        })
+    }
+})
+
 
 app.post('/api/voice-lab/presets',async(req,res)=>{
     try {
@@ -11334,9 +11709,26 @@ app.post('/api/voice-lab/preview',async(req,res)=>{
         if (!text) return res.status(400).json({ok:false,error:'预览文字不能为空'})
         const preset=normalizeVoicePresetRow({...req.body?.preset,agent_key:agent},agent)
         const intensity=clampNumber(req.body?.intensity,0,1,preset.default_intensity)
-        const voiceId=preset.voice_id||getMiniMaxVoiceIdForAgent(agent)
-        if (!voiceId) return res.status(400).json({ok:false,error:'这个状态没有 voice_id，且角色没有基础 voice_id'})
-        const {audioBuffer,traceId}=await synthesizeMiniMaxSpeech({text,voiceId,voiceStyle:{style:preset.style_key,intensity},voicePreset:preset,ttsModel:preset.tts_model||MINIMAX_TTS_MODEL})
+
+        const agentSettings=
+            await loadVoiceAgentSettings(agent)
+
+        const voiceId=
+            preset.voice_id||
+            agentSettings.effective_base_voice_id
+
+        if (!voiceId) return res.status(400).json({ok:false,error:'这个状态没有 voice_id，且角色基础 voice_id 也未配置'})
+
+        const {audioBuffer,traceId}=await synthesizeMiniMaxSpeech({
+            text,
+            voiceId,
+            voiceStyle:{style:preset.style_key,intensity},
+            voicePreset:preset,
+            ttsModel:
+                preset.tts_model||
+                agentSettings.effective_tts_model||
+                MINIMAX_TTS_MODEL,
+        })
         res.setHeader('Content-Type','audio/mpeg'); res.setHeader('Content-Length',String(audioBuffer.length)); res.setHeader('Cache-Control','no-store')
         if (traceId) res.setHeader('X-MiniMax-Trace-Id',traceId)
         res.status(200).send(audioBuffer)
@@ -11416,6 +11808,11 @@ app.post(
                     req.user
                 )
 
+            const agentVoiceSettings =
+                await loadVoiceAgentSettings(
+                    agentKey
+                )
+
             const {
                 data:
                 callSession,
@@ -11441,9 +11838,8 @@ app.post(
                             voice_mode:
                                 (
                                     MINIMAX_API_KEY &&
-                                    getMiniMaxVoiceIdForAgent(
-                                        agentKey
-                                    )
+                                    agentVoiceSettings
+                                        .effective_base_voice_id
                                 )
                                     ? 'minimax'
                                     : 'browser',
@@ -11646,10 +12042,19 @@ app.post(
                     })
             }
 
-            const voicePresets =
-                await loadVoicePresets(
-                    activeCall.agent_key
-                )
+            const [
+                voicePresets,
+                agentVoiceSettings,
+            ] =
+                await Promise.all([
+                    loadVoicePresets(
+                        activeCall.agent_key
+                    ),
+
+                    loadVoiceAgentSettings(
+                        activeCall.agent_key
+                    ),
+                ])
 
             const voicePreset =
                 resolveVoicePreset(
@@ -11660,9 +12065,8 @@ app.post(
 
             const voiceId =
                 voicePreset?.voice_id ||
-                getMiniMaxVoiceIdForAgent(
-                    activeCall.agent_key
-                )
+                agentVoiceSettings
+                    .effective_base_voice_id
 
             if (
                 !MINIMAX_API_KEY ||
@@ -11696,6 +12100,8 @@ app.post(
                     voicePreset,
                     ttsModel:
                         voicePreset?.tts_model ||
+                        agentVoiceSettings
+                            .effective_tts_model ||
                         MINIMAX_TTS_MODEL,
                 })
 
@@ -11724,6 +12130,8 @@ app.post(
             res.setHeader(
                 'X-Hermit-TTS-Model',
                 voicePreset?.tts_model ||
+                agentVoiceSettings
+                    .effective_tts_model ||
                 MINIMAX_TTS_MODEL
             )
 
