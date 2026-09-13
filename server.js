@@ -10987,7 +10987,10 @@ function buildMiniMaxVoiceSetting({
     let speed =
         1
 
-    let pitch =
+    // 自定义 / 克隆音色已经包含自己的音高和共鸣。
+    // v4 不再用 pitch 硬拉情绪，只做非常轻微的语速差异，
+    // 尽量保留 MiniMax 网页预览里的自然质感。
+    const pitch =
         0
 
     let vol =
@@ -10999,18 +11002,12 @@ function buildMiniMaxVoiceSetting({
     ) {
 
         speed =
-            0.96 -
+            0.99 -
             intensity *
-                0.06
-
-        pitch =
-            intensity >=
-                0.58
-                ? -1
-                : 0
+                0.015
 
         vol =
-            0.96
+            0.98
 
     } else if (
         style ===
@@ -11018,15 +11015,9 @@ function buildMiniMaxVoiceSetting({
     ) {
 
         speed =
-            1.02 +
+            1.005 +
             intensity *
-                0.05
-
-        pitch =
-            intensity >=
-                0.35
-                ? 1
-                : 0
+                0.015
 
     } else if (
         style ===
@@ -11034,15 +11025,9 @@ function buildMiniMaxVoiceSetting({
     ) {
 
         speed =
-            0.97 -
+            0.995 -
             intensity *
-                0.05
-
-        pitch =
-            intensity >=
-                0.45
-                ? -1
-                : 0
+                0.015
     }
 
     return {
@@ -13239,11 +13224,17 @@ function buildVoiceStyleReplyContext(
         return ''
     }
 
-    return `【语音通话语气控制：仅供系统读取，不向用户展示】
+    return `【语音通话模式：仅供系统读取，不向用户展示】
 这一轮来自 App 内语音通话。
 
-先像平常一样自然回复用户，保持原有角色、人设、记忆、剧情、亲密程度和短句聊天风格。
-下面只决定“这一句话怎么说”，不要因为语气标签要求改变回答内容。
+保持原有角色、人设、记忆、剧情、亲密程度，不要变成客服或播音稿。
+这是“正在打电话”，不是在写聊天长文：
+- 默认只回应眼前这一件事，通常 1～3 个短句就够。
+- 优先口语化、自然接话；允许很短的“嗯”“好”“怎么了”“我在”这类回应。
+- 不要列清单、不要 Markdown、不要小标题、不要长篇解释。
+- 不要机械复述用户刚说过的话，不要每轮都总结或追问。
+- 能一句说清就不要说三句；需要展开时也先说最重要的一小段，让用户继续接话。
+- 允许自然停顿和语气词，但不要为了“像真人”刻意堆砌。
 
 回复正文结束后，最后单独追加一行内部标签：
 [[VOICE_STYLE:style:intensity]]
@@ -13260,7 +13251,7 @@ intensity 必须是 0 到 1 之间的小数，表示这种语气的明显程度�
 示例：
 [[VOICE_STYLE:soft:0.38]]
 
-不要解释这个标签，不要输出多个标签。`
+这个标签只决定声音表达，不要改变回答内容。不要解释标签，不要输出多个标签。`
 }
 
 
