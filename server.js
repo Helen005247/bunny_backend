@@ -13,6 +13,41 @@ const { DateTime } = require('luxon')
 const app = express()
 const PORT = process.env.PORT || 3000
 
+
+// ======================================================
+// MiniMax TTS
+// ======================================================
+
+const MINIMAX_API_KEY =
+    process.env.MINIMAX_API_KEY || ''
+
+const MINIMAX_TTS_URL =
+    process.env.MINIMAX_TTS_URL ||
+    'https://api-uw.minimax.io/v1/t2a_v2'
+
+const MINIMAX_TTS_MODEL =
+    process.env.MINIMAX_TTS_MODEL ||
+    'speech-2.8-turbo'
+
+const MINIMAX_XINGXING_VOICE_ID =
+    process.env.MINIMAX_XINGXING_VOICE_ID ||
+    'Chinese (Mandarin)_Reliable_Executive'
+
+const MINIMAX_GUAI_VOICE_ID =
+    process.env.MINIMAX_GUAI_VOICE_ID || ''
+
+const MINIMAX_TTS_TIMEOUT_MS =
+    Math.min(
+        45000,
+        Math.max(
+            8000,
+            Number(
+                process.env.MINIMAX_TTS_TIMEOUT_MS
+            ) || 20000
+        )
+    )
+
+
 app.use(cors())
 app.use(express.json({ limit: '1mb' }))
 
@@ -10880,6 +10915,370 @@ function getCallAgentKey(
 }
 
 
+function getMiniMaxVoiceIdForAgent(
+    agentKey
+) {
+
+    if (
+        agentKey ===
+            'guai'
+    ) {
+        return MINIMAX_GUAI_VOICE_ID
+    }
+
+    return MINIMAX_XINGXING_VOICE_ID
+}
+
+
+function clampNumber(
+    value,
+    min,
+    max,
+    fallback
+) {
+
+    const number =
+        Number(
+            value
+        )
+
+    if (
+        !Number.isFinite(
+            number
+        )
+    ) {
+        return fallback
+    }
+
+    return Math.min(
+        max,
+        Math.max(
+            min,
+            number
+        )
+    )
+}
+
+
+function buildMiniMaxVoiceSetting({
+    voiceId,
+    voiceStyle,
+}) {
+
+    const style =
+        typeof voiceStyle
+            ?.style ===
+            'string'
+            ? voiceStyle
+                .style
+                .trim()
+                .toLowerCase()
+            : 'normal'
+
+    const intensity =
+        clampNumber(
+            voiceStyle
+                ?.intensity,
+            0,
+            1,
+            0.35
+        )
+
+    let speed =
+        1
+
+    let pitch =
+        0
+
+    let vol =
+        1
+
+    if (
+        style ===
+            'soft'
+    ) {
+
+        speed =
+            0.96 -
+            intensity *
+                0.06
+
+        pitch =
+            intensity >=
+                0.58
+                ? -1
+                : 0
+
+        vol =
+            0.96
+
+    } else if (
+        style ===
+            'playful'
+    ) {
+
+        speed =
+            1.02 +
+            intensity *
+                0.05
+
+        pitch =
+            intensity >=
+                0.35
+                ? 1
+                : 0
+
+    } else if (
+        style ===
+            'serious'
+    ) {
+
+        speed =
+            0.97 -
+            intensity *
+                0.05
+
+        pitch =
+            intensity >=
+                0.45
+                ? -1
+                : 0
+    }
+
+    return {
+        voice_id:
+            voiceId,
+
+        speed:
+            Number(
+                speed
+                    .toFixed(
+                        3
+                    )
+            ),
+
+        vol,
+
+        pitch,
+    }
+}
+
+
+async function synthesizeMiniMaxSpeech({
+    text,
+    voiceId,
+    voiceStyle,
+}) {
+
+    if (
+        !MINIMAX_API_KEY
+    ) {
+
+        const error =
+            new Error(
+                'MiniMax API Key 尚未配置'
+            )
+
+        error.code =
+            'MINIMAX_NOT_CONFIGURED'
+
+        throw error
+    }
+
+    if (!voiceId) {
+
+        const error =
+            new Error(
+                '当前 AI 尚未配置 MiniMax 音色'
+            )
+
+        error.code =
+            'MINIMAX_VOICE_NOT_CONFIGURED'
+
+        throw error
+    }
+
+    const controller =
+        new AbortController()
+
+    const timeout =
+        setTimeout(
+            () =>
+                controller.abort(),
+            MINIMAX_TTS_TIMEOUT_MS
+        )
+
+    try {
+
+        const response =
+            await fetch(
+                MINIMAX_TTS_URL,
+                {
+                    method:
+                        'POST',
+
+                    headers: {
+                        Authorization:
+                            `Bearer ${MINIMAX_API_KEY}`,
+
+                        'Content-Type':
+                            'application/json',
+                    },
+
+                    body:
+                        JSON.stringify({
+                            model:
+                                MINIMAX_TTS_MODEL,
+
+                            text,
+
+                            stream:
+                                false,
+
+                            language_boost:
+                                'Chinese',
+
+                            output_format:
+                                'hex',
+
+                            voice_setting:
+                                buildMiniMaxVoiceSetting({
+                                    voiceId,
+                                    voiceStyle,
+                                }),
+
+                            audio_setting: {
+                                sample_rate:
+                                    32000,
+
+                                bitrate:
+                                    128000,
+
+                                format:
+                                    'mp3',
+
+                                channel:
+                                    1,
+                            },
+                        }),
+
+                    signal:
+                        controller.signal,
+                }
+            )
+
+        const data =
+            await response
+                .json()
+
+        if (
+            !response.ok
+        ) {
+
+            const error =
+                new Error(
+                    data
+                        ?.base_resp
+                        ?.status_msg ||
+                    data
+                        ?.message ||
+                    `MiniMax HTTP ${response.status}`
+                )
+
+            error.status =
+                response.status
+
+            throw error
+        }
+
+        const statusCode =
+            Number(
+                data
+                    ?.base_resp
+                    ?.status_code
+            )
+
+        if (
+            Number.isFinite(
+                statusCode
+            ) &&
+            statusCode !==
+                0
+        ) {
+
+            const error =
+                new Error(
+                    data
+                        ?.base_resp
+                        ?.status_msg ||
+                    `MiniMax status_code=${statusCode}`
+                )
+
+            error.code =
+                `MINIMAX_${statusCode}`
+
+            throw error
+        }
+
+        const audioHex =
+            typeof data
+                ?.data
+                ?.audio ===
+                'string'
+                ? data
+                    .data
+                    .audio
+                    .trim()
+                : ''
+
+        if (
+            !audioHex ||
+            !/^[0-9a-f]+$/i
+                .test(
+                    audioHex
+                )
+        ) {
+
+            throw new Error(
+                'MiniMax 没有返回有效音频'
+            )
+        }
+
+        const audioBuffer =
+            Buffer.from(
+                audioHex,
+                'hex'
+            )
+
+        if (
+            audioBuffer.length ===
+                0
+        ) {
+
+            throw new Error(
+                'MiniMax 返回了空音频'
+            )
+        }
+
+        return {
+            audioBuffer,
+
+            traceId:
+                data
+                    ?.trace_id ||
+                '',
+        }
+
+    } finally {
+
+        clearTimeout(
+            timeout
+        )
+    }
+}
+
+
+
 // ======================================================
 // 开始一次 App 内通话
 // POST /api/calls/start
@@ -10976,7 +11375,14 @@ app.post(
                                 agentKey,
 
                             voice_mode:
-                                'browser',
+                                (
+                                    MINIMAX_API_KEY &&
+                                    getMiniMaxVoiceIdForAgent(
+                                        agentKey
+                                    )
+                                )
+                                    ? 'minimax'
+                                    : 'browser',
                         },
                     ])
                     .select(
@@ -11015,6 +11421,275 @@ app.post(
 
                     error:
                         '开始通话失败',
+
+                    detail:
+                        error.message,
+                })
+        }
+    }
+)
+
+
+// ======================================================
+// MiniMax TTS
+// POST /api/calls/tts
+//
+// 返回 audio/mpeg。
+// MiniMax 失败时，前端自动退回浏览器 SpeechSynthesis。
+// ======================================================
+
+app.post(
+    '/api/calls/tts',
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+            const callSessionId =
+                parsePositiveSessionId(
+                    req.body
+                        ?.call_session_id
+                )
+
+            const text =
+                typeof req.body
+                    ?.text ===
+                    'string'
+                    ? req.body
+                        .text
+                        .trim()
+                    : ''
+
+            const voiceStyle =
+                req.body
+                    ?.voice_style &&
+                typeof req.body
+                    .voice_style ===
+                    'object'
+                    ? req.body
+                        .voice_style
+                    : {
+                        style:
+                            'normal',
+
+                        intensity:
+                            0.35,
+                    }
+
+            if (
+                !callSessionId
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '缺少有效的 call_session_id',
+                    })
+            }
+
+            if (!text) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '没有需要合成的文字',
+                    })
+            }
+
+            if (
+                text.length >
+                    2000
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '单次通话语音文本过长',
+                    })
+            }
+
+            const {
+                data:
+                activeCall,
+
+                error:
+                activeCallError,
+            } =
+                await supabase
+                    .from(
+                        'call_sessions'
+                    )
+                    .select(
+                        'id, user_id, session_id, agent_key, ended_at'
+                    )
+                    .eq(
+                        'id',
+                        callSessionId
+                    )
+                    .eq(
+                        'user_id',
+                        req.userId
+                    )
+                    .is(
+                        'ended_at',
+                        null
+                    )
+                    .maybeSingle()
+
+            if (
+                activeCallError
+            ) {
+                throw activeCallError
+            }
+
+            if (
+                !activeCall
+            ) {
+
+                return res
+                    .status(409)
+                    .json({
+                        ok:
+                            false,
+
+                        fallback:
+                            true,
+
+                        error:
+                            '当前通话已经结束',
+                    })
+            }
+
+            const voiceId =
+                getMiniMaxVoiceIdForAgent(
+                    activeCall.agent_key
+                )
+
+            if (
+                !MINIMAX_API_KEY ||
+                !voiceId
+            ) {
+
+                return res
+                    .status(503)
+                    .json({
+                        ok:
+                            false,
+
+                        fallback:
+                            true,
+
+                        error:
+                            !MINIMAX_API_KEY
+                                ? 'MiniMax 尚未配置'
+                                : '当前 AI 尚未配置 MiniMax 音色',
+                    })
+            }
+
+            const {
+                audioBuffer,
+                traceId,
+            } =
+                await synthesizeMiniMaxSpeech({
+                    text,
+                    voiceId,
+                    voiceStyle,
+                })
+
+            res.setHeader(
+                'Content-Type',
+                'audio/mpeg'
+            )
+
+            res.setHeader(
+                'Content-Length',
+                String(
+                    audioBuffer.length
+                )
+            )
+
+            res.setHeader(
+                'Cache-Control',
+                'no-store'
+            )
+
+            res.setHeader(
+                'X-Hermit-TTS-Provider',
+                'minimax'
+            )
+
+            res.setHeader(
+                'X-Hermit-TTS-Model',
+                MINIMAX_TTS_MODEL
+            )
+
+            if (traceId) {
+
+                res.setHeader(
+                    'X-MiniMax-Trace-Id',
+                    traceId
+                )
+            }
+
+            return res
+                .status(200)
+                .send(
+                    audioBuffer
+                )
+
+        } catch (
+        error
+        ) {
+
+            const timeout =
+                error
+                    ?.name ===
+                    'AbortError'
+
+            console.error(
+                'MiniMax TTS 失败，前端将退回浏览器声音：',
+                error
+            )
+
+            return res
+                .status(
+                    timeout
+                        ? 504
+                        : 502
+                )
+                .json({
+                    ok:
+                        false,
+
+                    fallback:
+                        true,
+
+                    error:
+                        timeout
+                            ? 'MiniMax TTS 请求超时'
+                            : 'MiniMax TTS 暂时不可用',
 
                     detail:
                         error.message,
