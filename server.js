@@ -348,6 +348,11 @@ app.use(
 )
 
 app.use(
+    '/api/voice-lab',
+    requireAuth
+)
+
+app.use(
     '/api/settings',
     requireAuth
 )
@@ -10930,122 +10935,111 @@ function getMiniMaxVoiceIdForAgent(
 }
 
 
-function clampNumber(
-    value,
-    min,
-    max,
-    fallback
-) {
-
-    const number =
-        Number(
-            value
-        )
-
-    if (
-        !Number.isFinite(
-            number
-        )
-    ) {
-        return fallback
-    }
-
-    return Math.min(
-        max,
-        Math.max(
-            min,
-            number
-        )
-    )
+function clampNumber(value, min, max, fallback) {
+    const number = Number(value)
+    if (!Number.isFinite(number)) return fallback
+    return Math.min(max, Math.max(min, number))
 }
 
+// ======================================================
+// v5 Voice Lab：数据库驱动的动态语音状态
+// ======================================================
+const VOICE_PRESET_CACHE_MS = 5000
+const voicePresetCache = new Map()
 
-function buildMiniMaxVoiceSetting({
-    voiceId,
-    voiceStyle,
-}) {
+const FALLBACK_VOICE_PRESETS = [
+    ['normal','自然','普通、自然、日常，没有明显额外情绪。',10,0.28,1,0,1,0,0,0],
+    ['soft','温柔','温柔、安抚、低声、体贴，适合亲近或安慰。',20,0.38,0.99,-0.015,0.98,0,0,0],
+    ['playful','逗弄','轻松、逗弄、带一点笑意或故意撩拨。',30,0.42,1.005,0.015,1,0,0,0],
+    ['serious','认真','认真、郑重、专注，语气更稳，不需要刻意低沉。',40,0.40,0.995,-0.015,1,0,0,0],
+].map(([style_key,display_name,prompt_hint,sort_order,default_intensity,speed_base,speed_intensity_delta,vol_base,vol_intensity_delta,pitch_base,pitch_intensity_delta])=>({
+    style_key,display_name,prompt_hint,sort_order,default_intensity,speed_base,speed_intensity_delta,
+    vol_base,vol_intensity_delta,pitch_base,pitch_intensity_delta,enabled:true,voice_id:null,tts_model:null,
+    tiny_merge_chars:3,long_clause_chars:28,comma_min_chunk_chars:14,extra_voice_setting:{}
+}))
 
-    const style =
-        typeof voiceStyle
-            ?.style ===
-            'string'
-            ? voiceStyle
-                .style
-                .trim()
-                .toLowerCase()
-            : 'normal'
+function normalizeVoiceStyleKey(value) {
+    return String(value||'').trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'_').replace(/^_+|_+$/g,'').slice(0,40)
+}
 
-    const intensity =
-        clampNumber(
-            voiceStyle
-                ?.intensity,
-            0,
-            1,
-            0.35
-        )
+function normalizeExtraVoiceSetting(value) {
+    return value && typeof value==='object' && !Array.isArray(value) ? {...value} : {}
+}
 
-    let speed =
-        1
-
-    // 自定义 / 克隆音色已经包含自己的音高和共鸣。
-    // v4 不再用 pitch 硬拉情绪，只做非常轻微的语速差异，
-    // 尽量保留 MiniMax 网页预览里的自然质感。
-    const pitch =
-        0
-
-    let vol =
-        1
-
-    if (
-        style ===
-            'soft'
-    ) {
-
-        speed =
-            0.99 -
-            intensity *
-                0.015
-
-        vol =
-            0.98
-
-    } else if (
-        style ===
-            'playful'
-    ) {
-
-        speed =
-            1.005 +
-            intensity *
-                0.015
-
-    } else if (
-        style ===
-            'serious'
-    ) {
-
-        speed =
-            0.995 -
-            intensity *
-                0.015
-    }
-
+function normalizeVoicePresetRow(row, agentKey='xingxing') {
+    const agent = agentKey==='guai' ? 'guai' : 'xingxing'
+    const style = normalizeVoiceStyleKey(row?.style_key)||'normal'
     return {
-        voice_id:
-            voiceId,
-
-        speed:
-            Number(
-                speed
-                    .toFixed(
-                        3
-                    )
-            ),
-
-        vol,
-
-        pitch,
+        id: row?.id ?? null,
+        agent_key: row?.agent_key==='guai' ? 'guai' : agent,
+        style_key: style,
+        display_name: String(row?.display_name||style).trim().slice(0,80),
+        prompt_hint: String(row?.prompt_hint||'').trim().slice(0,600),
+        enabled: row?.enabled!==false,
+        sort_order: Math.trunc(clampNumber(row?.sort_order,-10000,10000,100)),
+        voice_id: typeof row?.voice_id==='string' && row.voice_id.trim() ? row.voice_id.trim() : null,
+        tts_model: typeof row?.tts_model==='string' && row.tts_model.trim() ? row.tts_model.trim() : null,
+        default_intensity: clampNumber(row?.default_intensity,0,1,0.35),
+        speed_base: clampNumber(row?.speed_base,0.5,2,1),
+        speed_intensity_delta: clampNumber(row?.speed_intensity_delta,-1,1,0),
+        vol_base: clampNumber(row?.vol_base,0.1,5,1),
+        vol_intensity_delta: clampNumber(row?.vol_intensity_delta,-3,3,0),
+        pitch_base: clampNumber(row?.pitch_base,-12,12,0),
+        pitch_intensity_delta: clampNumber(row?.pitch_intensity_delta,-12,12,0),
+        tiny_merge_chars: Math.trunc(clampNumber(row?.tiny_merge_chars,0,20,3)),
+        long_clause_chars: Math.trunc(clampNumber(row?.long_clause_chars,8,120,28)),
+        comma_min_chunk_chars: Math.trunc(clampNumber(row?.comma_min_chunk_chars,4,80,14)),
+        extra_voice_setting: normalizeExtraVoiceSetting(row?.extra_voice_setting),
     }
+}
+
+function fallbackVoicePresets(agentKey) {
+    return FALLBACK_VOICE_PRESETS.map(row=>normalizeVoicePresetRow({...row,agent_key:agentKey},agentKey))
+}
+
+function clearVoicePresetCache(agentKey=null) {
+    if (agentKey) voicePresetCache.delete(agentKey); else voicePresetCache.clear()
+}
+
+async function loadVoicePresets(agentKey,{force=false}={}) {
+    const agent=agentKey==='guai'?'guai':'xingxing'
+    const cached=voicePresetCache.get(agent), now=Date.now()
+    if (!force && cached && now-cached.loadedAt<VOICE_PRESET_CACHE_MS) return cached.presets
+    try {
+        const {data,error}=await supabase.from('voice_presets')
+            .select('id, agent_key, style_key, display_name, prompt_hint, enabled, sort_order, voice_id, tts_model, default_intensity, speed_base, speed_intensity_delta, vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta, tiny_merge_chars, long_clause_chars, comma_min_chunk_chars, extra_voice_setting')
+            .eq('agent_key',agent).order('sort_order',{ascending:true}).order('id',{ascending:true})
+        if (error) throw error
+        const presets=Array.isArray(data)&&data.length ? data.map(r=>normalizeVoicePresetRow(r,agent)) : fallbackVoicePresets(agent)
+        voicePresetCache.set(agent,{loadedAt:now,presets})
+        return presets
+    } catch(error) {
+        console.warn('读取 voice_presets 失败，使用默认值：',error?.message||error)
+        const presets=fallbackVoicePresets(agent)
+        voicePresetCache.set(agent,{loadedAt:now,presets})
+        return presets
+    }
+}
+
+function enabledVoicePresets(presets,agentKey='xingxing') {
+    const enabled=Array.isArray(presets)?presets.filter(p=>p?.enabled!==false):[]
+    return enabled.length?enabled:fallbackVoicePresets(agentKey)
+}
+
+function resolveVoicePreset(presets,styleKey,agentKey='xingxing') {
+    const enabled=enabledVoicePresets(presets,agentKey), key=normalizeVoiceStyleKey(styleKey)
+    return enabled.find(p=>p.style_key===key)||enabled.find(p=>p.style_key==='normal')||enabled[0]
+}
+
+function buildMiniMaxVoiceSetting({voiceId,voiceStyle,voicePreset}) {
+    const p=voicePreset||normalizeVoicePresetRow({style_key:'normal'})
+    const intensity=clampNumber(voiceStyle?.intensity,0,1,p.default_intensity)
+    const speed=clampNumber(p.speed_base+p.speed_intensity_delta*intensity,0.5,2,1)
+    const vol=clampNumber(p.vol_base+p.vol_intensity_delta*intensity,0.1,5,1)
+    const pitch=Math.round(clampNumber(p.pitch_base+p.pitch_intensity_delta*intensity,-12,12,0))
+    const extra=normalizeExtraVoiceSetting(p.extra_voice_setting)
+    delete extra.voice_id; delete extra.speed; delete extra.vol; delete extra.pitch
+    return {...extra,voice_id:voiceId,speed:Number(speed.toFixed(3)),vol:Number(vol.toFixed(3)),pitch}
 }
 
 
@@ -11053,6 +11047,8 @@ async function synthesizeMiniMaxSpeech({
     text,
     voiceId,
     voiceStyle,
+    voicePreset,
+    ttsModel,
 }) {
 
     if (
@@ -11113,6 +11109,8 @@ async function synthesizeMiniMaxSpeech({
                     body:
                         JSON.stringify({
                             model:
+                                ttsModel ||
+                                voicePreset?.tts_model ||
                                 MINIMAX_TTS_MODEL,
 
                             text,
@@ -11130,6 +11128,7 @@ async function synthesizeMiniMaxSpeech({
                                 buildMiniMaxVoiceSetting({
                                     voiceId,
                                     voiceStyle,
+                                    voicePreset,
                                 }),
 
                             audio_setting: {
@@ -11263,6 +11262,86 @@ async function synthesizeMiniMaxSpeech({
 }
 
 
+
+// ======================================================
+// v5 Voice Lab 管理 API
+// ======================================================
+const VOICE_PRESET_SELECT='id, agent_key, style_key, display_name, prompt_hint, enabled, sort_order, voice_id, tts_model, default_intensity, speed_base, speed_intensity_delta, vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta, tiny_merge_chars, long_clause_chars, comma_min_chunk_chars, extra_voice_setting, created_at, updated_at'
+
+async function requireVoiceLabAdmin(req,res) {
+    const {data,error}=await supabase.from('app_admins').select('user_id').eq('user_id',req.userId).maybeSingle()
+    if (error) throw error
+    if (!data) { res.status(403).json({ok:false,error:'当前账号没有 Voice Lab 管理权限'}); return false }
+    return true
+}
+
+function voicePresetPayload(raw) {
+    const agent=raw?.agent_key==='guai'?'guai':'xingxing'
+    const key=normalizeVoiceStyleKey(raw?.style_key)
+    if (!key) throw new Error('style_key 不能为空')
+    const p=normalizeVoicePresetRow({...raw,agent_key:agent,style_key:key},agent)
+    return {...p,id:undefined,updated_at:new Date().toISOString()}
+}
+
+app.get('/api/voice-lab/config',async(req,res)=>{
+    try {
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
+        const agent=req.query?.agent_key==='guai'?'guai':'xingxing'
+        const presets=await loadVoicePresets(agent,{force:true})
+        res.json({ok:true,agent_key:agent,base_voice_id:getMiniMaxVoiceIdForAgent(agent)||'',default_tts_model:MINIMAX_TTS_MODEL,presets})
+    } catch(error) { console.error('Voice Lab 读取失败：',error); res.status(500).json({ok:false,error:'Voice Lab 读取失败',detail:error.message}) }
+})
+
+app.post('/api/voice-lab/presets',async(req,res)=>{
+    try {
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
+        const payload=voicePresetPayload(req.body)
+        const {data,error}=await supabase.from('voice_presets').insert([payload]).select(VOICE_PRESET_SELECT).single()
+        if (error) throw error
+        clearVoicePresetCache(payload.agent_key)
+        res.status(201).json({ok:true,preset:normalizeVoicePresetRow(data,payload.agent_key)})
+    } catch(error) { res.status(400).json({ok:false,error:'新增语音状态失败',detail:error.message}) }
+})
+
+app.put('/api/voice-lab/presets/:id',async(req,res)=>{
+    try {
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
+        const id=Number(req.params.id); if (!Number.isInteger(id)||id<=0) return res.status(400).json({ok:false,error:'无效的 preset id'})
+        const payload=voicePresetPayload(req.body)
+        const {data,error}=await supabase.from('voice_presets').update(payload).eq('id',id).eq('agent_key',payload.agent_key).select(VOICE_PRESET_SELECT).single()
+        if (error) throw error
+        clearVoicePresetCache(payload.agent_key)
+        res.json({ok:true,preset:normalizeVoicePresetRow(data,payload.agent_key)})
+    } catch(error) { res.status(400).json({ok:false,error:'保存语音状态失败',detail:error.message}) }
+})
+
+app.delete('/api/voice-lab/presets/:id',async(req,res)=>{
+    try {
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
+        const id=Number(req.params.id), agent=req.query?.agent_key==='guai'?'guai':'xingxing'
+        if (!Number.isInteger(id)||id<=0) return res.status(400).json({ok:false,error:'无效的 preset id'})
+        const {error}=await supabase.from('voice_presets').delete().eq('id',id).eq('agent_key',agent)
+        if (error) throw error
+        clearVoicePresetCache(agent); res.json({ok:true})
+    } catch(error) { res.status(400).json({ok:false,error:'删除语音状态失败',detail:error.message}) }
+})
+
+app.post('/api/voice-lab/preview',async(req,res)=>{
+    try {
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
+        const agent=req.body?.agent_key==='guai'?'guai':'xingxing'
+        const text=String(req.body?.text||'').trim().slice(0,800)
+        if (!text) return res.status(400).json({ok:false,error:'预览文字不能为空'})
+        const preset=normalizeVoicePresetRow({...req.body?.preset,agent_key:agent},agent)
+        const intensity=clampNumber(req.body?.intensity,0,1,preset.default_intensity)
+        const voiceId=preset.voice_id||getMiniMaxVoiceIdForAgent(agent)
+        if (!voiceId) return res.status(400).json({ok:false,error:'这个状态没有 voice_id，且角色没有基础 voice_id'})
+        const {audioBuffer,traceId}=await synthesizeMiniMaxSpeech({text,voiceId,voiceStyle:{style:preset.style_key,intensity},voicePreset:preset,ttsModel:preset.tts_model||MINIMAX_TTS_MODEL})
+        res.setHeader('Content-Type','audio/mpeg'); res.setHeader('Content-Length',String(audioBuffer.length)); res.setHeader('Cache-Control','no-store')
+        if (traceId) res.setHeader('X-MiniMax-Trace-Id',traceId)
+        res.status(200).send(audioBuffer)
+    } catch(error) { console.error('Voice Lab 试听失败：',error); res.status(500).json({ok:false,error:'试听失败',detail:error.message}) }
+})
 
 // ======================================================
 // 开始一次 App 内通话
@@ -11567,7 +11646,20 @@ app.post(
                     })
             }
 
+            const voicePresets =
+                await loadVoicePresets(
+                    activeCall.agent_key
+                )
+
+            const voicePreset =
+                resolveVoicePreset(
+                    voicePresets,
+                    voiceStyle?.style,
+                    activeCall.agent_key
+                )
+
             const voiceId =
+                voicePreset?.voice_id ||
                 getMiniMaxVoiceIdForAgent(
                     activeCall.agent_key
                 )
@@ -11601,6 +11693,10 @@ app.post(
                     text,
                     voiceId,
                     voiceStyle,
+                    voicePreset,
+                    ttsModel:
+                        voicePreset?.tts_model ||
+                        MINIMAX_TTS_MODEL,
                 })
 
             res.setHeader(
@@ -11627,6 +11723,7 @@ app.post(
 
             res.setHeader(
                 'X-Hermit-TTS-Model',
+                voicePreset?.tts_model ||
                 MINIMAX_TTS_MODEL
             )
 
@@ -13214,161 +13311,46 @@ app.get(
 // 放在开头是为了流式通话能在第一句话开口前就知道语气。
 // ======================================================
 
-function buildVoiceStyleReplyContext(
-    messageChannel
-) {
-
-    if (
-        messageChannel !==
-            'voice'
-    ) {
-        return ''
-    }
-
+function buildVoiceStyleReplyContext(messageChannel,voicePresets=[],agentKey='xingxing') {
+    if (messageChannel!=='voice') return ''
+    const enabled=enabledVoicePresets(voicePresets,agentKey)
+    const def=resolveVoicePreset(enabled,'normal',agentKey)
+    const lines=enabled.map(p=>`- ${p.style_key}：${p.display_name}${p.prompt_hint?`；${p.prompt_hint}`:''}`).join('\n')
     return `【语音通话模式：仅供系统读取，不向用户展示】
 这一轮来自 App 内语音通话。
-
 保持原有角色、人设、记忆、剧情、亲密程度，不要变成客服或播音稿。
 这是“正在打电话”，不是在写聊天长文：
 - 默认只回应眼前这一件事，通常 1～3 个短句就够。
-- 优先口语化、自然接话；允许很短的“嗯”“好”“怎么了”“我在”这类回应。
-- 同一个念头尽量用自然逗号连接，不要把每几个字都切成一个句号；短反应可以顺着下一句话说下去，比如“嗯，我听着呢。”
-- 长一点的句子可以在真实会换气的位置使用逗号；句子长短要有变化，不要每句都同样长度、同样节奏。
-- 问句只在真的需要用户回答时使用，不要每一轮都用问题收尾。
-- 省略号、语气词可以偶尔出现来表达犹豫、轻声或停顿，但不要连续堆叠，也不要为了“像真人”每句都加。
-- 不要列清单、不要 Markdown、不要小标题、不要长篇解释。
-- 不要机械复述用户刚说过的话，不要每轮都总结或追问。
-- 能一句说清就不要说三句；需要展开时也先说最重要的一小段，让用户继续接话。
-- 不写“（轻笑）”“*叹气*”这类舞台说明；真正的呼吸、笑声和更细情绪以后由声音层处理。
+- 优先口语化、自然接话；短反应尽量顺着下一句话说下去。
+- 同一个念头用自然逗号连接；句子长短要有变化。
+- 问句只在真的需要用户回答时使用，不要每轮都用问题收尾。
+- 不要列表、Markdown、小标题、长篇解释，也不要机械复述。
+- 不写“（轻笑）”“*叹气*”之类舞台说明。
 
-回复正文开始前，第一行先单独输出内部标签：
+回复正文前第一行输出：
 [[VOICE_STYLE:style:intensity]]
+然后从第二行开始正常回复。
 
-然后从第二行开始正常回复正文。内部标签必须出现在正文之前，不要放到正文末尾。
+当前可用 style 由 Voice Lab 动态配置，只能从以下启用状态中选择：
+${lines}
 
-style 只能是：
-- normal：普通、自然、日常
-- soft：温柔、安抚、低声、体贴
-- playful：轻松、逗弄、带一点笑意
-- serious：认真、郑重、专注
-
-intensity 必须是 0 到 1 之间的小数，表示这种语气的明显程度。
-一般建议 0.20～0.65；除非情绪非常明确，不要轻易超过 0.75。
-
-示例：
-[[VOICE_STYLE:soft:0.38]]
-
-这个标签只决定声音表达，不要改变回答内容。不要解释标签，不要输出多个标签。`
+intensity 必须是 0 到 1 之间的小数，表示状态明显程度；默认尽量中低强度。
+示例：[[VOICE_STYLE:${def.style_key}:${Number(def.default_intensity||0.35).toFixed(2)}]]
+不要解释标签，不要输出多个标签。`
 }
 
-
-function extractVoiceStyleFromReply(
-    rawReply,
-    messageChannel
-) {
-
-    const original =
-        typeof rawReply ===
-            'string'
-            ? rawReply.trim()
-            : ''
-
-    if (
-        messageChannel !==
-            'voice'
-    ) {
-
-        return {
-            reply:
-                original,
-
-            style:
-                null,
-
-            intensity:
-                null,
-        }
+function extractVoiceStyleFromReply(rawReply,messageChannel,voicePresets=[],agentKey='xingxing') {
+    const original=typeof rawReply==='string'?rawReply.trim():''
+    if (messageChannel!=='voice') return {reply:original,style:null,intensity:null}
+    const def=resolveVoicePreset(voicePresets,'normal',agentKey)
+    let style=def.style_key, intensity=def.default_intensity
+    const marker=/\[\[VOICE_STYLE:([a-zA-Z0-9_-]{1,40}):([0-9]+(?:\.[0-9]+)?)\]\]/gi
+    let m,last=null; while((m=marker.exec(original))!==null) last=m
+    if (last) {
+        const p=resolveVoicePreset(voicePresets,last[1],agentKey); style=p.style_key
+        const n=Number(last[2]); intensity=Number.isFinite(n)?Math.min(1,Math.max(0,n)):p.default_intensity
     }
-
-    let style =
-        'normal'
-
-    let intensity =
-        0.35
-
-    const markerPattern =
-        /\[\[VOICE_STYLE:(normal|soft|playful|serious):([0-9]+(?:\.[0-9]+)?)\]\]/gi
-
-    let match = null
-    let currentMatch = null
-
-    while (
-        (
-            currentMatch =
-                markerPattern.exec(
-                    original
-                )
-        ) !==
-        null
-    ) {
-        match =
-            currentMatch
-    }
-
-    if (match) {
-
-        style =
-            String(
-                match[1] ||
-                'normal'
-            )
-                .trim()
-                .toLowerCase()
-
-        const parsedIntensity =
-            Number(
-                match[2]
-            )
-
-        if (
-            Number.isFinite(
-                parsedIntensity
-            )
-        ) {
-
-            intensity =
-                Math.min(
-                    1,
-                    Math.max(
-                        0,
-                        parsedIntensity
-                    )
-                )
-        }
-    }
-
-    const cleanReply =
-        original
-            .replace(
-                markerPattern,
-                ''
-            )
-            .trim()
-
-    return {
-        reply:
-            cleanReply,
-
-        style,
-
-        intensity:
-            Number(
-                intensity
-                    .toFixed(
-                        3
-                    )
-            ),
-    }
+    return {reply:original.replace(marker,'').trim(),style,intensity:Number(intensity.toFixed(3))}
 }
 
 
@@ -13475,6 +13457,9 @@ app.post(
             }
 
             let callSessionId =
+                null
+
+            let callAgentKey =
                 null
 
             let sessionId =
@@ -13673,7 +13658,7 @@ app.post(
                             'call_sessions'
                         )
                         .select(
-                            'id, user_id, session_id, ended_at'
+                            'id, user_id, session_id, agent_key, ended_at'
                         )
                         .eq(
                             'id',
@@ -13715,6 +13700,10 @@ app.post(
 
                         })
                 }
+
+                callAgentKey =
+                    activeCallSession.agent_key ||
+                    getCallAgentKey(req.user)
             }
 
 
@@ -14070,9 +14059,18 @@ app.post(
                 )
             }
 
+            const voicePresets =
+                messageChannel === 'voice'
+                    ? await loadVoicePresets(
+                        callAgentKey || getCallAgentKey(req.user)
+                    )
+                    : []
+
             const voiceStyleReplyContext =
                 buildVoiceStyleReplyContext(
-                    messageChannel
+                    messageChannel,
+                    voicePresets,
+                    callAgentKey || getCallAgentKey(req.user)
                 )
 
             if (
@@ -14255,17 +14253,24 @@ app.post(
                 let streamFailure =
                     null
 
+                let currentVoicePreset =
+                    resolveVoicePreset(
+                        voicePresets,
+                        'normal',
+                        callAgentKey || getCallAgentKey(req.user)
+                    )
+
                 let currentVoiceStyle = {
                     style:
-                        'normal',
+                        currentVoicePreset.style_key,
 
                     intensity:
-                        0.35,
+                        currentVoicePreset.default_intensity,
                 }
 
 
                 const streamingVoiceMarkerPattern =
-                    /\[\[VOICE_STYLE:(normal|soft|playful|serious):([0-9]+(?:\.[0-9]+)?)\]\]/gi
+                    /\[\[VOICE_STYLE:([a-zA-Z0-9_-]{1,40}):([0-9]+(?:\.[0-9]+)?)\]\]/gi
 
 
                 const removeVoiceMarkersAndUpdateStyle =
@@ -14290,32 +14295,21 @@ app.post(
                                                 intensityValue
                                             )
 
+                                        currentVoicePreset =
+                                            resolveVoicePreset(
+                                                voicePresets,
+                                                styleValue,
+                                                callAgentKey || getCallAgentKey(req.user)
+                                            )
+
                                         currentVoiceStyle = {
                                             style:
-                                                String(
-                                                    styleValue ||
-                                                    'normal'
-                                                )
-                                                    .trim()
-                                                    .toLowerCase(),
+                                                currentVoicePreset.style_key,
 
                                             intensity:
-                                                Number.isFinite(
-                                                    parsedIntensity
-                                                )
-                                                    ? Number(
-                                                        Math.min(
-                                                            1,
-                                                            Math.max(
-                                                                0,
-                                                                parsedIntensity
-                                                            )
-                                                        )
-                                                            .toFixed(
-                                                                3
-                                                            )
-                                                    )
-                                                    : 0.35,
+                                                Number.isFinite(parsedIntensity)
+                                                    ? Number(Math.min(1,Math.max(0,parsedIntensity)).toFixed(3))
+                                                    : currentVoicePreset.default_intensity,
                                         }
 
                                         writeStreamEvent({
@@ -14399,7 +14393,7 @@ app.post(
                         if (
                             !force &&
                             speechLength <=
-                                3 &&
+                                currentVoicePreset.tiny_merge_chars &&
                             !hasStrongQuestionOrExclamation(
                                 cleanValue
                             )
@@ -14466,7 +14460,7 @@ app.post(
                             getNaturalSpeechLength(
                                 text
                             ) <
-                            28
+                            currentVoicePreset.long_clause_chars
                         ) {
                             return null
                         }
@@ -14510,7 +14504,7 @@ app.post(
                                 getNaturalSpeechLength(
                                     candidate
                                 ) >=
-                                14
+                                currentVoicePreset.comma_min_chunk_chars
                             ) {
 
                                 return {
@@ -14905,7 +14899,9 @@ app.post(
                         voiceReply =
                             extractVoiceStyleFromReply(
                                 cleanedRawReply,
-                                messageChannel
+                                messageChannel,
+                                voicePresets,
+                                callAgentKey || getCallAgentKey(req.user)
                             )
 
                     } else if (
@@ -15213,7 +15209,9 @@ app.post(
             const voiceReply =
                 extractVoiceStyleFromReply(
                     rawReply,
-                    messageChannel
+                    messageChannel,
+                    voicePresets,
+                    callAgentKey || getCallAgentKey(req.user)
                 )
 
 
