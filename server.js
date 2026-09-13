@@ -13232,10 +13232,14 @@ function buildVoiceStyleReplyContext(
 这是“正在打电话”，不是在写聊天长文：
 - 默认只回应眼前这一件事，通常 1～3 个短句就够。
 - 优先口语化、自然接话；允许很短的“嗯”“好”“怎么了”“我在”这类回应。
+- 同一个念头尽量用自然逗号连接，不要把每几个字都切成一个句号；短反应可以顺着下一句话说下去，比如“嗯，我听着呢。”
+- 长一点的句子可以在真实会换气的位置使用逗号；句子长短要有变化，不要每句都同样长度、同样节奏。
+- 问句只在真的需要用户回答时使用，不要每一轮都用问题收尾。
+- 省略号、语气词可以偶尔出现来表达犹豫、轻声或停顿，但不要连续堆叠，也不要为了“像真人”每句都加。
 - 不要列清单、不要 Markdown、不要小标题、不要长篇解释。
 - 不要机械复述用户刚说过的话，不要每轮都总结或追问。
 - 能一句说清就不要说三句；需要展开时也先说最重要的一小段，让用户继续接话。
-- 允许自然停顿和语气词，但不要为了“像真人”刻意堆砌。
+- 不写“（轻笑）”“*叹气*”这类舞台说明；真正的呼吸、笑声和更细情绪以后由声音层处理。
 
 回复正文开始前，第一行先单独输出内部标签：
 [[VOICE_STYLE:style:intensity]]
@@ -14094,7 +14098,7 @@ app.post(
 
 
             // ==================================================
-            // v4.3 真流式语音通话
+            // v4.5 真流式 + 自然节奏语音通话
             //
             // 只有 App 内通话显式传 stream_voice=true 才进入这里。
             // 普通文字聊天仍然完全走下面原来的 JSON /api/chat，
@@ -14241,6 +14245,13 @@ app.post(
                 let streamCompletedNormally =
                     false
 
+                // v4.5：自然节奏缓冲。
+                // 例如模型流出“嗯。”时先不急着单独做一次 TTS，
+                // 如果后面紧接“我听着呢。”，会合成“嗯。我听着呢。”
+                // 这样不会每个极短反应都重置一次音色/韵律。
+                let pendingNaturalSpeech =
+                    ''
+
                 let streamFailure =
                     null
 
@@ -14321,6 +14332,202 @@ app.post(
                     }
 
 
+                const getNaturalSpeechLength =
+                    (
+                        value
+                    ) => {
+
+                        return Array
+                            .from(
+                                String(
+                                    value ||
+                                    ''
+                                )
+                                    .replace(
+                                        /[\s，。！？!?；;：:、…“”"'‘’（）()【】《》]/g,
+                                        ''
+                                    )
+                            )
+                            .length
+                    }
+
+
+                const hasStrongQuestionOrExclamation =
+                    (
+                        value
+                    ) =>
+                        /[！？!?]/.test(
+                            String(
+                                value ||
+                                ''
+                            )
+                        )
+
+
+                const emitNaturalSpeechChunk =
+                    (
+                        value,
+                        {
+                            force =
+                                false,
+                        } = {}
+                    ) => {
+
+                        const cleanValue =
+                            String(
+                                value ||
+                                ''
+                            )
+                                .trim()
+
+                        if (
+                            !cleanValue
+                        ) {
+                            return
+                        }
+
+
+                        const speechLength =
+                            getNaturalSpeechLength(
+                                cleanValue
+                            )
+
+
+                        // 极短陈述（“嗯。”“好。”“我在。”）如果后面还有话，
+                        // 先暂存，和下一段一起交给 TTS。
+                        // 问号/感叹号本身语气完整，所以不强行合并。
+                        if (
+                            !force &&
+                            speechLength <=
+                                3 &&
+                            !hasStrongQuestionOrExclamation(
+                                cleanValue
+                            )
+                        ) {
+
+                            pendingNaturalSpeech +=
+                                cleanValue
+
+                            return
+                        }
+
+
+                        const combined =
+                            `${pendingNaturalSpeech}${cleanValue}`
+                                .trim()
+
+                        pendingNaturalSpeech =
+                            ''
+
+                        if (
+                            combined
+                        ) {
+                            emitOneSpeechChunk(
+                                combined
+                            )
+                        }
+                    }
+
+
+                const flushPendingNaturalSpeech =
+                    () => {
+
+                        const pending =
+                            pendingNaturalSpeech
+                                .trim()
+
+                        pendingNaturalSpeech =
+                            ''
+
+                        if (
+                            pending
+                        ) {
+                            emitOneSpeechChunk(
+                                pending
+                            )
+                        }
+                    }
+
+
+                const findNaturalCommaSplit =
+                    (
+                        value
+                    ) => {
+
+                        const text =
+                            String(
+                                value ||
+                                ''
+                            )
+
+                        // 没积累到足够长度就不按逗号切，
+                        // 防止一句话变成碎片。
+                        if (
+                            getNaturalSpeechLength(
+                                text
+                            ) <
+                            28
+                        ) {
+                            return null
+                        }
+
+
+                        const commaPattern =
+                            /[，,：:]/
+
+                        for (
+                            let index = 0;
+                            index <
+                                text.length;
+                            index += 1
+                        ) {
+
+                            const char =
+                                text[
+                                    index
+                                ]
+
+                            if (
+                                !commaPattern
+                                    .test(
+                                        char
+                                    )
+                            ) {
+                                continue
+                            }
+
+
+                            const candidate =
+                                text.slice(
+                                    0,
+                                    index +
+                                        1
+                                )
+
+
+                            // 至少说到一个完整“呼吸组”再切。
+                            if (
+                                getNaturalSpeechLength(
+                                    candidate
+                                ) >=
+                                14
+                            ) {
+
+                                return {
+                                    chunk:
+                                        candidate,
+
+                                    length:
+                                        index +
+                                        1,
+                                }
+                            }
+                        }
+
+                        return null
+                    }
+
+
                 const emitOneSpeechChunk =
                     (
                         value
@@ -14376,9 +14583,8 @@ app.post(
 
                         removeVoiceMarkersAndUpdateStyle()
 
-                        // 完整句号 / 问号 / 感叹号 / 分号 / 省略号 / 换行
-                        // 一出现，就立即把这一小句交给前端。
-                        // 不按逗号硬切，避免 TTS 语气变得碎。
+                        // 强边界优先：句号 / 问号 / 感叹号 / 分号 / 省略号 / 换行。
+                        // 这仍然是最自然、最稳定的 TTS 切点。
                         const sentencePattern =
                             /^([\s\S]*?(?:[。！？!?；;]+[”’"'）】》」』]*|…{1,2}[”’"'）】》」』]*|\n+))/
 
@@ -14392,24 +14598,58 @@ app.post(
                                         sentencePattern
                                     )
 
-                            if (!match) {
-                                break
+                            if (match) {
+
+                                const chunk =
+                                    match[1]
+
+                                speechBuffer =
+                                    speechBuffer
+                                        .slice(
+                                            chunk.length
+                                        )
+
+                                emitNaturalSpeechChunk(
+                                    chunk
+                                )
+
+                                removeVoiceMarkersAndUpdateStyle()
+
+                                continue
                             }
 
-                            const chunk =
-                                match[1]
 
-                            speechBuffer =
-                                speechBuffer
-                                    .slice(
-                                        chunk.length
-                                    )
+                            // 如果模型正在生成一个很长的口语句，
+                            // 不一直等到最终句号；只有积累到足够长度时，
+                            // 才在一个自然逗号/冒号处切成“呼吸组”。
+                            // 这样既保留流式低延迟，也不会逗号一来就碎。
+                            const commaSplit =
+                                findNaturalCommaSplit(
+                                    speechBuffer
+                                )
 
-                            emitOneSpeechChunk(
-                                chunk
-                            )
+                            if (
+                                commaSplit
+                            ) {
 
-                            removeVoiceMarkersAndUpdateStyle()
+                                speechBuffer =
+                                    speechBuffer
+                                        .slice(
+                                            commaSplit
+                                                .length
+                                        )
+
+                                emitNaturalSpeechChunk(
+                                    commaSplit
+                                        .chunk
+                                )
+
+                                removeVoiceMarkersAndUpdateStyle()
+
+                                continue
+                            }
+
+                            break
                         }
 
 
@@ -14436,10 +14676,19 @@ app.post(
                             if (
                                 remainder
                             ) {
-                                emitOneSpeechChunk(
-                                    remainder
+
+                                emitNaturalSpeechChunk(
+                                    remainder,
+                                    {
+                                        force:
+                                            true,
+                                    }
                                 )
                             }
+
+                            // 如果最后恰好只剩“嗯。”“好。”这类短反应，
+                            // 正常结束时也要播放。
+                            flushPendingNaturalSpeech()
                         }
                     }
 
