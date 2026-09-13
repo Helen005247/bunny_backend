@@ -308,6 +308,11 @@ app.use(
 )
 
 app.use(
+    '/api/calls',
+    requireAuth
+)
+
+app.use(
     '/api/settings',
     requireAuth
 )
@@ -10842,6 +10847,301 @@ app.get(
 
 
 // ======================================================
+// App 内通话：当前登录账号对应的 AI key
+//
+// 妈妈账号 user_metadata.name = Mom -> guai
+// 其他账号 -> xingxing
+// ======================================================
+
+function getCallAgentKey(
+    user
+) {
+
+    const displayName =
+        String(
+            user
+                ?.user_metadata
+                ?.name ||
+            ''
+        )
+            .trim()
+            .toLowerCase()
+
+    if (
+        displayName ===
+            'mom' ||
+        displayName ===
+            '妈妈'
+    ) {
+        return 'guai'
+    }
+
+    return 'xingxing'
+}
+
+
+// ======================================================
+// 开始一次 App 内通话
+// POST /api/calls/start
+//
+// 通话和文字聊天共用同一个 session，
+// 但 messages.channel = voice，且带 call_session_id。
+//
+// 这样：
+// 1. 模型上下文能立刻同时记住文字 + 通话。
+// 2. 文字聊天页面可以只展示 channel=text。
+// 3. 数据库仍然能明确区分每次通话。
+// ======================================================
+
+app.post(
+    '/api/calls/start',
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+            const sessionId =
+                parsePositiveSessionId(
+                    req.body
+                        ?.session_id
+                )
+
+            if (!sessionId) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '无效的 session_id',
+                    })
+            }
+
+            const session =
+                await getSessionById(
+                    sessionId,
+                    req.userId
+                )
+
+            if (!session) {
+
+                return res
+                    .status(404)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '会话不存在',
+                    })
+            }
+
+            const agentKey =
+                getCallAgentKey(
+                    req.user
+                )
+
+            const {
+                data:
+                callSession,
+
+                error:
+                callSessionError,
+            } =
+                await supabase
+                    .from(
+                        'call_sessions'
+                    )
+                    .insert([
+                        {
+                            user_id:
+                                req.userId,
+
+                            session_id:
+                                sessionId,
+
+                            agent_key:
+                                agentKey,
+
+                            voice_mode:
+                                'browser',
+                        },
+                    ])
+                    .select(
+                        'id, user_id, session_id, agent_key, voice_mode, started_at, ended_at'
+                    )
+                    .single()
+
+            if (
+                callSessionError
+            ) {
+                throw callSessionError
+            }
+
+            return res
+                .status(201)
+                .json({
+                    ok:
+                        true,
+
+                    call_session:
+                        callSession,
+                })
+
+        } catch (error) {
+
+            console.error(
+                '开始通话失败：',
+                error
+            )
+
+            return res
+                .status(500)
+                .json({
+                    ok:
+                        false,
+
+                    error:
+                        '开始通话失败',
+
+                    detail:
+                        error.message,
+                })
+        }
+    }
+)
+
+
+// ======================================================
+// 结束一次 App 内通话
+// POST /api/calls/:id/end
+// ======================================================
+
+app.post(
+    '/api/calls/:id/end',
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+            const callSessionId =
+                parsePositiveSessionId(
+                    req.params.id
+                )
+
+            if (!callSessionId) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '无效的 call_session_id',
+                    })
+            }
+
+            const {
+                data,
+                error,
+            } =
+                await supabase
+                    .from(
+                        'call_sessions'
+                    )
+                    .update({
+                        ended_at:
+                            new Date()
+                                .toISOString(),
+                    })
+                    .eq(
+                        'id',
+                        callSessionId
+                    )
+                    .eq(
+                        'user_id',
+                        req.userId
+                    )
+                    .select(
+                        'id, session_id, agent_key, voice_mode, started_at, ended_at'
+                    )
+                    .maybeSingle()
+
+            if (error) {
+                throw error
+            }
+
+            if (!data) {
+
+                return res
+                    .status(404)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '通话不存在',
+                    })
+            }
+
+            return res
+                .status(200)
+                .json({
+                    ok:
+                        true,
+
+                    call_session:
+                        data,
+                })
+
+        } catch (error) {
+
+            console.error(
+                '结束通话失败：',
+                error
+            )
+
+            return res
+                .status(500)
+                .json({
+                    ok:
+                        false,
+
+                    error:
+                        '结束通话失败',
+
+                    detail:
+                        error.message,
+                })
+        }
+    }
+)
+
+
+// ======================================================
 // 创建会话
 // POST /api/sessions
 // ======================================================
@@ -11449,6 +11749,10 @@ app.get(
                     .eq(
                         'visible',
                         true
+                    )
+                    .eq(
+                        'channel',
+                        'text'
                     )
                     .order(
                         'created_at',
@@ -12276,6 +12580,10 @@ app.post(
 
                 session_id,
 
+                channel,
+
+                call_session_id,
+
             } =
                 req.body
 
@@ -12301,6 +12609,43 @@ app.post(
 
             const cleanMessage =
                 message.trim()
+
+            const messageChannel =
+                channel ===
+                    undefined ||
+                channel ===
+                    null ||
+                channel ===
+                    ''
+                    ? 'text'
+                    : String(
+                        channel
+                    )
+                        .trim()
+                        .toLowerCase()
+
+            if (
+                messageChannel !==
+                    'text' &&
+                messageChannel !==
+                    'voice'
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+
+                        ok:
+                            false,
+
+                        error:
+                            'channel 只能是 text 或 voice',
+
+                    })
+            }
+
+            let callSessionId =
+                null
 
             let sessionId =
                 null
@@ -12455,6 +12800,95 @@ app.post(
 
 
             // ==================================================
+            // voice 消息必须属于当前用户、当前聊天 session、
+            // 且通话还没有结束。
+            // ==================================================
+
+            if (
+                messageChannel ===
+                    'voice'
+            ) {
+
+                callSessionId =
+                    parsePositiveSessionId(
+                        call_session_id
+                    )
+
+                if (
+                    !callSessionId
+                ) {
+
+                    return res
+                        .status(400)
+                        .json({
+
+                            ok:
+                                false,
+
+                            error:
+                                'voice 消息缺少有效的 call_session_id',
+
+                        })
+                }
+
+                const {
+                    data:
+                    activeCallSession,
+
+                    error:
+                    activeCallError,
+                } =
+                    await supabase
+                        .from(
+                            'call_sessions'
+                        )
+                        .select(
+                            'id, user_id, session_id, ended_at'
+                        )
+                        .eq(
+                            'id',
+                            callSessionId
+                        )
+                        .eq(
+                            'user_id',
+                            req.userId
+                        )
+                        .eq(
+                            'session_id',
+                            sessionId
+                        )
+                        .is(
+                            'ended_at',
+                            null
+                        )
+                        .maybeSingle()
+
+                if (
+                    activeCallError
+                ) {
+                    throw activeCallError
+                }
+
+                if (
+                    !activeCallSession
+                ) {
+
+                    return res
+                        .status(409)
+                        .json({
+
+                            ok:
+                                false,
+
+                            error:
+                                '当前通话已结束或不存在，请重新开始通话',
+
+                        })
+                }
+            }
+
+
+            // ==================================================
             // 保存真正的用户消息
             // ==================================================
 
@@ -12486,6 +12920,12 @@ app.post(
 
                             visible:
                                 true,
+
+                            channel:
+                                messageChannel,
+
+                            call_session_id:
+                                callSessionId,
 
                         },
                     ])
@@ -12872,6 +13312,12 @@ app.post(
 
                             visible:
                                 true,
+
+                            channel:
+                                messageChannel,
+
+                            call_session_id:
+                                callSessionId,
 
                         },
                     ])
