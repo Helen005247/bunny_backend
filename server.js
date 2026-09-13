@@ -13207,10 +13207,11 @@ app.get(
 // ======================================================
 // 语音通话：隐藏语气标签
 //
-// 只在 channel=voice 时要求模型在回复末尾追加：
+// 只在 channel=voice 时要求模型在回复开头先输出：
 // [[VOICE_STYLE:soft:0.35]]
 //
 // 后端会在保存和返回前剥掉标签，用户看不到。
+// 放在开头是为了流式通话能在第一句话开口前就知道语气。
 // ======================================================
 
 function buildVoiceStyleReplyContext(
@@ -13236,8 +13237,10 @@ function buildVoiceStyleReplyContext(
 - 能一句说清就不要说三句；需要展开时也先说最重要的一小段，让用户继续接话。
 - 允许自然停顿和语气词，但不要为了“像真人”刻意堆砌。
 
-回复正文结束后，最后单独追加一行内部标签：
+回复正文开始前，第一行先单独输出内部标签：
 [[VOICE_STYLE:style:intensity]]
+
+然后从第二行开始正常回复正文。内部标签必须出现在正文之前，不要放到正文末尾。
 
 style 只能是：
 - normal：普通、自然、日常
@@ -13404,6 +13407,8 @@ app.post(
                 channel,
 
                 call_session_id,
+
+                stream_voice,
 
             } =
                 req.body
@@ -14086,6 +14091,853 @@ app.post(
                 estimateTokens(
                     modelInput
                 )
+
+
+            // ==================================================
+            // v4.3 真流式语音通话
+            //
+            // 只有 App 内通话显式传 stream_voice=true 才进入这里。
+            // 普通文字聊天仍然完全走下面原来的 JSON /api/chat，
+            // 避免改变已经稳定的核心聊天路径。
+            //
+            // 协议：application/x-ndjson
+            // 每行一个 JSON：
+            // - voice_style：隐藏语气标签已解析
+            // - sentence：模型刚生成完的一小句，可立即去做 TTS
+            // - done：本轮完整保存完成
+            // - error：流式处理失败
+            // ==================================================
+
+            const wantsVoiceStream =
+                messageChannel ===
+                    'voice' &&
+                stream_voice ===
+                    true
+
+
+            if (
+                wantsVoiceStream
+            ) {
+
+                res.status(
+                    200
+                )
+
+                res.setHeader(
+                    'Content-Type',
+                    'application/x-ndjson; charset=utf-8'
+                )
+
+                res.setHeader(
+                    'Cache-Control',
+                    'no-cache, no-store, no-transform'
+                )
+
+                res.setHeader(
+                    'Connection',
+                    'keep-alive'
+                )
+
+                // 对部分反向代理明确关闭缓冲。
+                res.setHeader(
+                    'X-Accel-Buffering',
+                    'no'
+                )
+
+                if (
+                    typeof res
+                        .flushHeaders ===
+                        'function'
+                ) {
+                    res.flushHeaders()
+                }
+
+
+                const streamAbortController =
+                    new AbortController()
+
+                let clientDisconnected =
+                    false
+
+                const handleClientClose =
+                    () => {
+
+                        if (
+                            !res.writableEnded
+                        ) {
+
+                            clientDisconnected =
+                                true
+
+                            try {
+                                streamAbortController
+                                    .abort()
+                            } catch (
+                            error
+                            ) {
+                                console.debug(
+                                    '取消模型流式请求失败：',
+                                    error
+                                )
+                            }
+                        }
+                    }
+
+                res.on(
+                    'close',
+                    handleClientClose
+                )
+
+
+                const writeStreamEvent =
+                    (
+                        payload
+                    ) => {
+
+                        if (
+                            clientDisconnected ||
+                            res.writableEnded ||
+                            res.destroyed
+                        ) {
+                            return false
+                        }
+
+                        try {
+
+                            res.write(
+                                `${JSON.stringify(
+                                    payload
+                                )}\n`
+                            )
+
+                            return true
+
+                        } catch (
+                        error
+                        ) {
+
+                            console.debug(
+                                '写入通话流失败：',
+                                error
+                            )
+
+                            return false
+                        }
+                    }
+
+
+                let rawStreamReply =
+                    ''
+
+                let speechBuffer =
+                    ''
+
+                let emittedSpeechText =
+                    ''
+
+                let emittedSentenceCount =
+                    0
+
+                let streamCompletedNormally =
+                    false
+
+                let streamFailure =
+                    null
+
+                let currentVoiceStyle = {
+                    style:
+                        'normal',
+
+                    intensity:
+                        0.35,
+                }
+
+
+                const streamingVoiceMarkerPattern =
+                    /\[\[VOICE_STYLE:(normal|soft|playful|serious):([0-9]+(?:\.[0-9]+)?)\]\]/gi
+
+
+                const removeVoiceMarkersAndUpdateStyle =
+                    () => {
+
+                        streamingVoiceMarkerPattern
+                            .lastIndex =
+                            0
+
+                        speechBuffer =
+                            speechBuffer
+                                .replace(
+                                    streamingVoiceMarkerPattern,
+                                    (
+                                        fullMatch,
+                                        styleValue,
+                                        intensityValue
+                                    ) => {
+
+                                        const parsedIntensity =
+                                            Number(
+                                                intensityValue
+                                            )
+
+                                        currentVoiceStyle = {
+                                            style:
+                                                String(
+                                                    styleValue ||
+                                                    'normal'
+                                                )
+                                                    .trim()
+                                                    .toLowerCase(),
+
+                                            intensity:
+                                                Number.isFinite(
+                                                    parsedIntensity
+                                                )
+                                                    ? Number(
+                                                        Math.min(
+                                                            1,
+                                                            Math.max(
+                                                                0,
+                                                                parsedIntensity
+                                                            )
+                                                        )
+                                                            .toFixed(
+                                                                3
+                                                            )
+                                                    )
+                                                    : 0.35,
+                                        }
+
+                                        writeStreamEvent({
+                                            type:
+                                                'voice_style',
+
+                                            voice_style:
+                                                currentVoiceStyle,
+                                        })
+
+                                        return ''
+                                    }
+                                )
+                    }
+
+
+                const emitOneSpeechChunk =
+                    (
+                        value
+                    ) => {
+
+                        const cleanChunk =
+                            stripHermitIntegrityMarkers(
+                                String(
+                                    value ||
+                                    ''
+                                )
+                                    .replace(
+                                        streamingVoiceMarkerPattern,
+                                        ''
+                                    )
+                            )
+                                .trim()
+
+                        if (
+                            !cleanChunk
+                        ) {
+                            return
+                        }
+
+                        emittedSentenceCount +=
+                            1
+
+                        emittedSpeechText +=
+                            cleanChunk
+
+                        writeStreamEvent({
+                            type:
+                                'sentence',
+
+                            index:
+                                emittedSentenceCount,
+
+                            text:
+                                cleanChunk,
+
+                            voice_style: {
+                                ...currentVoiceStyle,
+                            },
+                        })
+                    }
+
+
+                const flushSpeechBuffer =
+                    (
+                        flushRemainder =
+                            false
+                    ) => {
+
+                        removeVoiceMarkersAndUpdateStyle()
+
+                        // 完整句号 / 问号 / 感叹号 / 分号 / 省略号 / 换行
+                        // 一出现，就立即把这一小句交给前端。
+                        // 不按逗号硬切，避免 TTS 语气变得碎。
+                        const sentencePattern =
+                            /^([\s\S]*?(?:[。！？!?；;]+[”’"'）】》」』]*|…{1,2}[”’"'）】》」』]*|\n+))/
+
+                        while (
+                            speechBuffer
+                        ) {
+
+                            const match =
+                                speechBuffer
+                                    .match(
+                                        sentencePattern
+                                    )
+
+                            if (!match) {
+                                break
+                            }
+
+                            const chunk =
+                                match[1]
+
+                            speechBuffer =
+                                speechBuffer
+                                    .slice(
+                                        chunk.length
+                                    )
+
+                            emitOneSpeechChunk(
+                                chunk
+                            )
+
+                            removeVoiceMarkersAndUpdateStyle()
+                        }
+
+
+                        if (
+                            flushRemainder
+                        ) {
+
+                            removeVoiceMarkersAndUpdateStyle()
+
+                            // 如果流最后还有一个没有句号的小短句，
+                            // 正常完成时也要把它说出来。
+                            // 未完成/被打断时不会走这里，避免念半句话。
+                            const remainder =
+                                speechBuffer
+                                    .replace(
+                                        /\[\[VOICE_STYLE:[^\]]*$/i,
+                                        ''
+                                    )
+                                    .trim()
+
+                            speechBuffer =
+                                ''
+
+                            if (
+                                remainder
+                            ) {
+                                emitOneSpeechChunk(
+                                    remainder
+                                )
+                            }
+                        }
+                    }
+
+
+                try {
+
+                    // ------------------------------------------
+                    // 先尝试真正的 Responses API streaming。
+                    // 如果兼容线路根本不支持 streaming，
+                    // 且一丁点正文都还没发出来，则自动退回
+                    // 原来的非流式模型调用，保证电话仍然能用。
+                    // ------------------------------------------
+
+                    try {
+
+                        const modelStream =
+                            await client
+                                .responses
+                                .create(
+                                    {
+                                        model:
+                                            'gpt-5.6-sol',
+
+                                        input:
+                                            modelInput,
+
+                                        stream:
+                                            true,
+                                    },
+                                    {
+                                        signal:
+                                            streamAbortController
+                                                .signal,
+                                    }
+                                )
+
+                        for await (
+                            const event
+                            of modelStream
+                        ) {
+
+                            if (
+                                clientDisconnected
+                            ) {
+                                break
+                            }
+
+                            if (
+                                event
+                                    ?.type ===
+                                    'response.output_text.delta' &&
+                                typeof event
+                                    ?.delta ===
+                                    'string'
+                            ) {
+
+                                rawStreamReply +=
+                                    event.delta
+
+                                speechBuffer +=
+                                    event.delta
+
+                                flushSpeechBuffer(
+                                    false
+                                )
+
+                                continue
+                            }
+
+
+                            if (
+                                event
+                                    ?.type ===
+                                    'error'
+                            ) {
+
+                                throw new Error(
+                                    event
+                                        ?.message ||
+                                    '模型流式输出失败'
+                                )
+                            }
+
+
+                            if (
+                                event
+                                    ?.type ===
+                                    'response.failed'
+                            ) {
+
+                                throw new Error(
+                                    event
+                                        ?.response
+                                        ?.error
+                                        ?.message ||
+                                    '模型流式输出失败'
+                                )
+                            }
+                        }
+
+
+                        if (
+                            !clientDisconnected
+                        ) {
+
+                            streamCompletedNormally =
+                                true
+
+                            flushSpeechBuffer(
+                                true
+                            )
+                        }
+
+                    } catch (
+                    streamingError
+                    ) {
+
+                        const aborted =
+                            clientDisconnected ||
+                            streamingError
+                                ?.name ===
+                                'AbortError'
+
+                        if (
+                            aborted
+                        ) {
+
+                            streamFailure =
+                                streamingError
+
+                        } else if (
+                            !rawStreamReply
+                                .trim() &&
+                            emittedSentenceCount ===
+                                0
+                        ) {
+
+                            console.warn(
+                                '模型 streaming 不可用，本轮语音通话自动退回非流式模型请求：',
+                                streamingError
+                                    ?.message ||
+                                streamingError
+                            )
+
+
+                            const fallbackResponse =
+                                await callModelWithRetry({
+
+                                    model:
+                                        'gpt-5.6-sol',
+
+                                    input:
+                                        modelInput,
+
+                                })
+
+
+                            rawStreamReply =
+                                typeof fallbackResponse
+                                    ?.output_text ===
+                                    'string'
+                                    ? fallbackResponse
+                                        .output_text
+                                        .trim()
+                                    : ''
+
+
+                            if (
+                                !rawStreamReply
+                            ) {
+
+                                throw new Error(
+                                    'AI 没有返回有效的文本回复'
+                                )
+                            }
+
+
+                            speechBuffer +=
+                                rawStreamReply
+
+                            streamCompletedNormally =
+                                true
+
+                            flushSpeechBuffer(
+                                true
+                            )
+
+                        } else {
+
+                            streamFailure =
+                                streamingError
+                        }
+                    }
+
+
+                    // ------------------------------------------
+                    // 正常完成：使用模型完整文本。
+                    // 被用户打断 / 流中途失败：只保存已经形成完整
+                    // 句子的部分，不把“半句话”写进长期聊天记忆。
+                    // ------------------------------------------
+
+                    let voiceReply =
+                        null
+
+                    if (
+                        streamCompletedNormally
+                    ) {
+
+                        const cleanedRawReply =
+                            stripHermitIntegrityMarkers(
+                                rawStreamReply
+                            )
+
+                        voiceReply =
+                            extractVoiceStyleFromReply(
+                                cleanedRawReply,
+                                messageChannel
+                            )
+
+                    } else if (
+                        emittedSpeechText
+                            .trim()
+                    ) {
+
+                        voiceReply = {
+                            reply:
+                                emittedSpeechText
+                                    .trim(),
+
+                            style:
+                                currentVoiceStyle
+                                    .style,
+
+                            intensity:
+                                currentVoiceStyle
+                                    .intensity,
+                        }
+                    }
+
+
+                    const reply =
+                        typeof voiceReply
+                            ?.reply ===
+                            'string'
+                            ? voiceReply
+                                .reply
+                                .trim()
+                            : ''
+
+
+                    let assistantMessage =
+                        null
+
+
+                    if (
+                        reply
+                    ) {
+
+                        const {
+                            data:
+                            savedAssistantMessage,
+
+                            error:
+                            assistantMessageError,
+                        } =
+                            await supabase
+                                .from(
+                                    'messages'
+                                )
+                                .insert([
+                                    {
+
+                                        user_id:
+                                            req.userId,
+
+                                        session_id:
+                                            sessionId,
+
+                                        role:
+                                            'assistant',
+
+                                        content:
+                                            reply,
+
+                                        visible:
+                                            true,
+
+                                        channel:
+                                            messageChannel,
+
+                                        call_session_id:
+                                            callSessionId,
+
+                                        voice_style:
+                                            voiceReply
+                                                .style,
+
+                                        voice_intensity:
+                                            voiceReply
+                                                .intensity,
+
+                                    },
+                                ])
+                                .select(
+                                    'id, session_id, role, content, created_at, visible'
+                                )
+                                .single()
+
+
+                        if (
+                            assistantMessageError
+                        ) {
+                            throw assistantMessageError
+                        }
+
+
+                        assistantMessage =
+                            savedAssistantMessage
+
+
+                        const {
+                            error:
+                            sessionUpdateError,
+                        } =
+                            await supabase
+                                .from(
+                                    'sessions'
+                                )
+                                .update({
+
+                                    updated_at:
+                                        new Date()
+                                            .toISOString(),
+
+                                })
+                                .eq(
+                                    'id',
+                                    sessionId
+                                )
+                                .eq(
+                                    'user_id',
+                                    req.userId
+                                )
+
+
+                        if (
+                            sessionUpdateError
+                        ) {
+
+                            console.error(
+                                '更新 session 时间失败：',
+                                sessionUpdateError
+                            )
+                        }
+                    }
+
+
+                    if (
+                        !clientDisconnected
+                    ) {
+
+                        if (
+                            reply
+                        ) {
+
+                            writeStreamEvent({
+
+                                type:
+                                    'done',
+
+                                ok:
+                                    true,
+
+                                session_id:
+                                    sessionId,
+
+                                reply,
+
+                                voice_style: {
+                                    style:
+                                        voiceReply
+                                            .style,
+
+                                    intensity:
+                                        voiceReply
+                                            .intensity,
+                                },
+
+                                estimated_tokens:
+                                    finalEstimatedTokens,
+
+                                compression,
+
+                                user_message:
+                                    userMessage,
+
+                                assistant_message:
+                                    assistantMessage,
+
+                                reminder:
+                                    reminderResult
+                                        .status ===
+                                        'created'
+                                        ? reminderResult
+                                            .reminder
+                                        : null,
+
+                                partial:
+                                    !streamCompletedNormally,
+
+                                stream_warning:
+                                    streamFailure
+                                        ?.message ||
+                                    null,
+                            })
+
+                        } else if (
+                            streamFailure
+                        ) {
+
+                            writeStreamEvent({
+                                type:
+                                    'error',
+
+                                error:
+                                    'AI 通话回复失败',
+
+                                detail:
+                                    streamFailure
+                                        ?.message ||
+                                    '模型流式输出失败',
+                            })
+
+                        } else {
+
+                            writeStreamEvent({
+                                type:
+                                    'error',
+
+                                error:
+                                    'AI 没有返回有效的文本回复',
+                            })
+                        }
+                    }
+
+
+                    // 与原 /api/chat 一样，记忆压缩放到响应后。
+                    scheduleMemoryCompression(
+                        sessionId,
+                        settings,
+                        req.userId
+                    )
+
+                } catch (
+                streamingRouteError
+                ) {
+
+                    console.error(
+                        'AI 流式通话处理失败：',
+                        streamingRouteError
+                    )
+
+                    if (
+                        !clientDisconnected
+                    ) {
+
+                        writeStreamEvent({
+                            type:
+                                'error',
+
+                            error:
+                                'AI 通话回复失败',
+
+                            detail:
+                                streamingRouteError
+                                    ?.message ||
+                                '流式通话处理失败',
+                        })
+                    }
+
+                } finally {
+
+                    res.off(
+                        'close',
+                        handleClientClose
+                    )
+
+                    if (
+                        !clientDisconnected &&
+                        !res.writableEnded
+                    ) {
+                        res.end()
+                    }
+                }
+
+
+                return
+            }
 
 
             const response =
