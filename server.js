@@ -12545,6 +12545,161 @@ app.get(
 
 
 // ======================================================
+// 语音通话：隐藏语气标签
+//
+// 只在 channel=voice 时要求模型在回复末尾追加：
+// [[VOICE_STYLE:soft:0.35]]
+//
+// 后端会在保存和返回前剥掉标签，用户看不到。
+// ======================================================
+
+function buildVoiceStyleReplyContext(
+    messageChannel
+) {
+
+    if (
+        messageChannel !==
+            'voice'
+    ) {
+        return ''
+    }
+
+    return `【语音通话语气控制：仅供系统读取，不向用户展示】
+这一轮来自 App 内语音通话。
+
+先像平常一样自然回复用户，保持原有角色、人设、记忆、剧情、亲密程度和短句聊天风格。
+下面只决定“这一句话怎么说”，不要因为语气标签要求改变回答内容。
+
+回复正文结束后，最后单独追加一行内部标签：
+[[VOICE_STYLE:style:intensity]]
+
+style 只能是：
+- normal：普通、自然、日常
+- soft：温柔、安抚、低声、体贴
+- playful：轻松、逗弄、带一点笑意
+- serious：认真、郑重、专注
+
+intensity 必须是 0 到 1 之间的小数，表示这种语气的明显程度。
+一般建议 0.20～0.65；除非情绪非常明确，不要轻易超过 0.75。
+
+示例：
+[[VOICE_STYLE:soft:0.38]]
+
+不要解释这个标签，不要输出多个标签。`
+}
+
+
+function extractVoiceStyleFromReply(
+    rawReply,
+    messageChannel
+) {
+
+    const original =
+        typeof rawReply ===
+            'string'
+            ? rawReply.trim()
+            : ''
+
+    if (
+        messageChannel !==
+            'voice'
+    ) {
+
+        return {
+            reply:
+                original,
+
+            style:
+                null,
+
+            intensity:
+                null,
+        }
+    }
+
+    let style =
+        'normal'
+
+    let intensity =
+        0.35
+
+    const markerPattern =
+        /\[\[VOICE_STYLE:(normal|soft|playful|serious):([0-9]+(?:\.[0-9]+)?)\]\]/gi
+
+    let match = null
+    let currentMatch = null
+
+    while (
+        (
+            currentMatch =
+                markerPattern.exec(
+                    original
+                )
+        ) !==
+        null
+    ) {
+        match =
+            currentMatch
+    }
+
+    if (match) {
+
+        style =
+            String(
+                match[1] ||
+                'normal'
+            )
+                .trim()
+                .toLowerCase()
+
+        const parsedIntensity =
+            Number(
+                match[2]
+            )
+
+        if (
+            Number.isFinite(
+                parsedIntensity
+            )
+        ) {
+
+            intensity =
+                Math.min(
+                    1,
+                    Math.max(
+                        0,
+                        parsedIntensity
+                    )
+                )
+        }
+    }
+
+    const cleanReply =
+        original
+            .replace(
+                markerPattern,
+                ''
+            )
+            .trim()
+
+    return {
+        reply:
+            cleanReply,
+
+        style,
+
+        intensity:
+            Number(
+                intensity
+                    .toFixed(
+                        3
+                    )
+            ),
+    }
+}
+
+
+// ======================================================
 // 核心 AI 对话
 // POST /api/chat
 // ======================================================
@@ -12927,6 +13082,20 @@ app.post(
                             call_session_id:
                                 callSessionId,
 
+                            voice_style:
+                                messageChannel ===
+                                    'voice'
+                                    ? voiceReply
+                                        .style
+                                    : null,
+
+                            voice_intensity:
+                                messageChannel ===
+                                    'voice'
+                                    ? voiceReply
+                                        .intensity
+                                    : null,
+
                         },
                     ])
                     .select(
@@ -13233,11 +13402,24 @@ app.post(
             if (
                 intimacyReplyContext
             ) {
-                // 放在本轮模型输入的最后：
                 // 这是对用户“当前明确主动”的即时响应要求，
                 // 不改变普通聊天，也不改变长期人物设定。
                 modelInputSections.push(
                     intimacyReplyContext
+                )
+            }
+
+            const voiceStyleReplyContext =
+                buildVoiceStyleReplyContext(
+                    messageChannel
+                )
+
+            if (
+                voiceStyleReplyContext
+            ) {
+                // 只控制语音表达方式，不覆盖人物设定或记忆。
+                modelInputSections.push(
+                    voiceStyleReplyContext
                 )
             }
 
@@ -13265,7 +13447,7 @@ app.post(
 
                 })
 
-            const reply =
+            const rawReply =
                 typeof response
                     .output_text ===
                     'string'
@@ -13273,6 +13455,17 @@ app.post(
                         .output_text
                         .trim()
                     : ''
+
+
+            const voiceReply =
+                extractVoiceStyleFromReply(
+                    rawReply,
+                    messageChannel
+                )
+
+
+            const reply =
+                voiceReply.reply
 
 
             if (!reply) {
@@ -13382,6 +13575,18 @@ app.post(
                         sessionId,
 
                     reply,
+
+                    voice_style:
+                        messageChannel ===
+                            'voice'
+                            ? {
+                                style:
+                                    voiceReply.style,
+
+                                intensity:
+                                    voiceReply.intensity,
+                            }
+                            : null,
 
                     estimated_tokens:
                         finalEstimatedTokens,
