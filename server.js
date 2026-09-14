@@ -48,6 +48,72 @@ const MINIMAX_TTS_TIMEOUT_MS =
     )
 
 
+// ======================================================
+// 通话 STT（语音 -> 文字）
+//
+// 默认复用 AI_API_KEY / AI_BASE_URL，调用 OpenAI 兼容的
+// POST /audio/transcriptions。
+// 如果当前模型线路不提供 STT，可单独配置：
+// STT_API_KEY / STT_BASE_URL / STT_MODEL。
+// 也可以用 STT_TRANSCRIBE_URL 直接指定完整转写地址。
+// ======================================================
+
+const STT_API_KEY =
+    process.env.STT_API_KEY ||
+    process.env.AI_API_KEY ||
+    ''
+
+const STT_BASE_URL =
+    String(
+        process.env.STT_BASE_URL ||
+        process.env.AI_BASE_URL ||
+        ''
+    )
+        .trim()
+        .replace(/\/+$/, '')
+
+const STT_TRANSCRIBE_URL =
+    String(
+        process.env.STT_TRANSCRIBE_URL ||
+        (
+            STT_BASE_URL
+                ? `${STT_BASE_URL}/audio/transcriptions`
+                : ''
+        )
+    )
+        .trim()
+
+const STT_MODEL =
+    String(
+        process.env.STT_MODEL ||
+        'whisper-1'
+    )
+        .trim() ||
+    'whisper-1'
+
+const STT_LANGUAGE =
+    String(
+        process.env.STT_LANGUAGE ||
+        'zh'
+    )
+        .trim() ||
+    'zh'
+
+const STT_TIMEOUT_MS =
+    Math.min(
+        60000,
+        Math.max(
+            8000,
+            Number(
+                process.env.STT_TIMEOUT_MS
+            ) || 30000
+        )
+    )
+
+const STT_MAX_AUDIO_BYTES =
+    12 * 1024 * 1024
+
+
 app.use(cors())
 app.use(express.json({ limit: '1mb' }))
 
@@ -11955,6 +12021,507 @@ app.post('/api/voice-lab/preview',async(req,res)=>{
         res.status(200).send(audioBuffer)
     } catch(error) { console.error('Voice Lab 试听失败：',error); res.status(500).json({ok:false,error:'试听失败',detail:error.message}) }
 })
+
+// ======================================================
+// 通话 STT：MediaRecorder 音频 -> OpenAI 兼容转写接口
+// POST /api/calls/stt?call_session_id=123
+//
+// 前端直接发送 audio/* 二进制，不经过浏览器 SpeechRecognition。
+// 这样 Safari / iOS 只负责录音，真正的语音识别统一在后端完成。
+// ======================================================
+
+function getSttAudioUploadMeta(
+    contentType
+) {
+
+    const mimeType =
+        String(
+            contentType ||
+            'application/octet-stream'
+        )
+            .split(';')[0]
+            .trim()
+            .toLowerCase()
+
+    if (
+        mimeType ===
+            'audio/mp4' ||
+        mimeType ===
+            'audio/x-m4a'
+    ) {
+        return {
+            mimeType:
+                'audio/mp4',
+
+            filename:
+                'hermit-call.m4a',
+        }
+    }
+
+    if (
+        mimeType ===
+            'audio/webm'
+    ) {
+        return {
+            mimeType:
+                'audio/webm',
+
+            filename:
+                'hermit-call.webm',
+        }
+    }
+
+    if (
+        mimeType ===
+            'audio/ogg'
+    ) {
+        return {
+            mimeType:
+                'audio/ogg',
+
+            filename:
+                'hermit-call.ogg',
+        }
+    }
+
+    if (
+        mimeType ===
+            'audio/wav' ||
+        mimeType ===
+            'audio/x-wav'
+    ) {
+        return {
+            mimeType:
+                'audio/wav',
+
+            filename:
+                'hermit-call.wav',
+        }
+    }
+
+    if (
+        mimeType ===
+            'audio/mpeg' ||
+        mimeType ===
+            'audio/mp3'
+    ) {
+        return {
+            mimeType:
+                'audio/mpeg',
+
+            filename:
+                'hermit-call.mp3',
+        }
+    }
+
+    return {
+        mimeType:
+            mimeType ||
+            'application/octet-stream',
+
+        filename:
+            'hermit-call.audio',
+    }
+}
+
+
+function extractSttText(
+    data
+) {
+
+    const candidates = [
+        data?.text,
+        data?.transcript,
+        data?.result?.text,
+        data?.data?.text,
+        data?.data?.transcript,
+    ]
+
+    for (
+        const value of candidates
+    ) {
+
+        if (
+            typeof value ===
+                'string' &&
+            value.trim()
+        ) {
+            return value.trim()
+        }
+    }
+
+    return ''
+}
+
+
+async function transcribeCallAudio({
+    audioBuffer,
+    contentType,
+}) {
+
+    if (
+        !STT_API_KEY ||
+        !STT_TRANSCRIBE_URL
+    ) {
+
+        const error =
+            new Error(
+                'STT 尚未配置。请配置 STT_API_KEY / STT_BASE_URL，或确保现有 AI_API_KEY / AI_BASE_URL 支持 /audio/transcriptions。'
+            )
+
+        error.code =
+            'STT_NOT_CONFIGURED'
+
+        throw error
+    }
+
+    const uploadMeta =
+        getSttAudioUploadMeta(
+            contentType
+        )
+
+    const formData =
+        new FormData()
+
+    formData.append(
+        'model',
+        STT_MODEL
+    )
+
+    if (STT_LANGUAGE) {
+        formData.append(
+            'language',
+            STT_LANGUAGE
+        )
+    }
+
+    formData.append(
+        'file',
+        new Blob(
+            [audioBuffer],
+            {
+                type:
+                    uploadMeta.mimeType,
+            }
+        ),
+        uploadMeta.filename
+    )
+
+    const controller =
+        new AbortController()
+
+    const timeout =
+        setTimeout(
+            () =>
+                controller.abort(),
+            STT_TIMEOUT_MS
+        )
+
+    try {
+
+        const response =
+            await fetch(
+                STT_TRANSCRIBE_URL,
+                {
+                    method:
+                        'POST',
+
+                    headers: {
+                        Authorization:
+                            `Bearer ${STT_API_KEY}`,
+                    },
+
+                    body:
+                        formData,
+
+                    signal:
+                        controller.signal,
+                }
+            )
+
+        const rawText =
+            await response
+                .text()
+
+        let data =
+            null
+
+        try {
+            data =
+                rawText
+                    ? JSON.parse(
+                        rawText
+                    )
+                    : {}
+        } catch (
+        error
+        ) {
+            data = {
+                raw:
+                    rawText,
+            }
+        }
+
+        if (
+            !response.ok
+        ) {
+
+            const providerMessage =
+                data
+                    ?.error
+                    ?.message ||
+                data
+                    ?.message ||
+                data
+                    ?.detail ||
+                rawText ||
+                `STT HTTP ${response.status}`
+
+            const error =
+                new Error(
+                    String(
+                        providerMessage
+                    )
+                        .slice(
+                            0,
+                            800
+                        )
+                )
+
+            error.status =
+                response.status
+
+            throw error
+        }
+
+        const text =
+            extractSttText(
+                data
+            )
+
+        return {
+            text,
+        }
+
+    } finally {
+
+        clearTimeout(
+            timeout
+        )
+    }
+}
+
+
+app.post(
+    '/api/calls/stt',
+    express.raw({
+        type:
+            () => true,
+
+        limit:
+            '12mb',
+    }),
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+            const callSessionId =
+                parsePositiveSessionId(
+                    req.query
+                        ?.call_session_id
+                )
+
+            if (
+                !callSessionId
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '缺少有效的 call_session_id',
+                    })
+            }
+
+            const audioBuffer =
+                Buffer.isBuffer(
+                    req.body
+                )
+                    ? req.body
+                    : Buffer.alloc(0)
+
+            if (
+                audioBuffer.length ===
+                    0
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '没有收到录音数据',
+                    })
+            }
+
+            if (
+                audioBuffer.length >
+                    STT_MAX_AUDIO_BYTES
+            ) {
+
+                return res
+                    .status(413)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '单次录音过大，请说短一点再试',
+                    })
+            }
+
+            const {
+                data:
+                activeCall,
+
+                error:
+                activeCallError,
+            } =
+                await supabase
+                    .from(
+                        'call_sessions'
+                    )
+                    .select(
+                        'id, user_id, session_id, ended_at'
+                    )
+                    .eq(
+                        'id',
+                        callSessionId
+                    )
+                    .eq(
+                        'user_id',
+                        req.userId
+                    )
+                    .is(
+                        'ended_at',
+                        null
+                    )
+                    .maybeSingle()
+
+            if (
+                activeCallError
+            ) {
+                throw activeCallError
+            }
+
+            if (
+                !activeCall
+            ) {
+
+                return res
+                    .status(409)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '当前通话已经结束',
+                    })
+            }
+
+            const {
+                text,
+            } =
+                await transcribeCallAudio({
+                    audioBuffer,
+
+                    contentType:
+                        req.headers[
+                            'content-type'
+                        ] ||
+                        'application/octet-stream',
+                })
+
+            res.setHeader(
+                'Cache-Control',
+                'no-store'
+            )
+
+            res.setHeader(
+                'X-Hermit-STT-Model',
+                STT_MODEL
+            )
+
+            return res
+                .status(200)
+                .json({
+                    ok:
+                        true,
+
+                    text,
+                })
+
+        } catch (
+        error
+        ) {
+
+            const timeout =
+                error
+                    ?.name ===
+                    'AbortError'
+
+            const notConfigured =
+                error
+                    ?.code ===
+                    'STT_NOT_CONFIGURED'
+
+            console.error(
+                '通话 STT 失败：',
+                error
+            )
+
+            return res
+                .status(
+                    notConfigured
+                        ? 503
+                        : timeout
+                            ? 504
+                            : 502
+                )
+                .json({
+                    ok:
+                        false,
+
+                    error:
+                        notConfigured
+                            ? '语音识别服务尚未配置'
+                            : timeout
+                                ? '语音识别超时'
+                                : '语音识别暂时不可用',
+
+                    detail:
+                        error.message,
+                })
+        }
+    }
+)
+
 
 // ======================================================
 // 开始一次 App 内通话
