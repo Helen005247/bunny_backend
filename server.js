@@ -3671,12 +3671,6 @@ async function runTavilySearch(
 
     try {
 
-        const voiceModify =
-            buildMiniMaxVoiceModify({
-                voiceStyle,
-                voicePreset,
-            })
-
         const response =
             await fetch(
                 'https://api.tavily.com/search',
@@ -11541,6 +11535,12 @@ async function synthesizeMiniMaxSpeech({
         )
 
     try {
+
+        const voiceModify =
+            buildMiniMaxVoiceModify({
+                voiceStyle,
+                voicePreset,
+            })
 
         const response =
             await fetch(
