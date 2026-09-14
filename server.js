@@ -2821,44 +2821,58 @@ async function getSessionOwnerId(
 // ======================================================
 
 async function getVisibleMessages(
-    sessionId
+    sessionId,
+    userId = null
 ) {
+
+    let query =
+        supabase
+            .from('messages')
+            .select(
+                'id, session_id, role, content, created_at, visible'
+            )
+            .eq(
+                'session_id',
+                sessionId
+            )
+            .eq(
+                'visible',
+                true
+            )
+            .in(
+                'role',
+                [
+                    'user',
+                    'assistant',
+                ]
+            )
+
+    // 额外按当前登录用户隔离，避免任何情况下跨账号读取消息。
+    if (userId) {
+        query =
+            query.eq(
+                'user_id',
+                userId
+            )
+    }
 
     const {
         data,
         error,
-    } = await supabase
-        .from('messages')
-        .select(
-            'id, session_id, role, content, created_at, visible'
-        )
-        .eq(
-            'session_id',
-            sessionId
-        )
-        .eq(
-            'visible',
-            true
-        )
-        .in(
-            'role',
-            [
-                'user',
-                'assistant',
-            ]
-        )
-        .order(
-            'created_at',
-            {
-                ascending: true,
-            }
-        )
-        .order(
-            'id',
-            {
-                ascending: true,
-            }
-        )
+    } =
+        await query
+            .order(
+                'created_at',
+                {
+                    ascending: true,
+                }
+            )
+            .order(
+                'id',
+                {
+                    ascending: true,
+                }
+            )
 
     if (error) {
         throw error
@@ -7836,7 +7850,8 @@ function getMaxHistoryMessages(
 
 async function getRecentVisibleMessages(
     sessionId,
-    settings
+    settings,
+    userId = null
 ) {
 
     const maxHistoryMessages =
@@ -7844,44 +7859,57 @@ async function getRecentVisibleMessages(
             settings
         )
 
+    let query =
+        supabase
+            .from('messages')
+            .select(
+                'id, role, content, created_at'
+            )
+            .eq(
+                'session_id',
+                sessionId
+            )
+            .eq(
+                'visible',
+                true
+            )
+            .in(
+                'role',
+                [
+                    'user',
+                    'assistant',
+                ]
+            )
+
+    // 所有聊天上下文优先绑定当前登录用户。
+    if (userId) {
+        query =
+            query.eq(
+                'user_id',
+                userId
+            )
+    }
+
     const {
         data,
         error,
-    } = await supabase
-        .from('messages')
-        .select(
-            'id, role, content, created_at'
-        )
-        .eq(
-            'session_id',
-            sessionId
-        )
-        .eq(
-            'visible',
-            true
-        )
-        .in(
-            'role',
-            [
-                'user',
-                'assistant',
-            ]
-        )
-        .order(
-            'created_at',
-            {
-                ascending: false,
-            }
-        )
-        .order(
-            'id',
-            {
-                ascending: false,
-            }
-        )
-        .limit(
-            maxHistoryMessages
-        )
+    } =
+        await query
+            .order(
+                'created_at',
+                {
+                    ascending: false,
+                }
+            )
+            .order(
+                'id',
+                {
+                    ascending: false,
+                }
+            )
+            .limit(
+                maxHistoryMessages
+            )
 
     if (error) {
         throw error
@@ -7929,16 +7957,17 @@ async function compressMemoryIfNeeded(
 
     const visibleMessages =
         await getVisibleMessages(
-            sessionId
+            sessionId,
+            userId
         )
 
-    const compressThreshold =
+    const configuredCompressThreshold =
         Number(
             settings
                 ?.compress_threshold
         ) || 10000
 
-    const keepRounds =
+    const configuredKeepRounds =
         Math.max(
             1,
             Number(
@@ -7946,6 +7975,62 @@ async function compressMemoryIfNeeded(
                     ?.compress_keep_rounds
             ) || 6
         )
+
+    const hasPreviousMemory =
+        Boolean(
+            previousMemory
+                ?.id
+        )
+
+    // ==================================================
+    // 新账号“第一份长期记忆”更早建立
+    //
+    // 原逻辑只有旧聊天达到约 10000 Token 才会生成 memories。
+    // 所以新用户即使已经聊了不少，也可能一直没有任何 memory 行，
+    // 但最近聊天上下文仍会让角色“看起来像记得”。
+    //
+    // 现在：
+    // - 没有长期记忆的新用户：较早建立第一份真实长期记忆
+    // - 已经有长期记忆的用户：完全沿用原来的阈值与保留轮数
+    //
+    // 两个值都可选用 Render 环境变量覆盖：
+    // MEMORY_BOOTSTRAP_THRESHOLD_TOKENS
+    // MEMORY_BOOTSTRAP_KEEP_ROUNDS
+    // ==================================================
+
+    const bootstrapThreshold =
+        Math.min(
+            configuredCompressThreshold,
+            Math.max(
+                300,
+                Number(
+                    process.env
+                        .MEMORY_BOOTSTRAP_THRESHOLD_TOKENS
+                ) || 600
+            )
+        )
+
+    const bootstrapKeepRounds =
+        Math.min(
+            configuredKeepRounds,
+            Math.max(
+                1,
+                Number(
+                    process.env
+                        .MEMORY_BOOTSTRAP_KEEP_ROUNDS
+                ) || 2
+            )
+        )
+
+    const compressThreshold =
+        hasPreviousMemory
+            ? configuredCompressThreshold
+            : bootstrapThreshold
+
+    const keepRounds =
+        hasPreviousMemory
+            ? configuredKeepRounds
+            : bootstrapKeepRounds
 
     // ==================================================
     // 先区分：
@@ -8148,6 +8233,11 @@ ${oldConversationText}
                         type:
                             'conversation_compression',
 
+                        memory_mode:
+                            hasPreviousMemory
+                                ? 'incremental'
+                                : 'bootstrap',
+
                         source_session_id:
                             sessionId,
 
@@ -8216,7 +8306,7 @@ ${oldConversationText}
         )
 
     console.log(
-        `Session ${sessionId} 已执行记忆压缩：${compressedMessageIds.length} 条消息；待压缩旧消息 Token ${beforeTokens}；保留近期消息 Token ${afterTokens}`
+        `User ${userId} / Session ${sessionId} 已执行记忆压缩（${hasPreviousMemory ? 'incremental' : 'bootstrap'}）：${compressedMessageIds.length} 条消息；阈值 ${compressThreshold} Token；待压缩旧消息 Token ${beforeTokens}；保留近期消息 Token ${afterTokens}`
     )
 
     return {
@@ -9386,7 +9476,8 @@ async function buildProactiveInput(
     const recentMessages =
         await getRecentVisibleMessages(
             sessionId,
-            settings
+            settings,
+            userId
         )
 
 
@@ -10055,7 +10146,8 @@ async function generateAndSaveReminderMessage(reminder) {
     const recentMessages =
         await getRecentVisibleMessages(
             reminder.session_id,
-            settings
+            settings,
+            userId
         )
 
     const recentText =
@@ -13655,7 +13747,8 @@ app.get(
 
             const messages =
                 await getVisibleMessages(
-                    sessionId
+                    sessionId,
+                    req.userId
                 )
 
             const latestUserMessage =
@@ -14343,7 +14436,8 @@ app.post(
             const reminderRecentMessages =
                 await getRecentVisibleMessages(
                     sessionId,
-                    settings
+                    settings,
+                    req.userId
                 )
 
 
@@ -14457,7 +14551,8 @@ app.post(
             const history =
                 await getRecentVisibleMessages(
                     sessionId,
-                    settings
+                    settings,
+                    req.userId
                 )
 
 
