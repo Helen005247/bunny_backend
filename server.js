@@ -12863,6 +12863,134 @@ app.post(
 )
 
 
+function sanitizeVoiceTextBeforeTts(
+    value,
+    voicePresets = [],
+    agentKey = 'xingxing'
+) {
+
+    let text =
+        stripHermitIntegrityMarkers(
+            String(
+                value ||
+                ''
+            )
+        )
+            .trim()
+
+    if (!text) {
+        return ''
+    }
+
+    const parsed =
+        extractLooseVoiceStyleHeader(
+            text,
+            voicePresets,
+            agentKey
+        )
+
+    if (
+        parsed.matched
+    ) {
+        text =
+            parsed.reply
+                .trim()
+    }
+
+    text =
+        text.replace(
+            /\[\[\s*VOICE_STYLE\s*:\s*[a-zA-Z0-9_-]{1,40}\s*:\s*(?:0(?:\.\d+)?|1(?:\.0+)?)\s*\]\]/gi,
+            ''
+        )
+            .trim()
+
+    const enabledKeys =
+        new Set(
+            enabledVoicePresets(
+                voicePresets,
+                agentKey
+            )
+                .map(
+                    (
+                        item
+                    ) =>
+                        item.style_key
+                )
+        )
+
+    const lines =
+        text.split(
+            /\r?\n/
+        )
+
+    while (
+        lines.length >
+            0
+    ) {
+
+        const first =
+            String(
+                lines[0] ||
+                ''
+            )
+                .trim()
+                .replace(
+                    /^`+|`+$/g,
+                    ''
+                )
+                .trim()
+
+        const normalized =
+            normalizeVoiceStyleKey(
+                first
+            )
+
+        if (
+            enabledKeys.has(
+                normalized
+            )
+        ) {
+            lines.shift()
+
+            if (
+                lines.length >
+                    0 &&
+                /^(0(?:\.\d+)?|1(?:\.0+)?)$/
+                    .test(
+                        String(
+                            lines[0] ||
+                            ''
+                        )
+                            .trim()
+                    )
+            ) {
+                lines.shift()
+            }
+
+            continue
+        }
+
+        if (
+            /^(0(?:\.\d+)?|1(?:\.0+)?)$/
+                .test(
+                    first
+                )
+        ) {
+            lines.shift()
+            continue
+        }
+
+        break
+    }
+
+    return lines
+        .join(
+            '\n'
+        )
+        .trim()
+}
+
+
 // ======================================================
 // MiniMax TTS
 // POST /api/calls/tts
@@ -12894,7 +13022,7 @@ app.post(
                         ?.call_session_id
                 )
 
-            const text =
+            let text =
                 typeof req.body
                     ?.text ===
                     'string'
@@ -13028,6 +13156,25 @@ app.post(
                         activeCall.agent_key
                     ),
                 ])
+
+            text =
+                sanitizeVoiceTextBeforeTts(
+                    text,
+                    voicePresets,
+                    activeCall.agent_key
+                )
+
+            if (
+                !text
+            ) {
+
+                // 这是被识别为隐藏 voice metadata 的内容。
+                // 204 明确告诉前端“这一段故意不播放”，
+                // 前端也不会再回退到浏览器 TTS。
+                return res
+                    .status(204)
+                    .end()
+            }
 
             const voicePreset =
                 resolveVoicePreset(
@@ -16034,6 +16181,30 @@ app.post(
                     true
 
 
+                const isStreamingVoiceStyleKey =
+                    (
+                        value
+                    ) => {
+
+                        const normalized =
+                            normalizeVoiceStyleKey(
+                                value
+                            )
+
+                        return enabledVoicePresets(
+                            voicePresets,
+                            callAgentKey || getCallAgentKey(req.user)
+                        )
+                            .some(
+                                (
+                                    item
+                                ) =>
+                                    item.style_key ===
+                                    normalized
+                            )
+                    }
+
+
                 const streamingVoiceMarkerPattern =
                     /\[\[\s*VOICE_STYLE\s*:\s*([a-zA-Z0-9_-]{1,40})\s*:\s*(0(?:\.\d+)?|1(?:\.0+)?)\s*\]\]/gi
 
@@ -16141,6 +16312,196 @@ app.post(
                                     looseHeader.reply
                             }
                         }
+                    }
+
+
+                const consumeOrHoldLeadingVoiceMetadata =
+                    (
+                        flushRemainder =
+                            false
+                    ) => {
+
+                        if (
+                            !voiceHeaderWindowOpen
+                        ) {
+                            return false
+                        }
+
+                        const source =
+                            String(
+                                speechBuffer ||
+                                ''
+                            )
+                                .replace(
+                                    /^\s+/,
+                                    ''
+                                )
+
+                        if (!source) {
+                            return false
+                        }
+
+                        // 完整的 [[VOICE_STYLE:...]] 已经由上面的
+                        // removeVoiceMarkersAndUpdateStyle() 消费。
+                        // 如果标签还只有半截，流式阶段必须继续等，
+                        // 绝不能把半截交给 TTS。
+                        if (
+                            /^\[\[\s*VOICE_STYLE\b/i
+                                .test(
+                                    source
+                                ) &&
+                            !/\]\]/
+                                .test(
+                                    source
+                                )
+                        ) {
+
+                            if (
+                                !flushRemainder
+                            ) {
+                                return true
+                            }
+
+                            speechBuffer =
+                                source
+                                    .replace(
+                                        /^\[\[\s*VOICE_STYLE[^\r\n]*/i,
+                                        ''
+                                    )
+                                    .replace(
+                                        /^\s+/,
+                                        ''
+                                    )
+
+                            return false
+                        }
+
+                        const firstLineMatch =
+                            source.match(
+                                /^([a-zA-Z][a-zA-Z0-9_-]{0,39})[ \t]*(\r?\n|$)/
+                            )
+
+                        if (
+                            !firstLineMatch ||
+                            !isStreamingVoiceStyleKey(
+                                firstLineMatch[1]
+                            )
+                        ) {
+                            return false
+                        }
+
+                        const styleKey =
+                            normalizeVoiceStyleKey(
+                                firstLineMatch[1]
+                            )
+
+                        const rest =
+                            source.slice(
+                                firstLineMatch[0]
+                                    .length
+                            )
+
+                        // 只有 style 一行已经出来，但 intensity 还没到：
+                        // 继续等。上一版的 bug 就在这里——它把这一行
+                        // 当普通 sentence 立刻送进了 MiniMax。
+                        if (
+                            !rest.trim()
+                        ) {
+
+                            if (
+                                !flushRemainder
+                            ) {
+                                return true
+                            }
+
+                            const preset =
+                                resolveVoicePreset(
+                                    voicePresets,
+                                    styleKey,
+                                    callAgentKey || getCallAgentKey(req.user)
+                                )
+
+                            applyStreamingVoiceStyle(
+                                styleKey,
+                                preset.default_intensity
+                            )
+
+                            speechBuffer =
+                                ''
+
+                            return false
+                        }
+
+                        const intensityLineMatch =
+                            rest.match(
+                                /^[ \t]*(0(?:\.\d+)?|1(?:\.0+)?)[ \t]*(\r?\n|$)/
+                            )
+
+                        if (
+                            intensityLineMatch
+                        ) {
+
+                            // 如果数字这一行还没有换行，模型可能还会继续
+                            // 输出更多小数位。流没结束时继续等。
+                            if (
+                                !intensityLineMatch[2] &&
+                                !flushRemainder
+                            ) {
+                                return true
+                            }
+
+                            applyStreamingVoiceStyle(
+                                styleKey,
+                                intensityLineMatch[1]
+                            )
+
+                            speechBuffer =
+                                rest
+                                    .slice(
+                                        intensityLineMatch[0]
+                                            .length
+                                    )
+                                    .replace(
+                                        /^\s+/,
+                                        ''
+                                    )
+
+                            return false
+                        }
+
+                        // 第二行看起来仍是尚未完成的 0~1 小数，也继续等。
+                        if (
+                            !flushRemainder &&
+                            /^[ \t]*(?:0(?:\.\d*)?|1(?:\.0*)?)[ \t]*$/
+                                .test(
+                                    rest
+                                )
+                        ) {
+                            return true
+                        }
+
+                        // 如果兼容模型只输出 style、没输出 intensity，
+                        // 也绝不念 style；使用该状态的默认强度并丢掉首行。
+                        const preset =
+                            resolveVoicePreset(
+                                voicePresets,
+                                styleKey,
+                                callAgentKey || getCallAgentKey(req.user)
+                            )
+
+                        applyStreamingVoiceStyle(
+                            styleKey,
+                            preset.default_intensity
+                        )
+
+                        speechBuffer =
+                            rest
+                                .replace(
+                                    /^\s+/,
+                                    ''
+                                )
+
+                        return false
                     }
 
 
@@ -16427,6 +16788,18 @@ app.post(
                             false
                     ) => {
 
+                        removeVoiceMarkersAndUpdateStyle()
+
+                        if (
+                            consumeOrHoldLeadingVoiceMetadata(
+                                flushRemainder
+                            )
+                        ) {
+                            return
+                        }
+
+                        // 消费 loose 控制头以后再跑一次严格标签清理，
+                        // 防止兼容线路把两种格式混在一起。
                         removeVoiceMarkersAndUpdateStyle()
 
                         // 强边界优先：句号 / 问号 / 感叹号 / 分号 / 省略号 / 换行。
