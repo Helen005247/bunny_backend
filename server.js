@@ -50,68 +50,69 @@ const MINIMAX_TTS_TIMEOUT_MS =
 
 // ======================================================
 // 通话 STT（语音 -> 文字）
+// 腾讯云 ASR：一句话识别 SentenceRecognition
 //
-// 默认复用 AI_API_KEY / AI_BASE_URL，调用 OpenAI 兼容的
-// POST /audio/transcriptions。
-// 如果当前模型线路不提供 STT，可单独配置：
-// STT_API_KEY / STT_BASE_URL / STT_MODEL。
-// 也可以用 STT_TRANSCRIBE_URL 直接指定完整转写地址。
+// Render 只需要：
+// TENCENT_SECRET_ID
+// TENCENT_SECRET_KEY
+//
+// 可选：TENCENT_ASR_ENGINE（默认 16k_zh）
+// 不再复用 AI_API_KEY / AI_BASE_URL 做语音识别。
 // ======================================================
 
-const STT_API_KEY =
-    process.env.STT_API_KEY ||
-    process.env.AI_API_KEY ||
-    ''
-
-const STT_BASE_URL =
+const TENCENT_SECRET_ID =
     String(
-        process.env.STT_BASE_URL ||
-        process.env.AI_BASE_URL ||
+        process.env.TENCENT_SECRET_ID ||
         ''
     )
         .trim()
-        .replace(/\/+$/, '')
 
-const STT_TRANSCRIBE_URL =
+const TENCENT_SECRET_KEY =
     String(
-        process.env.STT_TRANSCRIBE_URL ||
-        (
-            STT_BASE_URL
-                ? `${STT_BASE_URL}/audio/transcriptions`
-                : ''
-        )
+        process.env.TENCENT_SECRET_KEY ||
+        ''
     )
         .trim()
 
-const STT_MODEL =
+const TENCENT_ASR_HOST =
+    'asr.tencentcloudapi.com'
+
+const TENCENT_ASR_ENDPOINT =
+    `https://${TENCENT_ASR_HOST}`
+
+const TENCENT_ASR_SERVICE =
+    'asr'
+
+const TENCENT_ASR_ACTION =
+    'SentenceRecognition'
+
+const TENCENT_ASR_VERSION =
+    '2019-06-14'
+
+const TENCENT_ASR_ENGINE =
     String(
-        process.env.STT_MODEL ||
-        'whisper-1'
+        process.env.TENCENT_ASR_ENGINE ||
+        '16k_zh'
     )
         .trim() ||
-    'whisper-1'
+    '16k_zh'
 
-const STT_LANGUAGE =
-    String(
-        process.env.STT_LANGUAGE ||
-        'zh'
-    )
-        .trim() ||
-    'zh'
-
-const STT_TIMEOUT_MS =
+const TENCENT_ASR_TIMEOUT_MS =
     Math.min(
         60000,
         Math.max(
             8000,
             Number(
-                process.env.STT_TIMEOUT_MS
+                process.env.TENCENT_ASR_TIMEOUT_MS
             ) || 30000
         )
     )
 
-const STT_MAX_AUDIO_BYTES =
-    12 * 1024 * 1024
+// 腾讯云一句话识别要求 Base64 后音频不超过 3MB。
+// 前端 WebM 会先转成 16kHz / mono / PCM16 WAV，
+// 22 秒语音通常远低于这个限制。
+const TENCENT_ASR_MAX_AUDIO_BYTES =
+    2 * 1024 * 1024
 
 
 app.use(cors())
@@ -12023,14 +12024,15 @@ app.post('/api/voice-lab/preview',async(req,res)=>{
 })
 
 // ======================================================
-// 通话 STT：MediaRecorder 音频 -> OpenAI 兼容转写接口
+// 通话 STT：MediaRecorder 音频 -> 腾讯云一句话识别
 // POST /api/calls/stt?call_session_id=123
 //
-// 前端直接发送 audio/* 二进制，不经过浏览器 SpeechRecognition。
-// 这样 Safari / iOS 只负责录音，真正的语音识别统一在后端完成。
+// iPhone / Safari 可直接上传 m4a(mp4)。
+// Android / Chromium 常见的 webm 会由前端先转换成
+// 16kHz、单声道、PCM16 WAV，再发到这里。
 // ======================================================
 
-function getSttAudioUploadMeta(
+function getTencentSttVoiceFormat(
     contentType
 ) {
 
@@ -12047,56 +12049,29 @@ function getSttAudioUploadMeta(
         mimeType ===
             'audio/mp4' ||
         mimeType ===
-            'audio/x-m4a'
-    ) {
-        return {
-            mimeType:
-                'audio/mp4',
-
-            filename:
-                'hermit-call.m4a',
-        }
-    }
-
-    if (
+            'audio/x-m4a' ||
         mimeType ===
-            'audio/webm'
+            'audio/m4a'
     ) {
-        return {
-            mimeType:
-                'audio/webm',
-
-            filename:
-                'hermit-call.webm',
-        }
+        return 'm4a'
     }
 
     if (
         mimeType ===
             'audio/ogg'
     ) {
-        return {
-            mimeType:
-                'audio/ogg',
-
-            filename:
-                'hermit-call.ogg',
-        }
+        return 'ogg-opus'
     }
 
     if (
         mimeType ===
             'audio/wav' ||
         mimeType ===
-            'audio/x-wav'
+            'audio/x-wav' ||
+        mimeType ===
+            'audio/wave'
     ) {
-        return {
-            mimeType:
-                'audio/wav',
-
-            filename:
-                'hermit-call.wav',
-        }
+        return 'wav'
     }
 
     if (
@@ -12105,52 +12080,175 @@ function getSttAudioUploadMeta(
         mimeType ===
             'audio/mp3'
     ) {
-        return {
-            mimeType:
-                'audio/mpeg',
-
-            filename:
-                'hermit-call.mp3',
-        }
+        return 'mp3'
     }
 
-    return {
-        mimeType:
-            mimeType ||
-            'application/octet-stream',
-
-        filename:
-            'hermit-call.audio',
+    if (
+        mimeType ===
+            'audio/aac' ||
+        mimeType ===
+            'audio/x-aac'
+    ) {
+        return 'aac'
     }
+
+    if (
+        mimeType ===
+            'audio/amr'
+    ) {
+        return 'amr'
+    }
+
+    if (
+        mimeType ===
+            'audio/pcm' ||
+        mimeType ===
+            'audio/l16'
+    ) {
+        return 'pcm'
+    }
+
+    const error =
+        new Error(
+            mimeType ===
+                'audio/webm'
+                ? '腾讯云一句话识别不接收 WebM。请部署配套新版 Call.jsx，让浏览器先把 WebM 转成 WAV。'
+                : `腾讯云一句话识别暂不支持当前录音格式：${mimeType || 'unknown'}`
+        )
+
+    error.code =
+        'STT_UNSUPPORTED_AUDIO_FORMAT'
+
+    throw error
 }
 
 
-function extractSttText(
-    data
+function sha256Hex(
+    value
 ) {
 
-    const candidates = [
-        data?.text,
-        data?.transcript,
-        data?.result?.text,
-        data?.data?.text,
-        data?.data?.transcript,
+    return crypto
+        .createHash(
+            'sha256'
+        )
+        .update(
+            value
+        )
+        .digest(
+            'hex'
+        )
+}
+
+
+function hmacSha256(
+    key,
+    value,
+    encoding =
+        null
+) {
+
+    const hmac =
+        crypto
+            .createHmac(
+                'sha256',
+                key
+            )
+            .update(
+                value
+            )
+
+    return encoding
+        ? hmac.digest(
+            encoding
+        )
+        : hmac.digest()
+}
+
+
+function buildTencentTc3Authorization({
+    payload,
+    timestamp,
+}) {
+
+    const date =
+        new Date(
+            timestamp *
+            1000
+        )
+            .toISOString()
+            .slice(
+                0,
+                10
+            )
+
+    const canonicalHeaders =
+        `content-type:application/json; charset=utf-8\nhost:${TENCENT_ASR_HOST}\n`
+
+    const signedHeaders =
+        'content-type;host'
+
+    const canonicalRequest = [
+        'POST',
+        '/',
+        '',
+        canonicalHeaders,
+        signedHeaders,
+        sha256Hex(
+            payload
+        ),
     ]
+        .join(
+            '\n'
+        )
 
-    for (
-        const value of candidates
-    ) {
+    const credentialScope =
+        `${date}/${TENCENT_ASR_SERVICE}/tc3_request`
 
-        if (
-            typeof value ===
-                'string' &&
-            value.trim()
-        ) {
-            return value.trim()
-        }
-    }
+    const stringToSign = [
+        'TC3-HMAC-SHA256',
+        String(
+            timestamp
+        ),
+        credentialScope,
+        sha256Hex(
+            canonicalRequest
+        ),
+    ]
+        .join(
+            '\n'
+        )
 
-    return ''
+    const secretDate =
+        hmacSha256(
+            `TC3${TENCENT_SECRET_KEY}`,
+            date
+        )
+
+    const secretService =
+        hmacSha256(
+            secretDate,
+            TENCENT_ASR_SERVICE
+        )
+
+    const secretSigning =
+        hmacSha256(
+            secretService,
+            'tc3_request'
+        )
+
+    const signature =
+        hmacSha256(
+            secretSigning,
+            stringToSign,
+            'hex'
+        )
+
+    return (
+        'TC3-HMAC-SHA256 ' +
+        `Credential=${TENCENT_SECRET_ID}/${credentialScope}, ` +
+        `SignedHeaders=${signedHeaders}, ` +
+        `Signature=${signature}`
+    )
 }
 
 
@@ -12160,13 +12258,13 @@ async function transcribeCallAudio({
 }) {
 
     if (
-        !STT_API_KEY ||
-        !STT_TRANSCRIBE_URL
+        !TENCENT_SECRET_ID ||
+        !TENCENT_SECRET_KEY
     ) {
 
         const error =
             new Error(
-                'STT 尚未配置。请配置 STT_API_KEY / STT_BASE_URL，或确保现有 AI_API_KEY / AI_BASE_URL 支持 /audio/transcriptions。'
+                '腾讯云 STT 尚未配置。请在 Render 添加 TENCENT_SECRET_ID 和 TENCENT_SECRET_KEY。'
             )
 
         error.code =
@@ -12175,37 +12273,68 @@ async function transcribeCallAudio({
         throw error
     }
 
-    const uploadMeta =
-        getSttAudioUploadMeta(
+    const voiceFormat =
+        getTencentSttVoiceFormat(
             contentType
         )
 
-    const formData =
-        new FormData()
+    const requestBody = {
+        ProjectId:
+            0,
 
-    formData.append(
-        'model',
-        STT_MODEL
-    )
+        SubServiceType:
+            2,
 
-    if (STT_LANGUAGE) {
-        formData.append(
-            'language',
-            STT_LANGUAGE
-        )
+        EngSerViceType:
+            TENCENT_ASR_ENGINE,
+
+        SourceType:
+            1,
+
+        VoiceFormat:
+            voiceFormat,
+
+        Data:
+            audioBuffer
+                .toString(
+                    'base64'
+                ),
+
+        DataLen:
+            audioBuffer.length,
+
+        WordInfo:
+            0,
+
+        FilterDirty:
+            0,
+
+        FilterModal:
+            0,
+
+        FilterPunc:
+            0,
+
+        ConvertNumMode:
+            1,
     }
 
-    formData.append(
-        'file',
-        new Blob(
-            [audioBuffer],
-            {
-                type:
-                    uploadMeta.mimeType,
-            }
-        ),
-        uploadMeta.filename
-    )
+    const payload =
+        JSON.stringify(
+            requestBody
+        )
+
+    const timestamp =
+        Math.floor(
+            Date.now() /
+            1000
+        )
+
+    const authorization =
+        buildTencentTc3Authorization({
+            payload,
+            timestamp,
+        })
 
     const controller =
         new AbortController()
@@ -12214,25 +12343,39 @@ async function transcribeCallAudio({
         setTimeout(
             () =>
                 controller.abort(),
-            STT_TIMEOUT_MS
+            TENCENT_ASR_TIMEOUT_MS
         )
 
     try {
 
         const response =
             await fetch(
-                STT_TRANSCRIBE_URL,
+                TENCENT_ASR_ENDPOINT,
                 {
                     method:
                         'POST',
 
                     headers: {
+                        'Content-Type':
+                            'application/json; charset=utf-8',
+
+                        'X-TC-Action':
+                            TENCENT_ASR_ACTION,
+
+                        'X-TC-Version':
+                            TENCENT_ASR_VERSION,
+
+                        'X-TC-Timestamp':
+                            String(
+                                timestamp
+                            ),
+
                         Authorization:
-                            `Bearer ${STT_API_KEY}`,
+                            authorization,
                     },
 
                     body:
-                        formData,
+                        payload,
 
                     signal:
                         controller.signal,
@@ -12262,45 +12405,69 @@ async function transcribeCallAudio({
             }
         }
 
+        const providerResponse =
+            data
+                ?.Response ||
+            {}
+
+        const providerError =
+            providerResponse
+                ?.Error ||
+            null
+
         if (
-            !response.ok
+            !response.ok ||
+            providerError
         ) {
 
+            const errorCode =
+                providerError
+                    ?.Code ||
+                `HTTP_${response.status}`
+
             const providerMessage =
-                data
-                    ?.error
-                    ?.message ||
+                providerError
+                    ?.Message ||
                 data
                     ?.message ||
                 data
                     ?.detail ||
                 rawText ||
-                `STT HTTP ${response.status}`
+                `Tencent ASR HTTP ${response.status}`
 
             const error =
                 new Error(
-                    String(
+                    `${errorCode}: ${String(
                         providerMessage
                     )
                         .slice(
                             0,
                             800
-                        )
+                        )}`
                 )
 
             error.status =
                 response.status
 
+            error.code =
+                errorCode
+
             throw error
         }
 
-        const text =
-            extractSttText(
-                data
-            )
-
         return {
-            text,
+            text:
+                String(
+                    providerResponse
+                        ?.Result ||
+                    ''
+                )
+                    .trim(),
+
+            requestId:
+                providerResponse
+                    ?.RequestId ||
+                '',
         }
 
     } finally {
@@ -12319,7 +12486,7 @@ app.post(
             () => true,
 
         limit:
-            '12mb',
+            '3mb',
     }),
     async (
         req,
@@ -12382,7 +12549,7 @@ app.post(
 
             if (
                 audioBuffer.length >
-                    STT_MAX_AUDIO_BYTES
+                    TENCENT_ASR_MAX_AUDIO_BYTES
             ) {
 
                 return res
@@ -12447,6 +12614,7 @@ app.post(
 
             const {
                 text,
+                requestId,
             } =
                 await transcribeCallAudio({
                     audioBuffer,
@@ -12464,8 +12632,13 @@ app.post(
             )
 
             res.setHeader(
+                'X-Hermit-STT-Provider',
+                'tencent-asr'
+            )
+
+            res.setHeader(
                 'X-Hermit-STT-Model',
-                STT_MODEL
+                TENCENT_ASR_ENGINE
             )
 
             return res
@@ -12475,6 +12648,9 @@ app.post(
                         true,
 
                     text,
+
+                    request_id:
+                        requestId,
                 })
 
         } catch (
@@ -12491,6 +12667,11 @@ app.post(
                     ?.code ===
                     'STT_NOT_CONFIGURED'
 
+            const unsupportedFormat =
+                error
+                    ?.code ===
+                    'STT_UNSUPPORTED_AUDIO_FORMAT'
+
             console.error(
                 '通话 STT 失败：',
                 error
@@ -12500,9 +12681,11 @@ app.post(
                 .status(
                     notConfigured
                         ? 503
-                        : timeout
-                            ? 504
-                            : 502
+                        : unsupportedFormat
+                            ? 415
+                            : timeout
+                                ? 504
+                                : 502
                 )
                 .json({
                     ok:
@@ -12510,10 +12693,12 @@ app.post(
 
                     error:
                         notConfigured
-                            ? '语音识别服务尚未配置'
-                            : timeout
-                                ? '语音识别超时'
-                                : '语音识别暂时不可用',
+                            ? '腾讯云语音识别服务尚未配置'
+                            : unsupportedFormat
+                                ? '当前录音格式不受腾讯云支持'
+                                : timeout
+                                    ? '腾讯云语音识别超时'
+                                    : '腾讯云语音识别暂时不可用',
 
                     detail:
                         error.message,
@@ -14527,6 +14712,8 @@ function buildVoiceStyleReplyContext(messageChannel,voicePresets=[],agentKey='xi
 回复正文前第一行输出：
 [[VOICE_STYLE:style:intensity]]
 然后从第二行开始正常回复。
+必须严格使用上面的双中括号格式；严禁把控制信息写成普通文本（例如“comforting 0.42”）。
+如果无法按格式输出，宁可省略控制标签，也只输出正常回复正文。
 
 当前可用 style 由 Voice Lab 动态配置，只能从以下启用状态中选择：
 ${lines}
@@ -14536,18 +14723,392 @@ intensity 必须是 0 到 1 之间的小数，表示状态明显程度；默认�
 不要解释标签，不要输出多个标签。`
 }
 
-function extractVoiceStyleFromReply(rawReply,messageChannel,voicePresets=[],agentKey='xingxing') {
-    const original=typeof rawReply==='string'?rawReply.trim():''
-    if (messageChannel!=='voice') return {reply:original,style:null,intensity:null}
-    const def=resolveVoicePreset(voicePresets,'normal',agentKey)
-    let style=def.style_key, intensity=def.default_intensity
-    const marker=/\[\[VOICE_STYLE:([a-zA-Z0-9_-]{1,40}):([0-9]+(?:\.[0-9]+)?)\]\]/gi
-    let m,last=null; while((m=marker.exec(original))!==null) last=m
-    if (last) {
-        const p=resolveVoicePreset(voicePresets,last[1],agentKey); style=p.style_key
-        const n=Number(last[2]); intensity=Number.isFinite(n)?Math.min(1,Math.max(0,n)):p.default_intensity
+function parseVoiceStyleControlValue(
+    styleValue,
+    intensityValue,
+    voicePresets = [],
+    agentKey = 'xingxing'
+) {
+
+    const normalizedStyle =
+        normalizeVoiceStyleKey(
+            styleValue
+        )
+
+    const enabled =
+        enabledVoicePresets(
+            voicePresets,
+            agentKey
+        )
+
+    const preset =
+        enabled.find(
+            (
+                item
+            ) =>
+                item.style_key ===
+                normalizedStyle
+        )
+
+    if (!preset) {
+        return null
     }
-    return {reply:original.replace(marker,'').trim(),style,intensity:Number(intensity.toFixed(3))}
+
+    const parsedIntensity =
+        Number(
+            intensityValue
+        )
+
+    return {
+        style:
+            preset.style_key,
+
+        intensity:
+            Number(
+                (
+                    Number.isFinite(
+                        parsedIntensity
+                    )
+                        ? Math.min(
+                            1,
+                            Math.max(
+                                0,
+                                parsedIntensity
+                            )
+                        )
+                        : preset.default_intensity
+                )
+                    .toFixed(
+                        3
+                    )
+            ),
+    }
+}
+
+
+function extractLooseVoiceStyleHeader(
+    rawReply,
+    voicePresets = [],
+    agentKey = 'xingxing',
+    {
+        requireTerminator =
+            false,
+    } = {}
+) {
+
+    const original =
+        typeof rawReply ===
+            'string'
+            ? rawReply
+            : ''
+
+    const leadingWhitespace =
+        original.match(
+            /^\s*/
+        )
+            ?.[0] ||
+        ''
+
+    const text =
+        original.slice(
+            leadingWhitespace.length
+        )
+
+    if (!text) {
+
+        return {
+            matched:
+                false,
+
+            reply:
+                original,
+        }
+    }
+
+    const singleLinePattern =
+        /^(?:VOICE[\s_-]*STYLE\s*[:=：]\s*)?([a-zA-Z0-9_-]{1,40})(?:\s*[:=：|,，]\s*|\s+)(0(?:\.\d+)?|1(?:\.0+)?)\s*$/
+
+    const firstLineMatch =
+        text.match(
+            /^([^\r\n]{1,160})(\r?\n|$)/
+        )
+
+    if (
+        firstLineMatch &&
+        (
+            firstLineMatch[2] ||
+            !requireTerminator
+        )
+    ) {
+
+        const firstLine =
+            firstLineMatch[1]
+                .trim()
+                .replace(
+                    /^`+|`+$/g,
+                    ''
+                )
+
+        const styleMatch =
+            firstLine.match(
+                singleLinePattern
+            )
+
+        if (styleMatch) {
+
+            const parsed =
+                parseVoiceStyleControlValue(
+                    styleMatch[1],
+                    styleMatch[2],
+                    voicePresets,
+                    agentKey
+                )
+
+            if (parsed) {
+
+                return {
+                    matched:
+                        true,
+
+                    reply:
+                        text
+                            .slice(
+                                firstLineMatch[0]
+                                    .length
+                            )
+                            .replace(
+                                /^\s+/,
+                                ''
+                            ),
+
+                    ...parsed,
+                }
+            }
+        }
+    }
+
+    const twoLineMatch =
+        text.match(
+            /^(?:VOICE[\s_-]*STYLE\s*[:=：]\s*)?([a-zA-Z0-9_-]{1,40})\s*\r?\n\s*(0(?:\.\d+)?|1(?:\.0+)?)\s*(\r?\n|$)/
+        )
+
+    if (
+        twoLineMatch &&
+        (
+            twoLineMatch[3] ||
+            !requireTerminator
+        )
+    ) {
+
+        const parsed =
+            parseVoiceStyleControlValue(
+                twoLineMatch[1],
+                twoLineMatch[2],
+                voicePresets,
+                agentKey
+            )
+
+        if (parsed) {
+
+            return {
+                matched:
+                    true,
+
+                reply:
+                    text
+                        .slice(
+                            twoLineMatch[0]
+                                .length
+                        )
+                        .replace(
+                            /^\s+/,
+                            ''
+                        ),
+
+                ...parsed,
+            }
+        }
+    }
+
+    // 兼容少数模型把“comforting 0.42”和正文挤在同一行的情况。
+    // 只有控制值后面紧接中文正文时才剥离，避免误删普通英文内容。
+    const inlineChineseMatch =
+        text.match(
+            /^(?:VOICE[\s_-]*STYLE\s*[:=：]\s*)?([a-zA-Z0-9_-]{1,40})(?:\s*[:=：|,，]\s*|\s+)(0(?:\.\d+)?|1(?:\.0+)?)\s+(?=[\u3400-\u9fff“”‘’（(])/
+        )
+
+    if (inlineChineseMatch) {
+
+        const parsed =
+            parseVoiceStyleControlValue(
+                inlineChineseMatch[1],
+                inlineChineseMatch[2],
+                voicePresets,
+                agentKey
+            )
+
+        if (parsed) {
+
+            return {
+                matched:
+                    true,
+
+                reply:
+                    text
+                        .slice(
+                            inlineChineseMatch[0]
+                                .length
+                        )
+                        .replace(
+                            /^\s+/,
+                            ''
+                        ),
+
+                ...parsed,
+            }
+        }
+    }
+
+    return {
+        matched:
+            false,
+
+        reply:
+            original,
+    }
+}
+
+
+function extractVoiceStyleFromReply(
+    rawReply,
+    messageChannel,
+    voicePresets = [],
+    agentKey = 'xingxing'
+) {
+
+    const original =
+        typeof rawReply ===
+            'string'
+            ? rawReply
+                .trim()
+            : ''
+
+    if (
+        messageChannel !==
+            'voice'
+    ) {
+
+        return {
+            reply:
+                original,
+
+            style:
+                null,
+
+            intensity:
+                null,
+
+            matched:
+                false,
+        }
+    }
+
+    const def =
+        resolveVoicePreset(
+            voicePresets,
+            'normal',
+            agentKey
+        )
+
+    let style =
+        def.style_key
+
+    let intensity =
+        def.default_intensity
+
+    let matched =
+        false
+
+    const marker =
+        /\[\[\s*VOICE_STYLE\s*:\s*([a-zA-Z0-9_-]{1,40})\s*:\s*(0(?:\.\d+)?|1(?:\.0+)?)\s*\]\]/gi
+
+    let cleaned =
+        original.replace(
+            marker,
+            (
+                fullMatch,
+                styleValue,
+                intensityValue
+            ) => {
+
+                const parsed =
+                    parseVoiceStyleControlValue(
+                        styleValue,
+                        intensityValue,
+                        voicePresets,
+                        agentKey
+                    )
+
+                if (parsed) {
+
+                    matched =
+                        true
+
+                    style =
+                        parsed.style
+
+                    intensity =
+                        parsed.intensity
+                }
+
+                return ''
+            }
+        )
+            .trim()
+
+    const looseHeader =
+        extractLooseVoiceStyleHeader(
+            cleaned,
+            voicePresets,
+            agentKey
+        )
+
+    if (
+        looseHeader.matched
+    ) {
+
+        matched =
+            true
+
+        style =
+            looseHeader.style
+
+        intensity =
+            looseHeader.intensity
+
+        cleaned =
+            looseHeader.reply
+                .trim()
+    }
+
+    return {
+        reply:
+            cleaned,
+
+        style,
+
+        intensity:
+            Number(
+                Number(
+                    intensity
+                )
+                    .toFixed(
+                        3
+                    )
+            ),
+
+        matched,
+    }
 }
 
 
@@ -15467,9 +16028,60 @@ app.post(
                         currentVoicePreset.default_intensity,
                 }
 
+                // 只在第一段真正正文出现前，把类似
+                // “comforting 0.42” 的异常控制行当作隐藏元数据。
+                let voiceHeaderWindowOpen =
+                    true
+
 
                 const streamingVoiceMarkerPattern =
-                    /\[\[VOICE_STYLE:([a-zA-Z0-9_-]{1,40}):([0-9]+(?:\.[0-9]+)?)\]\]/gi
+                    /\[\[\s*VOICE_STYLE\s*:\s*([a-zA-Z0-9_-]{1,40})\s*:\s*(0(?:\.\d+)?|1(?:\.0+)?)\s*\]\]/gi
+
+
+                const applyStreamingVoiceStyle =
+                    (
+                        styleValue,
+                        intensityValue
+                    ) => {
+
+                        const parsed =
+                            parseVoiceStyleControlValue(
+                                styleValue,
+                                intensityValue,
+                                voicePresets,
+                                callAgentKey || getCallAgentKey(req.user)
+                            )
+
+                        if (!parsed) {
+                            return false
+                        }
+
+                        currentVoicePreset =
+                            resolveVoicePreset(
+                                voicePresets,
+                                parsed.style,
+                                callAgentKey || getCallAgentKey(req.user)
+                            )
+
+                        currentVoiceStyle = {
+                            style:
+                                parsed.style,
+
+                            intensity:
+                                parsed.intensity,
+                        }
+
+                        writeStreamEvent({
+                            type:
+                                'voice_style',
+
+                            voice_style: {
+                                ...currentVoiceStyle,
+                            },
+                        })
+
+                        return true
+                    }
 
 
                 const removeVoiceMarkersAndUpdateStyle =
@@ -15489,39 +16101,46 @@ app.post(
                                         intensityValue
                                     ) => {
 
-                                        const parsedIntensity =
-                                            Number(
-                                                intensityValue
-                                            )
-
-                                        currentVoicePreset =
-                                            resolveVoicePreset(
-                                                voicePresets,
-                                                styleValue,
-                                                callAgentKey || getCallAgentKey(req.user)
-                                            )
-
-                                        currentVoiceStyle = {
-                                            style:
-                                                currentVoicePreset.style_key,
-
-                                            intensity:
-                                                Number.isFinite(parsedIntensity)
-                                                    ? Number(Math.min(1,Math.max(0,parsedIntensity)).toFixed(3))
-                                                    : currentVoicePreset.default_intensity,
-                                        }
-
-                                        writeStreamEvent({
-                                            type:
-                                                'voice_style',
-
-                                            voice_style:
-                                                currentVoiceStyle,
-                                        })
+                                        applyStreamingVoiceStyle(
+                                            styleValue,
+                                            intensityValue
+                                        )
 
                                         return ''
                                     }
                                 )
+
+                        if (
+                            voiceHeaderWindowOpen
+                        ) {
+
+                            const looseHeader =
+                                extractLooseVoiceStyleHeader(
+                                    speechBuffer,
+                                    voicePresets,
+                                    callAgentKey || getCallAgentKey(req.user),
+                                    {
+                                        // 流还在继续时，不能因为只收到了
+                                        // “comforting 0.4” 就过早认定头部完成。
+                                        requireTerminator:
+                                            true,
+                                    }
+                                )
+
+                            if (
+                                looseHeader
+                                    .matched
+                            ) {
+
+                                applyStreamingVoiceStyle(
+                                    looseHeader.style,
+                                    looseHeader.intensity
+                                )
+
+                                speechBuffer =
+                                    looseHeader.reply
+                            }
+                        }
                     }
 
 
@@ -15726,12 +16345,41 @@ app.post(
                         value
                     ) => {
 
+                        let candidate =
+                            String(
+                                value ||
+                                ''
+                            )
+
+                        if (
+                            voiceHeaderWindowOpen
+                        ) {
+
+                            const looseHeader =
+                                extractLooseVoiceStyleHeader(
+                                    candidate,
+                                    voicePresets,
+                                    callAgentKey || getCallAgentKey(req.user)
+                                )
+
+                            if (
+                                looseHeader
+                                    .matched
+                            ) {
+
+                                applyStreamingVoiceStyle(
+                                    looseHeader.style,
+                                    looseHeader.intensity
+                                )
+
+                                candidate =
+                                    looseHeader.reply
+                            }
+                        }
+
                         const cleanChunk =
                             stripHermitIntegrityMarkers(
-                                String(
-                                    value ||
-                                    ''
-                                )
+                                candidate
                                     .replace(
                                         streamingVoiceMarkerPattern,
                                         ''
@@ -15744,6 +16392,11 @@ app.post(
                         ) {
                             return
                         }
+
+                        // 第一段真正正文一旦开始，后续同样的英文数字
+                        // 就当普通内容，避免误删用户真正需要听到的话。
+                        voiceHeaderWindowOpen =
+                            false
 
                         emittedSentenceCount +=
                             1
