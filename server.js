@@ -3671,6 +3671,12 @@ async function runTavilySearch(
 
     try {
 
+        const voiceModify =
+            buildMiniMaxVoiceModify({
+                voiceStyle,
+                voicePreset,
+            })
+
         const response =
             await fetch(
                 'https://api.tavily.com/search',
@@ -11285,7 +11291,12 @@ const FALLBACK_VOICE_PRESETS = [
 ].map(([style_key,display_name,prompt_hint,sort_order,default_intensity,speed_base,speed_intensity_delta,vol_base,vol_intensity_delta,pitch_base,pitch_intensity_delta])=>({
     style_key,display_name,prompt_hint,sort_order,default_intensity,speed_base,speed_intensity_delta,
     vol_base,vol_intensity_delta,pitch_base,pitch_intensity_delta,enabled:true,voice_id:null,tts_model:null,
-    tiny_merge_chars:3,long_clause_chars:28,comma_min_chunk_chars:14,extra_voice_setting:{}
+    tiny_merge_chars:3,long_clause_chars:28,comma_min_chunk_chars:14,
+    modify_pitch_base:0,modify_pitch_intensity_delta:0,
+    modify_intensity_base:0,modify_intensity_intensity_delta:0,
+    modify_timbre_base:0,modify_timbre_intensity_delta:0,
+    modify_sound_effect:null,
+    extra_voice_setting:{}
 }))
 
 function normalizeVoiceStyleKey(value) {
@@ -11319,6 +11330,24 @@ function normalizeVoicePresetRow(row, agentKey='xingxing') {
         tiny_merge_chars: Math.trunc(clampNumber(row?.tiny_merge_chars,0,20,3)),
         long_clause_chars: Math.trunc(clampNumber(row?.long_clause_chars,8,120,28)),
         comma_min_chunk_chars: Math.trunc(clampNumber(row?.comma_min_chunk_chars,4,80,14)),
+
+        // MiniMax top-level voice_modify.
+        // final value = base + intensity_delta * current state intensity
+        modify_pitch_base: clampNumber(row?.modify_pitch_base,-100,100,0),
+        modify_pitch_intensity_delta: clampNumber(row?.modify_pitch_intensity_delta,-100,100,0),
+
+        modify_intensity_base: clampNumber(row?.modify_intensity_base,-100,100,0),
+        modify_intensity_intensity_delta: clampNumber(row?.modify_intensity_intensity_delta,-100,100,0),
+
+        modify_timbre_base: clampNumber(row?.modify_timbre_base,-100,100,0),
+        modify_timbre_intensity_delta: clampNumber(row?.modify_timbre_intensity_delta,-100,100,0),
+
+        modify_sound_effect:
+            ['spacious_echo','auditorium_echo','lofi_telephone','robotic']
+                .includes(String(row?.modify_sound_effect||'').trim())
+                ? String(row.modify_sound_effect).trim()
+                : null,
+
         extra_voice_setting: normalizeExtraVoiceSetting(row?.extra_voice_setting),
     }
 }
@@ -11337,7 +11366,7 @@ async function loadVoicePresets(agentKey,{force=false}={}) {
     if (!force && cached && now-cached.loadedAt<VOICE_PRESET_CACHE_MS) return cached.presets
     try {
         const {data,error}=await supabase.from('voice_presets')
-            .select('id, agent_key, style_key, display_name, prompt_hint, enabled, sort_order, voice_id, tts_model, default_intensity, speed_base, speed_intensity_delta, vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta, tiny_merge_chars, long_clause_chars, comma_min_chunk_chars, extra_voice_setting')
+            .select('id, agent_key, style_key, display_name, prompt_hint, enabled, sort_order, voice_id, tts_model, default_intensity, speed_base, speed_intensity_delta, vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta, tiny_merge_chars, long_clause_chars, comma_min_chunk_chars, modify_pitch_base, modify_pitch_intensity_delta, modify_intensity_base, modify_intensity_intensity_delta, modify_timbre_base, modify_timbre_intensity_delta, modify_sound_effect, extra_voice_setting')
             .eq('agent_key',agent).order('sort_order',{ascending:true}).order('id',{ascending:true})
         if (error) throw error
         const presets=Array.isArray(data)&&data.length ? data.map(r=>normalizeVoicePresetRow(r,agent)) : fallbackVoicePresets(agent)
@@ -11370,6 +11399,98 @@ function buildMiniMaxVoiceSetting({voiceId,voiceStyle,voicePreset}) {
     const extra=normalizeExtraVoiceSetting(p.extra_voice_setting)
     delete extra.voice_id; delete extra.speed; delete extra.vol; delete extra.pitch
     return {...extra,voice_id:voiceId,speed:Number(speed.toFixed(3)),vol:Number(vol.toFixed(3)),pitch}
+}
+
+
+function buildMiniMaxVoiceModify({
+    voiceStyle,
+    voicePreset,
+}) {
+    const p=
+        voicePreset||
+        normalizeVoicePresetRow({
+            style_key:'normal'
+        })
+
+    const stateIntensity=
+        clampNumber(
+            voiceStyle?.intensity,
+            0,
+            1,
+            p.default_intensity
+        )
+
+    const pitch=
+        Math.round(
+            clampNumber(
+                p.modify_pitch_base +
+                p.modify_pitch_intensity_delta * stateIntensity,
+                -100,
+                100,
+                0
+            )
+        )
+
+    const intensity=
+        Math.round(
+            clampNumber(
+                p.modify_intensity_base +
+                p.modify_intensity_intensity_delta * stateIntensity,
+                -100,
+                100,
+                0
+            )
+        )
+
+    const timbre=
+        Math.round(
+            clampNumber(
+                p.modify_timbre_base +
+                p.modify_timbre_intensity_delta * stateIntensity,
+                -100,
+                100,
+                0
+            )
+        )
+
+    const soundEffect=
+        ['spacious_echo','auditorium_echo','lofi_telephone','robotic']
+            .includes(
+                String(
+                    p.modify_sound_effect||
+                    ''
+                )
+                    .trim()
+            )
+            ? String(
+                p.modify_sound_effect
+            )
+                .trim()
+            : ''
+
+    // Neutral settings are omitted entirely, so an existing custom/clone
+    // voice remains untouched unless the user explicitly changes voice_modify.
+    if (
+        pitch===0 &&
+        intensity===0 &&
+        timbre===0 &&
+        !soundEffect
+    ) {
+        return null
+    }
+
+    return {
+        pitch,
+        intensity,
+        timbre,
+        ...(soundEffect
+            ? {
+                sound_effects:
+                    soundEffect,
+            }
+            : {}
+        ),
+    }
 }
 
 
@@ -11460,6 +11581,14 @@ async function synthesizeMiniMaxSpeech({
                                     voiceStyle,
                                     voicePreset,
                                 }),
+
+                            ...(voiceModify
+                                ? {
+                                    voice_modify:
+                                        voiceModify,
+                                }
+                                : {}
+                            ),
 
                             audio_setting: {
                                 sample_rate:
@@ -11596,7 +11725,7 @@ async function synthesizeMiniMaxSpeech({
 // ======================================================
 // v5 Voice Lab 管理 API
 // ======================================================
-const VOICE_PRESET_SELECT='id, agent_key, style_key, display_name, prompt_hint, enabled, sort_order, voice_id, tts_model, default_intensity, speed_base, speed_intensity_delta, vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta, tiny_merge_chars, long_clause_chars, comma_min_chunk_chars, extra_voice_setting, created_at, updated_at'
+const VOICE_PRESET_SELECT='id, agent_key, style_key, display_name, prompt_hint, enabled, sort_order, voice_id, tts_model, default_intensity, speed_base, speed_intensity_delta, vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta, tiny_merge_chars, long_clause_chars, comma_min_chunk_chars, modify_pitch_base, modify_pitch_intensity_delta, modify_intensity_base, modify_intensity_intensity_delta, modify_timbre_base, modify_timbre_intensity_delta, modify_sound_effect, extra_voice_setting, created_at, updated_at'
 
 async function requireVoiceLabAdmin(req,res) {
     const {data,error}=await supabase.from('app_admins').select('user_id').eq('user_id',req.userId).maybeSingle()
