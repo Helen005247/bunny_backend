@@ -579,6 +579,117 @@ function isRetryableModelError(error) {
 }
 
 
+// ======================================================
+// 把模型/上游错误转换成前端可识别的稳定错误码
+// ======================================================
+
+function classifyChatRequestError(error) {
+
+    const status =
+        getModelErrorStatus(
+            error
+        )
+
+    const code =
+        getModelErrorCode(
+            error
+        )
+
+    const message =
+        String(
+            error?.message || ''
+        ).toLowerCase()
+
+    if (
+        isModelTimeoutError(
+            error
+        )
+    ) {
+
+        return {
+            httpStatus: 504,
+            code: 'AI_TIMEOUT',
+            message:
+                '回复超时，请稍后重试。',
+            retryable: true,
+        }
+    }
+
+    if (
+        status === 503 ||
+        status === 429 ||
+        code.includes(
+            'SERVER_IS_OVERLOADED'
+        ) ||
+        code.includes(
+            'OVERLOADED'
+        ) ||
+        message.includes(
+            'overloaded'
+        )
+    ) {
+
+        return {
+            httpStatus: 503,
+            code: 'UPSTREAM_BUSY',
+            message:
+                '当前模型线路繁忙，请稍后重试。',
+            retryable: true,
+        }
+    }
+
+    const networkCodes = [
+        'ECONNRESET',
+        'ECONNREFUSED',
+        'EAI_AGAIN',
+        'ENETUNREACH',
+        'UND_ERR_CONNECT_TIMEOUT',
+        'UND_ERR_HEADERS_TIMEOUT',
+        'UND_ERR_SOCKET',
+    ]
+
+    if (
+        networkCodes.includes(
+            code
+        ) ||
+        status === 408 ||
+        status === 502 ||
+        status === 504
+    ) {
+
+        return {
+            httpStatus: 502,
+            code: 'NETWORK_ERROR',
+            message:
+                '网络连接出现波动，请稍后重试。',
+            retryable: true,
+        }
+    }
+
+    if (
+        status !== null &&
+        status >= 500
+    ) {
+
+        return {
+            httpStatus: 502,
+            code: 'UPSTREAM_ERROR',
+            message:
+                '上游服务暂时不可用，请稍后重试。',
+            retryable: true,
+        }
+    }
+
+    return {
+        httpStatus: 500,
+        code: 'SERVER_ERROR',
+        message:
+            '消息处理失败，请稍后重试。',
+        retryable: false,
+    }
+}
+
+
 function stripHermitIntegrityMarkers(
     value
 ) {
@@ -16692,6 +16803,13 @@ app.post(
         res
     ) => {
 
+        // 只用于本次 /api/chat 错误恢复：
+        // 如果用户消息已经成功写入数据库，即使模型失败，
+        // 也把真实 message id 返回给前端，重试时复用这一条，
+        // 避免重复用户消息。
+        let persistedUserMessage =
+            null
+
         try {
 
             if (
@@ -16721,6 +16839,9 @@ app.post(
                 call_session_id,
 
                 stream_voice,
+
+                // 失败重试时复用已经保存的用户消息。
+                retry_user_message_id,
 
             } =
                 req.body
@@ -16781,6 +16902,55 @@ app.post(
 
                     })
             }
+
+            const hasRetryUserMessageId =
+                retry_user_message_id !==
+                    undefined &&
+                retry_user_message_id !==
+                    null &&
+                retry_user_message_id !==
+                    ''
+
+            const retryUserMessageId =
+                hasRetryUserMessageId
+                    ? parsePositiveSessionId(
+                        retry_user_message_id
+                    )
+                    : null
+
+            if (
+                hasRetryUserMessageId &&
+                !retryUserMessageId
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok: false,
+                        code:
+                            'INVALID_RETRY_MESSAGE',
+                        error:
+                            '无效的 retry_user_message_id',
+                    })
+            }
+
+            if (
+                retryUserMessageId &&
+                messageChannel !==
+                    'text'
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok: false,
+                        code:
+                            'INVALID_RETRY_MESSAGE',
+                        error:
+                            '只有文字聊天支持消息重试',
+                    })
+            }
+
 
             let callSessionId =
                 null
@@ -17034,55 +17204,314 @@ app.post(
 
 
             // ==================================================
-            // 保存真正的用户消息
+            // 保存 / 复用真正的用户消息
+            //
+            // 首次发送：正常 insert。
+            // 失败后重试：前端把 retry_user_message_id 传回来，
+            // 后端复用原来的那条用户消息，不再重复 insert。
             // ==================================================
 
-            const {
-                data:
-                userMessage,
-
-                error:
-                userMessageError,
-            } =
-                await supabase
-                    .from(
-                        'messages'
-                    )
-                    .insert([
-                        {
-
-                            user_id:
-                                req.userId,
-
-                            session_id:
-                                sessionId,
-
-                            role:
-                                'user',
-
-                            content:
-                                cleanMessage,
-
-                            visible:
-                                true,
-
-                            channel:
-                                messageChannel,
-
-                            call_session_id:
-                                callSessionId,
-
-                        },
-                    ])
-                    .select(
-                        'id, session_id, role, content, created_at, visible'
-                    )
-                    .single()
+            let userMessage =
+                null
 
             if (
-                userMessageError
+                retryUserMessageId
             ) {
-                throw userMessageError
+
+                const {
+                    data:
+                    existingUserMessage,
+
+                    error:
+                    existingUserMessageError,
+                } =
+                    await supabase
+                        .from(
+                            'messages'
+                        )
+                        .select(
+                            'id, session_id, role, content, created_at, visible, channel'
+                        )
+                        .eq(
+                            'id',
+                            retryUserMessageId
+                        )
+                        .eq(
+                            'user_id',
+                            req.userId
+                        )
+                        .eq(
+                            'session_id',
+                            sessionId
+                        )
+                        .eq(
+                            'role',
+                            'user'
+                        )
+                        .eq(
+                            'channel',
+                            'text'
+                        )
+                        .maybeSingle()
+
+                if (
+                    existingUserMessageError
+                ) {
+                    throw existingUserMessageError
+                }
+
+                if (
+                    !existingUserMessage
+                ) {
+
+                    return res
+                        .status(404)
+                        .json({
+                            ok: false,
+                            code:
+                                'RETRY_MESSAGE_NOT_FOUND',
+                            error:
+                                '找不到需要重试的原消息，请重新发送。',
+                        })
+                }
+
+                if (
+                    String(
+                        existingUserMessage.content || ''
+                    ).trim() !==
+                    cleanMessage
+                ) {
+
+                    return res
+                        .status(409)
+                        .json({
+                            ok: false,
+                            code:
+                                'RETRY_MESSAGE_MISMATCH',
+                            error:
+                                '重试内容与原消息不一致，请重新发送。',
+                        })
+                }
+
+                userMessage =
+                    existingUserMessage
+
+                persistedUserMessage =
+                    userMessage
+
+
+                // --------------------------------------------------
+                // 如果上一轮其实已经成功保存 AI 回复，只是前端
+                // 因网络断开没有收到响应，那么直接把已有回复返回。
+                // 这样点击“重新发送”不会再生成第二条 AI 回复。
+                // --------------------------------------------------
+
+                const userCreatedAt =
+                    new Date(
+                        userMessage.created_at
+                    )
+
+                const recoveryWindowEnd =
+                    Number.isNaN(
+                        userCreatedAt.getTime()
+                    )
+                        ? null
+                        : new Date(
+                            userCreatedAt.getTime() +
+                            10 * 60 * 1000
+                        ).toISOString()
+
+                let followingMessagesQuery =
+                    supabase
+                        .from(
+                            'messages'
+                        )
+                        .select(
+                            'id, session_id, role, content, created_at, visible'
+                        )
+                        .eq(
+                            'user_id',
+                            req.userId
+                        )
+                        .eq(
+                            'session_id',
+                            sessionId
+                        )
+                        .eq(
+                            'visible',
+                            true
+                        )
+                        .eq(
+                            'channel',
+                            'text'
+                        )
+                        .gte(
+                            'created_at',
+                            userMessage.created_at
+                        )
+                        .in(
+                            'role',
+                            [
+                                'user',
+                                'assistant',
+                            ]
+                        )
+                        .order(
+                            'created_at',
+                            {
+                                ascending:
+                                    true,
+                            }
+                        )
+                        .order(
+                            'id',
+                            {
+                                ascending:
+                                    true,
+                            }
+                        )
+                        .limit(6)
+
+                if (
+                    recoveryWindowEnd
+                ) {
+
+                    followingMessagesQuery =
+                        followingMessagesQuery
+                            .lte(
+                                'created_at',
+                                recoveryWindowEnd
+                            )
+                }
+
+                const {
+                    data:
+                    followingMessages,
+
+                    error:
+                    followingMessagesError,
+                } =
+                    await followingMessagesQuery
+
+                if (
+                    followingMessagesError
+                ) {
+                    throw followingMessagesError
+                }
+
+                const nextVisibleMessage =
+                    Array.isArray(
+                        followingMessages
+                    )
+                        ? followingMessages.find(
+                            (item) =>
+                                String(
+                                    item.id
+                                ) !==
+                                String(
+                                    userMessage.id
+                                )
+                        )
+                        : null
+
+                if (
+                    nextVisibleMessage?.role ===
+                    'assistant'
+                ) {
+
+                    return res
+                        .status(200)
+                        .json({
+                            ok: true,
+                            session_id:
+                                sessionId,
+                            reply:
+                                nextVisibleMessage.content ||
+                                '',
+                            voice_style:
+                                null,
+                            estimated_tokens:
+                                null,
+                            compression: {
+                                triggered:
+                                    false,
+                                reason:
+                                    'recovered_existing_reply',
+                                before_tokens:
+                                    null,
+                                after_tokens:
+                                    null,
+                                compressed_message_count:
+                                    0,
+                                memory_id:
+                                    null,
+                            },
+                            user_message:
+                                userMessage,
+                            assistant_message:
+                                nextVisibleMessage,
+                            reminder:
+                                null,
+                            recovered_existing_reply:
+                                true,
+                        })
+                }
+
+            } else {
+
+                const {
+                    data:
+                    insertedUserMessage,
+
+                    error:
+                    userMessageError,
+                } =
+                    await supabase
+                        .from(
+                            'messages'
+                        )
+                        .insert([
+                            {
+
+                                user_id:
+                                    req.userId,
+
+                                session_id:
+                                    sessionId,
+
+                                role:
+                                    'user',
+
+                                content:
+                                    cleanMessage,
+
+                                visible:
+                                    true,
+
+                                channel:
+                                    messageChannel,
+
+                                call_session_id:
+                                    callSessionId,
+
+                            },
+                        ])
+                        .select(
+                            'id, session_id, role, content, created_at, visible'
+                        )
+                        .single()
+
+                if (
+                    userMessageError
+                ) {
+                    throw userMessageError
+                }
+
+                userMessage =
+                    insertedUserMessage
+
+                persistedUserMessage =
+                    userMessage
             }
 
 
@@ -17143,7 +17572,70 @@ app.post(
             }
 
 
+            // 如果这是同一条用户消息的失败重试，先复用已经创建的提醒，
+            // 避免模型失败后点击“重新发送”导致重复 reminder。
             if (
+                retryUserMessageId
+            ) {
+
+                const {
+                    data:
+                    existingReminderRows,
+
+                    error:
+                    existingReminderError,
+                } =
+                    await supabase
+                        .from(
+                            'reminders'
+                        )
+                        .select('*')
+                        .eq(
+                            'user_id',
+                            req.userId
+                        )
+                        .eq(
+                            'source_message_id',
+                            userMessage.id
+                        )
+                        .order(
+                            'id',
+                            {
+                                ascending:
+                                    false,
+                            }
+                        )
+                        .limit(1)
+
+                if (
+                    existingReminderError
+                ) {
+
+                    console.warn(
+                        '重试时读取已有 reminder 失败，本轮继续：',
+                        existingReminderError?.message ||
+                        existingReminderError
+                    )
+
+                } else if (
+                    existingReminderRows?.[0]
+                ) {
+
+                    reminderResult = {
+                        status:
+                            'created',
+                        reminder:
+                            existingReminderRows[0],
+                        reused:
+                            true,
+                    }
+                }
+            }
+
+
+            if (
+                reminderResult.status ===
+                    'none' &&
                 shouldAnalyzeReminderIntent(
                     cleanMessage,
                     reminderRecentMessages
@@ -19040,18 +19532,70 @@ app.post(
                 error
             )
 
+            if (
+                res.headersSent
+            ) {
+
+                if (
+                    !res.writableEnded
+                ) {
+                    res.end()
+                }
+
+                return
+            }
+
+
+            const classifiedError =
+                classifyChatRequestError(
+                    error
+                )
+
+            const canRetrySafely =
+                Boolean(
+                    persistedUserMessage
+                ) ||
+                classifiedError
+                    .retryable
+
+
             res
-                .status(500)
+                .status(
+                    classifiedError
+                        .httpStatus
+                )
                 .json({
 
                     ok:
                         false,
 
+                    code:
+                        classifiedError
+                            .code,
+
                     error:
-                        'AI 对话处理失败',
+                        classifiedError
+                            .message,
 
                     detail:
-                        error.message,
+                        error?.message ||
+                        String(error),
+
+                    retryable:
+                        canRetrySafely,
+
+                    message_saved:
+                        Boolean(
+                            persistedUserMessage
+                        ),
+
+                    retry_user_message_id:
+                        persistedUserMessage
+                            ?.id ||
+                        null,
+
+                    user_message:
+                        persistedUserMessage,
 
                 })
 
