@@ -283,140 +283,6 @@ function requireAIConfig(res) {
     return false
 }
 
-
-// ======================================================
-// 聊天未读状态（V1）
-//
-// 不新增数据库字段：复用 messages.payload(jsonb) 保存读取状态。
-// 只有从这一版开始写入的 assistant 文字消息会参与未读统计；
-// 旧历史消息没有 hermit_read 标记，默认视为已读，避免上线后
-// 一次性把过去所有聊天都算成未读。
-// ======================================================
-
-function normalizeMessagePayload(value) {
-
-    if (
-        value &&
-        typeof value === 'object' &&
-        !Array.isArray(value)
-    ) {
-        return value
-    }
-
-    return {}
-}
-
-
-function createUnreadMessagePayload(
-    source = 'assistant'
-) {
-
-    return {
-        hermit_read: {
-            version: 1,
-            state: 'unread',
-            read_at: null,
-            source:
-                String(source || 'assistant'),
-        },
-    }
-}
-
-
-function isTrackedAssistantMessageUnread(
-    message
-) {
-
-    if (
-        !message ||
-        message.role !== 'assistant'
-    ) {
-        return false
-    }
-
-    const payload =
-        normalizeMessagePayload(
-            message.payload
-        )
-
-    const readMeta =
-        payload.hermit_read
-
-    return Boolean(
-        readMeta &&
-        Number(readMeta.version) === 1 &&
-        readMeta.state === 'unread' &&
-        !readMeta.read_at
-    )
-}
-
-
-function markMessagePayloadRead(
-    existingPayload,
-    readAt
-) {
-
-    const payload = {
-        ...normalizeMessagePayload(
-            existingPayload
-        ),
-    }
-
-    const previousReadMeta =
-        payload.hermit_read &&
-        typeof payload.hermit_read === 'object' &&
-        !Array.isArray(payload.hermit_read)
-            ? payload.hermit_read
-            : {}
-
-    payload.hermit_read = {
-        ...previousReadMeta,
-        version: 1,
-        state: 'read',
-        read_at:
-            readAt ||
-            new Date().toISOString(),
-    }
-
-    return payload
-}
-
-
-function serializeTextMessageForClient(
-    message
-) {
-
-    const {
-        payload,
-        ...rest
-    } = message || {}
-
-    const normalizedPayload =
-        normalizeMessagePayload(
-            payload
-        )
-
-    const readMeta =
-        normalizedPayload.hermit_read &&
-        typeof normalizedPayload.hermit_read === 'object' &&
-        !Array.isArray(normalizedPayload.hermit_read)
-            ? normalizedPayload.hermit_read
-            : null
-
-    return {
-        ...rest,
-        is_unread:
-            isTrackedAssistantMessageUnread(
-                message
-            ),
-        read_at:
-            typeof readMeta?.read_at ===
-                'string'
-                ? readMeta.read_at
-                : null,
-    }
-}
-
 // ======================================================
 // 验证 Supabase 登录 Token
 // ======================================================
@@ -7660,11 +7526,6 @@ async function savePrivateGameRerunNotification({
 
                     reasoning_content:
                         'private_game_rerun',
-
-                    payload:
-                        createUnreadMessagePayload(
-                            'private_game_rerun'
-                        ),
                 },
             ])
             .select(
@@ -10369,11 +10230,6 @@ async function generateAndSaveProactiveMessage(
                     reasoning_content:
                         'proactive',
 
-                    payload:
-                        createUnreadMessagePayload(
-                            'proactive'
-                        ),
-
                 },
             ])
             .select(
@@ -10682,11 +10538,6 @@ ${recentText || '无'}
 
                         reasoning_content:
                             'reminder',
-
-                        payload:
-                            createUnreadMessagePayload(
-                                'reminder'
-                            ),
 
                     },
                 ])
@@ -15706,7 +15557,7 @@ app.get(
                         'messages'
                     )
                     .select(
-                        'id, session_id, role, content, created_at, visible, reasoning_content, payload'
+                        'id, session_id, role, content, created_at, visible, reasoning_content'
                     )
                     .eq(
                         'session_id',
@@ -15751,25 +15602,7 @@ app.get(
                     session,
 
                     messages:
-                        (messages || [])
-                            .map(
-                                serializeTextMessageForClient
-                            ),
-
-                    unread_count:
-                        (messages || [])
-                            .filter(
-                                isTrackedAssistantMessageUnread
-                            )
-                            .length,
-
-                    first_unread_message_id:
-                        (messages || [])
-                            .find(
-                                isTrackedAssistantMessageUnread
-                            )
-                            ?.id ||
-                        null,
+                        messages || [],
 
                 })
 
@@ -15799,230 +15632,6 @@ app.get(
 
         }
 
-    }
-)
-
-
-// ======================================================
-// 标记“真正看见”的文字消息为已读
-// POST /api/sessions/:id/messages/read
-// body: { message_ids: [1, 2, 3] }
-//
-// 前端应只把已经进入可视区域的 assistant 消息 id 发来，
-// 这样“已读”代表用户确实看见，而不是一打开页面就全部清零。
-// ======================================================
-
-app.post(
-    '/api/sessions/:id/messages/read',
-    async (
-        req,
-        res
-    ) => {
-
-        try {
-
-            if (
-                !requireSupabase(
-                    res
-                )
-            ) {
-                return
-            }
-
-            const sessionId =
-                parsePositiveSessionId(
-                    req.params.id
-                )
-
-            if (!sessionId) {
-
-                return res
-                    .status(400)
-                    .json({
-                        ok: false,
-                        error:
-                            '无效的会话 ID',
-                    })
-            }
-
-            const session =
-                await getSessionById(
-                    sessionId,
-                    req.userId
-                )
-
-            if (!session) {
-
-                return res
-                    .status(404)
-                    .json({
-                        ok: false,
-                        error:
-                            '会话不存在',
-                    })
-            }
-
-            const rawMessageIds =
-                Array.isArray(
-                    req.body?.message_ids
-                )
-                    ? req.body.message_ids
-                    : []
-
-            const messageIds =
-                [
-                    ...new Set(
-                        rawMessageIds
-                            .map(
-                                parsePositiveSessionId
-                            )
-                            .filter(Boolean)
-                    ),
-                ]
-                    .slice(0, 100)
-
-            if (
-                messageIds.length === 0
-            ) {
-
-                return res
-                    .status(200)
-                    .json({
-                        ok: true,
-                        marked_read_ids: [],
-                    })
-            }
-
-            const {
-                data: rows,
-                error: rowsError,
-            } =
-                await supabase
-                    .from('messages')
-                    .select(
-                        'id, role, payload'
-                    )
-                    .eq(
-                        'user_id',
-                        req.userId
-                    )
-                    .eq(
-                        'session_id',
-                        sessionId
-                    )
-                    .eq(
-                        'visible',
-                        true
-                    )
-                    .eq(
-                        'channel',
-                        'text'
-                    )
-                    .eq(
-                        'role',
-                        'assistant'
-                    )
-                    .in(
-                        'id',
-                        messageIds
-                    )
-
-            if (rowsError) {
-                throw rowsError
-            }
-
-            const unreadRows =
-                (rows || [])
-                    .filter(
-                        isTrackedAssistantMessageUnread
-                    )
-
-            const readAt =
-                new Date()
-                    .toISOString()
-
-            const markedReadIds = []
-
-            for (
-                const row of unreadRows
-            ) {
-
-                const {
-                    data: updated,
-                    error: updateError,
-                } =
-                    await supabase
-                        .from('messages')
-                        .update({
-                            payload:
-                                markMessagePayloadRead(
-                                    row.payload,
-                                    readAt
-                                ),
-                        })
-                        .eq(
-                            'id',
-                            row.id
-                        )
-                        .eq(
-                            'user_id',
-                            req.userId
-                        )
-                        .eq(
-                            'session_id',
-                            sessionId
-                        )
-                        .eq(
-                            'role',
-                            'assistant'
-                        )
-                        .eq(
-                            'channel',
-                            'text'
-                        )
-                        .select('id')
-                        .maybeSingle()
-
-                if (updateError) {
-                    throw updateError
-                }
-
-                if (updated?.id) {
-                    markedReadIds.push(
-                        updated.id
-                    )
-                }
-            }
-
-            return res
-                .status(200)
-                .json({
-                    ok: true,
-                    marked_read_ids:
-                        markedReadIds,
-                    read_at:
-                        markedReadIds.length > 0
-                            ? readAt
-                            : null,
-                })
-
-        } catch (error) {
-
-            console.error(
-                '标记消息已读失败：',
-                error
-            )
-
-            return res
-                .status(500)
-                .json({
-                    ok: false,
-                    error:
-                        '标记消息已读失败',
-                    detail:
-                        error.message,
-                })
-        }
     }
 )
 
@@ -17242,10 +16851,6 @@ app.post(
                 call_session_id,
 
                 stream_voice,
-
-                // 新版聊天页显式开启后，普通文字 AI 回复才进入未读追踪。
-                // 旧前端不传这个字段，保持原行为，便于先安全部署后端。
-                track_unread_reply,
 
                 // 失败重试时复用已经保存的用户消息。
                 retry_user_message_id,
@@ -20087,23 +19692,6 @@ app.post(
                                     ? voiceReply
                                         .intensity
                                     : null,
-
-                            ...(
-                                messageChannel ===
-                                    'text' &&
-                                track_unread_reply ===
-                                    true
-                                    ? {
-                                        payload:
-                                            createUnreadMessagePayload(
-                                                regenerationTargetMessage
-                                                    ?.id
-                                                    ? 'regenerated_reply'
-                                                    : 'chat_reply'
-                                            ),
-                                    }
-                                    : {}
-                            ),
 
                         },
                     ])
