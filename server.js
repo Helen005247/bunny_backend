@@ -16810,6 +16810,18 @@ app.post(
         let persistedUserMessage =
             null
 
+        // “重新生成”只替换当前最后一条文字 AI 回复。
+        // 旧回复会在新回复成功保存前保持可见；
+        // 如果保存失败，不会把原回复弄丢。
+        let regenerationTargetMessage =
+            null
+
+        let regenerationOriginalHidden =
+            false
+
+        let regenerationCompleted =
+            false
+
         try {
 
             if (
@@ -16842,6 +16854,9 @@ app.post(
 
                 // 失败重试时复用已经保存的用户消息。
                 retry_user_message_id,
+
+                // 重新生成时，指定要替换的那条 assistant message。
+                regenerate_assistant_message_id,
 
             } =
                 req.body
@@ -16948,6 +16963,58 @@ app.post(
                             'INVALID_RETRY_MESSAGE',
                         error:
                             '只有文字聊天支持消息重试',
+                    })
+            }
+
+
+            const hasRegenerateAssistantMessageId =
+                regenerate_assistant_message_id !==
+                    undefined &&
+                regenerate_assistant_message_id !==
+                    null &&
+                regenerate_assistant_message_id !==
+                    ''
+
+            const regenerateAssistantMessageId =
+                hasRegenerateAssistantMessageId
+                    ? parsePositiveSessionId(
+                        regenerate_assistant_message_id
+                    )
+                    : null
+
+            if (
+                hasRegenerateAssistantMessageId &&
+                !regenerateAssistantMessageId
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok: false,
+                        code:
+                            'INVALID_REGENERATE_MESSAGE',
+                        error:
+                            '无效的 regenerate_assistant_message_id',
+                    })
+            }
+
+            if (
+                regenerateAssistantMessageId &&
+                (
+                    messageChannel !==
+                        'text' ||
+                    !retryUserMessageId
+                )
+            ) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok: false,
+                        code:
+                            'INVALID_REGENERATE_MESSAGE',
+                        error:
+                            '重新生成必须绑定原用户消息，并且只支持文字聊天。',
                     })
             }
 
@@ -17415,6 +17482,119 @@ app.post(
                         : null
 
                 if (
+                    regenerateAssistantMessageId
+                ) {
+
+                    if (
+                        nextVisibleMessage?.role !==
+                            'assistant' ||
+                        String(
+                            nextVisibleMessage.id
+                        ) !==
+                        String(
+                            regenerateAssistantMessageId
+                        )
+                    ) {
+
+                        return res
+                            .status(409)
+                            .json({
+                                ok: false,
+                                code:
+                                    'REGENERATE_TARGET_MISMATCH',
+                                error:
+                                    '这条回复已经不是当前用户消息对应的 AI 回复。',
+                            })
+                    }
+
+                    // 只允许重新生成“当前最后一条文字回复”。
+                    // 这样不会让后续对话建立在一个已经被替换的旧回答上。
+                    const {
+                        data:
+                        latestTextMessage,
+
+                        error:
+                        latestTextMessageError,
+                    } =
+                        await supabase
+                            .from(
+                                'messages'
+                            )
+                            .select(
+                                'id, role, content, created_at'
+                            )
+                            .eq(
+                                'user_id',
+                                req.userId
+                            )
+                            .eq(
+                                'session_id',
+                                sessionId
+                            )
+                            .eq(
+                                'visible',
+                                true
+                            )
+                            .eq(
+                                'channel',
+                                'text'
+                            )
+                            .in(
+                                'role',
+                                [
+                                    'user',
+                                    'assistant',
+                                ]
+                            )
+                            .order(
+                                'created_at',
+                                {
+                                    ascending:
+                                        false,
+                                }
+                            )
+                            .order(
+                                'id',
+                                {
+                                    ascending:
+                                        false,
+                                }
+                            )
+                            .limit(1)
+                            .maybeSingle()
+
+                    if (
+                        latestTextMessageError
+                    ) {
+                        throw latestTextMessageError
+                    }
+
+                    if (
+                        latestTextMessage?.role !==
+                            'assistant' ||
+                        String(
+                            latestTextMessage?.id
+                        ) !==
+                        String(
+                            regenerateAssistantMessageId
+                        )
+                    ) {
+
+                        return res
+                            .status(409)
+                            .json({
+                                ok: false,
+                                code:
+                                    'REGENERATE_NOT_LATEST',
+                                error:
+                                    '只能重新生成当前最后一条 AI 回复。',
+                            })
+                    }
+
+                    regenerationTargetMessage =
+                        nextVisibleMessage
+
+                } else if (
                     nextVisibleMessage?.role ===
                     'assistant'
                 ) {
@@ -17736,12 +17916,34 @@ app.post(
                     : ''
 
 
-            const history =
+            let history =
                 await getRecentVisibleMessages(
                     sessionId,
                     settings,
                     req.userId
                 )
+
+            // 重新生成时，模型上下文里临时排除旧回答；
+            // 数据库里仍保持可见，直到新回答已经生成完成。
+            if (
+                regenerationTargetMessage
+                    ?.id
+            ) {
+
+                history =
+                    history.filter(
+                        (
+                            item
+                        ) =>
+                            String(
+                                item.id
+                            ) !==
+                            String(
+                                regenerationTargetMessage
+                                    .id
+                            )
+                    )
+            }
 
 
             const characterLore =
@@ -19366,6 +19568,82 @@ app.post(
             }
 
 
+            if (
+                regenerationTargetMessage
+                    ?.id
+            ) {
+
+                const {
+                    data:
+                    hiddenRegenerationMessage,
+
+                    error:
+                    hideRegenerationMessageError,
+                } =
+                    await supabase
+                        .from(
+                            'messages'
+                        )
+                        .update({
+                            visible:
+                                false,
+                        })
+                        .eq(
+                            'id',
+                            regenerationTargetMessage
+                                .id
+                        )
+                        .eq(
+                            'user_id',
+                            req.userId
+                        )
+                        .eq(
+                            'session_id',
+                            sessionId
+                        )
+                        .eq(
+                            'role',
+                            'assistant'
+                        )
+                        .eq(
+                            'channel',
+                            'text'
+                        )
+                        .eq(
+                            'visible',
+                            true
+                        )
+                        .select(
+                            'id'
+                        )
+                        .maybeSingle()
+
+                if (
+                    hideRegenerationMessageError
+                ) {
+                    throw hideRegenerationMessageError
+                }
+
+                if (
+                    !hiddenRegenerationMessage
+                ) {
+
+                    const regenerationError =
+                        new Error(
+                            '需要重新生成的原回复已经发生变化，请刷新后重试。'
+                        )
+
+                    regenerationError.code =
+                        'REGENERATE_TARGET_CHANGED'
+
+                    throw regenerationError
+                }
+
+                regenerationOriginalHidden =
+                    true
+            }
+
+
             const {
                 data:
                 assistantMessage,
@@ -19427,6 +19705,14 @@ app.post(
                 assistantMessageError
             ) {
                 throw assistantMessageError
+            }
+
+            if (
+                regenerationTargetMessage
+                    ?.id
+            ) {
+                regenerationCompleted =
+                    true
             }
 
 
@@ -19502,6 +19788,11 @@ app.post(
                     assistant_message:
                         assistantMessage,
 
+                    regenerated_assistant_message_id:
+                        regenerationTargetMessage
+                            ?.id ||
+                        null,
+
                     reminder:
                         reminderResult
                             .status ===
@@ -19531,6 +19822,52 @@ app.post(
                 'AI 对话处理失败：',
                 error
             )
+
+            if (
+                regenerationOriginalHidden &&
+                !regenerationCompleted &&
+                regenerationTargetMessage
+                    ?.id &&
+                supabase
+            ) {
+
+                try {
+
+                    await supabase
+                        .from(
+                            'messages'
+                        )
+                        .update({
+                            visible:
+                                true,
+                        })
+                        .eq(
+                            'id',
+                            regenerationTargetMessage
+                                .id
+                        )
+                        .eq(
+                            'user_id',
+                            req.userId
+                        )
+                        .eq(
+                            'session_id',
+                            regenerationTargetMessage
+                                .session_id ||
+                            req.body
+                                ?.session_id
+                        )
+
+                } catch (
+                restoreRegenerationError
+                ) {
+
+                    console.error(
+                        '重新生成失败后恢复原回复可见状态失败：',
+                        restoreRegenerationError
+                    )
+                }
+            }
 
             if (
                 res.headersSent
