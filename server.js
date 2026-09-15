@@ -12708,6 +12708,1264 @@ app.post(
 )
 
 
+
+// ======================================================
+// 通话历史 / 通话详情
+//
+// 不新增数据库表，也不要求额外执行 SQL：
+// 1. call_sessions 继续保存每一次通话的开始 / 结束时间。
+// 2. messages 里 channel=voice + call_session_id 的可见消息
+//    就是完整逐字稿。
+// 3. 一句话概括作为一条 visible=false 的隐藏 voice 消息保存，
+//    reasoning_content 使用固定标记，避免污染普通聊天和模型上下文。
+// ======================================================
+
+const CALL_SUMMARY_MARKER =
+    '__HERMIT_CALL_SUMMARY_V1__'
+
+const CALL_HISTORY_DEFAULT_LIMIT =
+    100
+
+const CALL_HISTORY_MAX_LIMIT =
+    200
+
+
+function getCallDurationSeconds(
+    startedAt,
+    endedAt
+) {
+
+    const startMs =
+        new Date(
+            startedAt || 0
+        ).getTime()
+
+    const endMs =
+        new Date(
+            endedAt || 0
+        ).getTime()
+
+    if (
+        !Number.isFinite(startMs) ||
+        !Number.isFinite(endMs) ||
+        endMs < startMs
+    ) {
+        return 0
+    }
+
+    return Math.max(
+        0,
+        Math.round(
+            (
+                endMs -
+                startMs
+            ) /
+            1000
+        )
+    )
+}
+
+
+function normalizeCallTranscriptRows(
+    rows
+) {
+
+    return (
+        Array.isArray(rows)
+            ? rows
+            : []
+    )
+        .map(
+            (
+                row,
+                index
+            ) => {
+
+                const text =
+                    String(
+                        row?.content ||
+                        row?.text ||
+                        ''
+                    )
+                        .replace(
+                            /\s+/g,
+                            ' '
+                        )
+                        .trim()
+
+                if (!text) {
+                    return null
+                }
+
+                const role =
+                    row?.role ===
+                        'assistant'
+                        ? 'assistant'
+                        : 'user'
+
+                return {
+                    id:
+                        row?.id ||
+                        `${role}-${index}`,
+
+                    role,
+
+                    text,
+
+                    content:
+                        text,
+
+                    created_at:
+                        row?.created_at ||
+                        null,
+
+                    createdAt:
+                        row?.created_at ||
+                        null,
+                }
+            }
+        )
+        .filter(Boolean)
+}
+
+
+function isTrivialCallSummaryText(
+    value
+) {
+
+    const text =
+        String(
+            value || ''
+        )
+            .replace(
+                /[，。！？!?、；;：:\s]/g,
+                ''
+            )
+            .trim()
+            .toLowerCase()
+
+    if (!text) {
+        return true
+    }
+
+    if (
+        text.length <= 1
+    ) {
+        return true
+    }
+
+    return /^(喂|你好|嗨|哈喽|hello|hi|在吗|听得到吗|听得见吗|能听见吗|嗯+|哦+|啊+|好+|行|可以|知道了|收到|谢谢|晚安)$/
+        .test(
+            text
+        )
+}
+
+
+function buildCallOneLineSummary(
+    transcriptRows
+) {
+
+    const rows =
+        normalizeCallTranscriptRows(
+            transcriptRows
+        )
+
+    if (
+        rows.length === 0
+    ) {
+        return '这通电话没有留下可用的对话内容。'
+    }
+
+    const userRows =
+        rows
+            .filter(
+                (item) =>
+                    item.role ===
+                    'user'
+            )
+
+    const preferredRows =
+        userRows.length
+            ? userRows
+            : rows
+
+    const meaningfulRows =
+        preferredRows
+            .filter(
+                (item) =>
+                    !isTrivialCallSummaryText(
+                        item.text
+                    )
+            )
+
+    const sourceRows =
+        meaningfulRows.length
+            ? meaningfulRows
+            : preferredRows
+
+    const pieces = []
+
+    for (
+        const item of
+        sourceRows
+    ) {
+
+        const clean =
+            String(
+                item.text || ''
+            )
+                .replace(
+                    /\s+/g,
+                    ' '
+                )
+                .replace(
+                    /^[，。！？!?、；;：:\s]+|[，。！？!?、；;：:\s]+$/g,
+                    ''
+                )
+                .trim()
+
+        if (!clean) {
+            continue
+        }
+
+        if (
+            !pieces.includes(
+                clean
+            )
+        ) {
+            pieces.push(
+                clean
+            )
+        }
+
+        if (
+            pieces.length >= 2
+        ) {
+            break
+        }
+    }
+
+    const joined =
+        pieces.join('、') ||
+        rows[0].text
+
+    const clipped =
+        joined.length > 46
+            ? `${joined.slice(
+                0,
+                46
+            )}…`
+            : joined
+
+    return `聊了${clipped}。`
+}
+
+
+function toCallApiRecord(
+    callSession,
+    summary = ''
+) {
+
+    if (!callSession) {
+        return null
+    }
+
+    const endedAt =
+        callSession.ended_at ||
+        null
+
+    return {
+        ...callSession,
+
+        status:
+            endedAt
+                ? 'ended'
+                : 'active',
+
+        duration_seconds:
+            endedAt
+                ? getCallDurationSeconds(
+                    callSession.started_at,
+                    endedAt
+                )
+                : 0,
+
+        summary:
+            String(
+                summary || ''
+            )
+                .trim(),
+    }
+}
+
+
+async function getCallTranscriptRows(
+    callSessionId,
+    userId
+) {
+
+    const {
+        data,
+        error,
+    } =
+        await supabase
+            .from(
+                'messages'
+            )
+            .select(
+                'id, call_session_id, role, content, created_at'
+            )
+            .eq(
+                'user_id',
+                userId
+            )
+            .eq(
+                'call_session_id',
+                callSessionId
+            )
+            .eq(
+                'channel',
+                'voice'
+            )
+            .eq(
+                'visible',
+                true
+            )
+            .in(
+                'role',
+                [
+                    'user',
+                    'assistant',
+                ]
+            )
+            .order(
+                'created_at',
+                {
+                    ascending:
+                        true,
+                }
+            )
+            .order(
+                'id',
+                {
+                    ascending:
+                        true,
+                }
+            )
+
+    if (error) {
+        throw error
+    }
+
+    return Array.isArray(data)
+        ? data
+        : []
+}
+
+
+async function getCallSummaryRow(
+    callSessionId,
+    userId
+) {
+
+    const {
+        data,
+        error,
+    } =
+        await supabase
+            .from(
+                'messages'
+            )
+            .select(
+                'id, content, created_at'
+            )
+            .eq(
+                'user_id',
+                userId
+            )
+            .eq(
+                'call_session_id',
+                callSessionId
+            )
+            .eq(
+                'channel',
+                'voice'
+            )
+            .eq(
+                'visible',
+                false
+            )
+            .eq(
+                'role',
+                'assistant'
+            )
+            .eq(
+                'reasoning_content',
+                CALL_SUMMARY_MARKER
+            )
+            .order(
+                'created_at',
+                {
+                    ascending:
+                        false,
+                }
+            )
+            .limit(1)
+
+    if (error) {
+        throw error
+    }
+
+    return (
+        Array.isArray(data) &&
+        data.length > 0
+    )
+        ? data[0]
+        : null
+}
+
+
+async function persistCallSummary({
+    callSessionId,
+    sessionId,
+    userId,
+    summary,
+}) {
+
+    const cleanSummary =
+        String(
+            summary || ''
+        )
+            .trim()
+
+    if (!cleanSummary) {
+        return null
+    }
+
+    const existing =
+        await getCallSummaryRow(
+            callSessionId,
+            userId
+        )
+
+    if (existing?.id) {
+
+        const {
+            data,
+            error,
+        } =
+            await supabase
+                .from(
+                    'messages'
+                )
+                .update({
+                    content:
+                        cleanSummary,
+                })
+                .eq(
+                    'id',
+                    existing.id
+                )
+                .eq(
+                    'user_id',
+                    userId
+                )
+                .select(
+                    'id, content, created_at'
+                )
+                .maybeSingle()
+
+        if (error) {
+            throw error
+        }
+
+        return data
+    }
+
+    const {
+        data,
+        error,
+    } =
+        await supabase
+            .from(
+                'messages'
+            )
+            .insert([
+                {
+                    user_id:
+                        userId,
+
+                    session_id:
+                        sessionId,
+
+                    role:
+                        'assistant',
+
+                    content:
+                        cleanSummary,
+
+                    visible:
+                        false,
+
+                    channel:
+                        'voice',
+
+                    call_session_id:
+                        callSessionId,
+
+                    reasoning_content:
+                        CALL_SUMMARY_MARKER,
+                },
+            ])
+            .select(
+                'id, content, created_at'
+            )
+            .single()
+
+    if (error) {
+        throw error
+    }
+
+    return data
+}
+
+
+async function ensureCallSummary({
+    callSessionId,
+    sessionId,
+    userId,
+    transcriptRows = null,
+}) {
+
+    try {
+
+        const existing =
+            await getCallSummaryRow(
+                callSessionId,
+                userId
+            )
+
+        const existingText =
+            String(
+                existing?.content ||
+                ''
+            )
+                .trim()
+
+        if (existingText) {
+            return existingText
+        }
+
+    } catch (error) {
+
+        // 如果只是读取旧 summary 失败，
+        // 仍然继续用逐字稿即时生成，避免历史页整个打不开。
+        console.warn(
+            '读取通话概括失败，改用逐字稿即时生成：',
+            error?.message ||
+            error
+        )
+    }
+
+    const transcript =
+        Array.isArray(
+            transcriptRows
+        )
+            ? transcriptRows
+            : await getCallTranscriptRows(
+                callSessionId,
+                userId
+            )
+
+    const summary =
+        buildCallOneLineSummary(
+            transcript
+        )
+
+    try {
+
+        await persistCallSummary({
+            callSessionId,
+            sessionId,
+            userId,
+            summary,
+        })
+
+    } catch (error) {
+
+        // 保存概括失败不影响通话详情和历史记录读取。
+        console.warn(
+            '保存通话概括失败：',
+            error?.message ||
+            error
+        )
+    }
+
+    return summary
+}
+
+
+// ======================================================
+// 获取历史通话
+// GET /api/calls?session_id=123
+// ======================================================
+
+app.get(
+    '/api/calls',
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+            const sessionId =
+                parsePositiveSessionId(
+                    req.query
+                        ?.session_id
+                )
+
+            if (!sessionId) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '无效的 session_id',
+                    })
+            }
+
+            const session =
+                await getSessionById(
+                    sessionId,
+                    req.userId
+                )
+
+            if (!session) {
+
+                return res
+                    .status(404)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '会话不存在',
+                    })
+            }
+
+            const rawLimit =
+                Number(
+                    req.query
+                        ?.limit
+                )
+
+            const limit =
+                Number.isFinite(
+                    rawLimit
+                )
+                    ? Math.min(
+                        CALL_HISTORY_MAX_LIMIT,
+                        Math.max(
+                            1,
+                            Math.floor(
+                                rawLimit
+                            )
+                        )
+                    )
+                    : CALL_HISTORY_DEFAULT_LIMIT
+
+            const {
+                data:
+                callSessions,
+
+                error:
+                callSessionsError,
+            } =
+                await supabase
+                    .from(
+                        'call_sessions'
+                    )
+                    .select(
+                        'id, user_id, session_id, agent_key, voice_mode, started_at, ended_at'
+                    )
+                    .eq(
+                        'user_id',
+                        req.userId
+                    )
+                    .eq(
+                        'session_id',
+                        sessionId
+                    )
+                    .not(
+                        'ended_at',
+                        'is',
+                        null
+                    )
+                    .order(
+                        'started_at',
+                        {
+                            ascending:
+                                false,
+                        }
+                    )
+                    .limit(
+                        limit
+                    )
+
+            if (
+                callSessionsError
+            ) {
+                throw callSessionsError
+            }
+
+            const calls =
+                Array.isArray(
+                    callSessions
+                )
+                    ? callSessions
+                    : []
+
+            if (
+                calls.length === 0
+            ) {
+
+                return res
+                    .status(200)
+                    .json({
+                        ok:
+                            true,
+
+                        calls:
+                            [],
+                    })
+            }
+
+            const callIds =
+                calls.map(
+                    (item) =>
+                        item.id
+                )
+
+            const summaryByCallId =
+                new Map()
+
+            // ----------------------------------------------
+            // 先读取已经持久化的一句话概括。
+            // ----------------------------------------------
+
+            try {
+
+                const {
+                    data:
+                    summaryRows,
+
+                    error:
+                    summaryRowsError,
+                } =
+                    await supabase
+                        .from(
+                            'messages'
+                        )
+                        .select(
+                            'call_session_id, content, created_at'
+                        )
+                        .eq(
+                            'user_id',
+                            req.userId
+                        )
+                        .eq(
+                            'channel',
+                            'voice'
+                        )
+                        .eq(
+                            'visible',
+                            false
+                        )
+                        .eq(
+                            'role',
+                            'assistant'
+                        )
+                        .eq(
+                            'reasoning_content',
+                            CALL_SUMMARY_MARKER
+                        )
+                        .in(
+                            'call_session_id',
+                            callIds
+                        )
+                        .order(
+                            'created_at',
+                            {
+                                ascending:
+                                    false,
+                            }
+                        )
+
+                if (
+                    summaryRowsError
+                ) {
+                    throw summaryRowsError
+                }
+
+                for (
+                    const row of
+                    summaryRows || []
+                ) {
+
+                    const key =
+                        String(
+                            row.call_session_id
+                        )
+
+                    if (
+                        !summaryByCallId.has(
+                            key
+                        )
+                    ) {
+                        summaryByCallId.set(
+                            key,
+                            String(
+                                row.content ||
+                                ''
+                            )
+                                .trim()
+                        )
+                    }
+                }
+
+            } catch (error) {
+
+                console.warn(
+                    '批量读取通话概括失败：',
+                    error?.message ||
+                    error
+                )
+            }
+
+            // ----------------------------------------------
+            // 兼容旧通话：
+            // 以前没有保存 summary 时，直接从 voice 逐字稿生成。
+            // ----------------------------------------------
+
+            const missingCallIds =
+                callIds
+                    .filter(
+                        (id) =>
+                            !summaryByCallId
+                                .get(
+                                    String(id)
+                                )
+                    )
+
+            if (
+                missingCallIds.length >
+                0
+            ) {
+
+                try {
+
+                    const {
+                        data:
+                        transcriptRows,
+
+                        error:
+                        transcriptRowsError,
+                    } =
+                        await supabase
+                            .from(
+                                'messages'
+                            )
+                            .select(
+                                'id, call_session_id, role, content, created_at'
+                            )
+                            .eq(
+                                'user_id',
+                                req.userId
+                            )
+                            .eq(
+                                'channel',
+                                'voice'
+                            )
+                            .eq(
+                                'visible',
+                                true
+                            )
+                            .in(
+                                'role',
+                                [
+                                    'user',
+                                    'assistant',
+                                ]
+                            )
+                            .in(
+                                'call_session_id',
+                                missingCallIds
+                            )
+                            .order(
+                                'created_at',
+                                {
+                                    ascending:
+                                        true,
+                                }
+                            )
+                            .order(
+                                'id',
+                                {
+                                    ascending:
+                                        true,
+                                }
+                            )
+                            .limit(5000)
+
+                    if (
+                        transcriptRowsError
+                    ) {
+                        throw transcriptRowsError
+                    }
+
+                    const transcriptByCallId =
+                        new Map()
+
+                    for (
+                        const row of
+                        transcriptRows || []
+                    ) {
+
+                        const key =
+                            String(
+                                row.call_session_id
+                            )
+
+                        if (
+                            !transcriptByCallId.has(
+                                key
+                            )
+                        ) {
+                            transcriptByCallId.set(
+                                key,
+                                []
+                            )
+                        }
+
+                        transcriptByCallId
+                            .get(
+                                key
+                            )
+                            .push(
+                                row
+                            )
+                    }
+
+                    for (
+                        const callSession of
+                        calls
+                    ) {
+
+                        const key =
+                            String(
+                                callSession.id
+                            )
+
+                        if (
+                            summaryByCallId.get(
+                                key
+                            )
+                        ) {
+                            continue
+                        }
+
+                        const transcript =
+                            transcriptByCallId
+                                .get(
+                                    key
+                                ) ||
+                            []
+
+                        const summary =
+                            buildCallOneLineSummary(
+                                transcript
+                            )
+
+                        summaryByCallId.set(
+                            key,
+                            summary
+                        )
+
+                        // GET 不等待回填完成，避免历史列表打开变慢。
+                        persistCallSummary({
+                            callSessionId:
+                                callSession.id,
+
+                            sessionId:
+                                callSession.session_id,
+
+                            userId:
+                                req.userId,
+
+                            summary,
+                        })
+                            .catch(
+                                (error) => {
+                                    console.debug(
+                                        '旧通话概括后台回填失败：',
+                                        error?.message ||
+                                        error
+                                    )
+                                }
+                            )
+                    }
+
+                } catch (error) {
+
+                    console.warn(
+                        '读取旧通话逐字稿生成概括失败：',
+                        error?.message ||
+                        error
+                    )
+                }
+            }
+
+            const result =
+                calls.map(
+                    (callSession) =>
+                        toCallApiRecord(
+                            callSession,
+                            summaryByCallId
+                                .get(
+                                    String(
+                                        callSession.id
+                                    )
+                                ) ||
+                            ''
+                        )
+                )
+
+            return res
+                .status(200)
+                .json({
+                    ok:
+                        true,
+
+                    calls:
+                        result,
+                })
+
+        } catch (error) {
+
+            console.error(
+                '读取通话记录失败：',
+                error
+            )
+
+            return res
+                .status(500)
+                .json({
+                    ok:
+                        false,
+
+                    error:
+                        '读取通话记录失败',
+
+                    detail:
+                        error.message,
+                })
+        }
+    }
+)
+
+
+// ======================================================
+// 获取单次通话详情
+// GET /api/calls/:id
+// ======================================================
+
+app.get(
+    '/api/calls/:id',
+    async (
+        req,
+        res
+    ) => {
+
+        try {
+
+            if (
+                !requireSupabase(
+                    res
+                )
+            ) {
+                return
+            }
+
+            const callSessionId =
+                parsePositiveSessionId(
+                    req.params.id
+                )
+
+            if (!callSessionId) {
+
+                return res
+                    .status(400)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '无效的 call_session_id',
+                    })
+            }
+
+            const {
+                data:
+                callSession,
+
+                error:
+                callSessionError,
+            } =
+                await supabase
+                    .from(
+                        'call_sessions'
+                    )
+                    .select(
+                        'id, user_id, session_id, agent_key, voice_mode, started_at, ended_at'
+                    )
+                    .eq(
+                        'id',
+                        callSessionId
+                    )
+                    .eq(
+                        'user_id',
+                        req.userId
+                    )
+                    .maybeSingle()
+
+            if (
+                callSessionError
+            ) {
+                throw callSessionError
+            }
+
+            if (!callSession) {
+
+                return res
+                    .status(404)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '通话不存在',
+                    })
+            }
+
+            const querySessionId =
+                req.query
+                    ?.session_id
+                    ? parsePositiveSessionId(
+                        req.query
+                            .session_id
+                    )
+                    : null
+
+            if (
+                querySessionId &&
+                querySessionId !==
+                callSession.session_id
+            ) {
+
+                return res
+                    .status(404)
+                    .json({
+                        ok:
+                            false,
+
+                        error:
+                            '这通电话不属于当前会话',
+                    })
+            }
+
+            const transcriptRows =
+                await getCallTranscriptRows(
+                    callSessionId,
+                    req.userId
+                )
+
+            const summary =
+                await ensureCallSummary({
+                    callSessionId,
+                    sessionId:
+                        callSession.session_id,
+                    userId:
+                        req.userId,
+                    transcriptRows,
+                })
+
+            const transcript =
+                normalizeCallTranscriptRows(
+                    transcriptRows
+                )
+
+            const callRecord =
+                toCallApiRecord(
+                    callSession,
+                    summary
+                )
+
+            return res
+                .status(200)
+                .json({
+                    ok:
+                        true,
+
+                    call_session:
+                        callRecord,
+
+                    call:
+                        callRecord,
+
+                    summary,
+
+                    transcript,
+
+                    messages:
+                        transcript,
+                })
+
+        } catch (error) {
+
+            console.error(
+                '读取通话详情失败：',
+                error
+            )
+
+            return res
+                .status(500)
+                .json({
+                    ok:
+                        false,
+
+                    error:
+                        '读取通话详情失败',
+
+                    detail:
+                        error.message,
+                })
+        }
+    }
+)
+
+
 // ======================================================
 // 开始一次 App 内通话
 // POST /api/calls/start
@@ -13312,6 +14570,9 @@ app.post(
 // ======================================================
 // 结束一次 App 内通话
 // POST /api/calls/:id/end
+//
+// 结束时同时持久化一句话概括。
+// 逐字稿本身已经在 /api/chat(channel=voice) 中实时写进 messages。
 // ======================================================
 
 app.post(
@@ -13349,19 +14610,22 @@ app.post(
                     })
             }
 
+            // 先读取当前记录，让重复点击挂断也保持幂等，
+            // 不会反复覆盖 ended_at、把通话时长越拉越长。
             const {
-                data,
-                error,
+                data:
+                existingCall,
+
+                error:
+                existingCallError,
             } =
                 await supabase
                     .from(
                         'call_sessions'
                     )
-                    .update({
-                        ended_at:
-                            new Date()
-                                .toISOString(),
-                    })
+                    .select(
+                        'id, user_id, session_id, agent_key, voice_mode, started_at, ended_at'
+                    )
                     .eq(
                         'id',
                         callSessionId
@@ -13370,16 +14634,15 @@ app.post(
                         'user_id',
                         req.userId
                     )
-                    .select(
-                        'id, session_id, agent_key, voice_mode, started_at, ended_at'
-                    )
                     .maybeSingle()
 
-            if (error) {
-                throw error
+            if (
+                existingCallError
+            ) {
+                throw existingCallError
             }
 
-            if (!data) {
+            if (!existingCall) {
 
                 return res
                     .status(404)
@@ -13392,6 +14655,154 @@ app.post(
                     })
             }
 
+            let callSession =
+                existingCall
+
+            if (
+                !existingCall
+                    .ended_at
+            ) {
+
+                const {
+                    data:
+                    endedCall,
+
+                    error:
+                    endCallError,
+                } =
+                    await supabase
+                        .from(
+                            'call_sessions'
+                        )
+                        .update({
+                            ended_at:
+                                new Date()
+                                    .toISOString(),
+                        })
+                        .eq(
+                            'id',
+                            callSessionId
+                        )
+                        .eq(
+                            'user_id',
+                            req.userId
+                        )
+                        .is(
+                            'ended_at',
+                            null
+                        )
+                        .select(
+                            'id, user_id, session_id, agent_key, voice_mode, started_at, ended_at'
+                        )
+                        .maybeSingle()
+
+                if (
+                    endCallError
+                ) {
+                    throw endCallError
+                }
+
+                if (endedCall) {
+                    callSession =
+                        endedCall
+                } else {
+
+                    // 极端情况下两个挂断请求同时到达，
+                    // 重新读取最终状态即可。
+                    const {
+                        data:
+                        refreshedCall,
+
+                        error:
+                        refreshError,
+                    } =
+                        await supabase
+                            .from(
+                                'call_sessions'
+                            )
+                            .select(
+                                'id, user_id, session_id, agent_key, voice_mode, started_at, ended_at'
+                            )
+                            .eq(
+                                'id',
+                                callSessionId
+                            )
+                            .eq(
+                                'user_id',
+                                req.userId
+                            )
+                            .maybeSingle()
+
+                    if (
+                        refreshError
+                    ) {
+                        throw refreshError
+                    }
+
+                    if (refreshedCall) {
+                        callSession =
+                            refreshedCall
+                    }
+                }
+            }
+
+            let transcriptRows =
+                []
+
+            try {
+
+                transcriptRows =
+                    await getCallTranscriptRows(
+                        callSessionId,
+                        req.userId
+                    )
+
+            } catch (error) {
+
+                // 挂断动作优先成功；
+                // 即使逐字稿读取异常，也不能把用户卡在通话页。
+                console.warn(
+                    '挂断后读取通话逐字稿失败：',
+                    error?.message ||
+                    error
+                )
+            }
+
+            let summary =
+                ''
+
+            try {
+
+                summary =
+                    await ensureCallSummary({
+                        callSessionId,
+                        sessionId:
+                            callSession.session_id,
+                        userId:
+                            req.userId,
+                        transcriptRows,
+                    })
+
+            } catch (error) {
+
+                console.warn(
+                    '挂断后生成通话概括失败：',
+                    error?.message ||
+                    error
+                )
+
+                summary =
+                    buildCallOneLineSummary(
+                        transcriptRows
+                    )
+            }
+
+            const callRecord =
+                toCallApiRecord(
+                    callSession,
+                    summary
+                )
+
             return res
                 .status(200)
                 .json({
@@ -13399,7 +14810,17 @@ app.post(
                         true,
 
                     call_session:
-                        data,
+                        callRecord,
+
+                    call:
+                        callRecord,
+
+                    summary,
+
+                    transcript:
+                        normalizeCallTranscriptRows(
+                            transcriptRows
+                        ),
                 })
 
         } catch (error) {
