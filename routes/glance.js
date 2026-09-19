@@ -23,6 +23,10 @@ const {
     createGlanceReactionService,
 } = require('../services/glanceReactionService')
 
+const {
+    createGlanceInterestService,
+} = require('../services/glanceInterestService')
+
 function safeEqualString(
     left,
     right
@@ -134,6 +138,9 @@ function createGlanceRouter({
     const reactionService =
         createGlanceReactionService()
 
+    const interestService =
+        createGlanceInterestService()
+
     // 公开健康检查：只确认功能是否部署成功，不返回 Secret。
     router.get(
         '/health',
@@ -143,7 +150,7 @@ function createGlanceRouter({
                 .json({
                     ok: true,
                     feature:
-                        'hermit-glance-v0.7',
+                        'hermit-glance-v0.8',
                     shortcut_token_configured:
                         Boolean(
                             shortcutToken
@@ -170,6 +177,17 @@ function createGlanceRouter({
                         true,
                     reaction_storage:
                         'memory-only',
+                    deep_read_detection_enabled:
+                        true,
+                    interest_streak_detection_enabled:
+                        true,
+                    quick_semantic_enabled:
+                        true,
+                    interest_storage:
+                        'memory-only',
+                    interest_thresholds:
+                        interestService
+                            .getConfig(),
                     live_reaction_enabled:
                         String(
                             process.env
@@ -399,337 +417,522 @@ function createGlanceRouter({
             )
 
 
-            // v0.4：只在确认用户已在同一篇内容上停留后，
-            // 异步做一次语义分类。不会阻塞快捷指令响应。
+            // v0.8：
+            // 1) 长文/稳定停留：full semantic
+            // 2) 短篇系列：如果首屏已经明确出现关注角色，允许 quick semantic
+            // 3) 已有语义结果时，每次新采样都会刷新 engagement，
+            //    因而能够在后续达到 deep_read 阈值时再触发 interest signal。
             const postSessionId =
                 result
                     ?.post
                     ?.post_session_id
 
-            if (
-                postSessionId &&
-                Number(
-                    result
-                        ?.post
-                        ?.total_dwell_seconds ||
-                    0
-                ) >= 18
-            ) {
+            const processAnalysis =
+                analysis => {
+                    if (!analysis) {
+                        return
+                    }
+
+                    console.log(
+                        '[glance] semantic:',
+                        {
+                            post_session_id:
+                                analysis
+                                    ?.post_session_id,
+                            analysis_stage:
+                                analysis
+                                    ?.analysis_stage,
+                            content_type:
+                                analysis
+                                    ?.content_type,
+                            relationship_context:
+                                analysis
+                                    ?.relationship_context,
+                            romantic_context:
+                                analysis
+                                    ?.romantic_context,
+                            named_characters:
+                                analysis
+                                    ?.named_characters,
+                            love_and_deepspace_characters:
+                                analysis
+                                    ?.love_and_deepspace_characters,
+                            primary_focus:
+                                analysis
+                                    ?.primary_focus,
+                            fandom_or_work:
+                                analysis
+                                    ?.fandom_or_work,
+                            trope_signals:
+                                analysis
+                                    ?.trope_signals,
+                            interaction_pattern:
+                                analysis
+                                    ?.interaction_pattern,
+                            confidence:
+                                analysis
+                                    ?.confidence,
+                            dwell_seconds:
+                                analysis
+                                    ?.engagement
+                                    ?.dwell_seconds,
+                            sample_count:
+                                analysis
+                                    ?.engagement
+                                    ?.sample_count,
+                            body_seen:
+                                analysis
+                                    ?.engagement
+                                    ?.body_seen,
+                            comments_seen:
+                                analysis
+                                    ?.engagement
+                                    ?.comments_seen,
+                            summary:
+                                analysis
+                                    ?.summary,
+                        }
+                    )
+
+                    const preferenceResult =
+                        preferenceService
+                            .observe(
+                                analysis
+                            )
+
+                    if (
+                        preferenceResult
+                            ?.updated
+                    ) {
+                        const related =
+                            preferenceService
+                                .getForTropes(
+                                    analysis
+                                        ?.trope_signals
+                                )
+
+                        console.log(
+                            '[glance] preference hypothesis:',
+                            related
+                                .map(
+                                    item => ({
+                                        trope:
+                                            item
+                                                .trope,
+                                        confidence:
+                                            item
+                                                .confidence,
+                                        evidence_count:
+                                            item
+                                                .evidence_count,
+                                        score:
+                                            item
+                                                .score,
+                                        reading_is_not_consent:
+                                            true,
+                                    })
+                                )
+                        )
+                    }
+
+                    const interestResult =
+                        interestService
+                            .observeAnalysis(
+                                analysis
+                            )
+
+                    if (
+                        interestResult
+                            ?.updated
+                    ) {
+                        console.log(
+                            '[glance] interest:',
+                            {
+                                reason:
+                                    interestResult
+                                        ?.reason,
+                                signals:
+                                    interestResult
+                                        ?.signals
+                                        ?.map(
+                                            signal => ({
+                                                triggered:
+                                                    signal
+                                                        ?.triggered,
+                                                kind:
+                                                    signal
+                                                        ?.kind,
+                                                target:
+                                                    signal
+                                                        ?.target,
+                                                self_related:
+                                                    signal
+                                                        ?.self_related,
+                                                level:
+                                                    signal
+                                                        ?.level,
+                                                salience:
+                                                    signal
+                                                        ?.salience,
+                                                distinct_posts:
+                                                    signal
+                                                        ?.distinct_posts,
+                                                cumulative_dwell_seconds:
+                                                    signal
+                                                        ?.cumulative_dwell_seconds,
+                                                current_post_dwell_seconds:
+                                                    signal
+                                                        ?.current_post_dwell_seconds,
+                                            })
+                                        ),
+                            }
+                        )
+                    }
+
+                    const interestSignal =
+                        interestResult
+                            ?.strongest_signal ||
+                        null
+
+                    const noticeResult =
+                        noticeService
+                            .evaluate(
+                                analysis,
+                                {
+                                    interestSignal,
+                                }
+                            )
+
+                    if (
+                        noticeResult
+                            ?.created
+                    ) {
+                        const notice =
+                            noticeResult
+                                .notice
+
+                        console.log(
+                            '[glance] notice:',
+                            {
+                                status:
+                                    notice
+                                        ?.status,
+                                kind:
+                                    notice
+                                        ?.kind,
+                                level:
+                                    notice
+                                        ?.level,
+                                salience:
+                                    notice
+                                        ?.salience,
+                                character_targets:
+                                    notice
+                                        ?.character_targets,
+                                dwell_seconds:
+                                    notice
+                                        ?.context
+                                        ?.dwell_seconds,
+                                comments_seen:
+                                    notice
+                                        ?.context
+                                        ?.comments_seen,
+                                interest_signal:
+                                    notice
+                                        ?.context
+                                        ?.interest_signal,
+                                should_surface_now:
+                                    notice
+                                        ?.should_surface_now,
+                            }
+                        )
+
+                        const matchingPreferences =
+                            preferenceService
+                                .getForTropes(
+                                    analysis
+                                        ?.trope_signals
+                                )
+
+                        const reactionPlan =
+                            reactionService
+                                .plan({
+                                    analysis,
+                                    notice,
+                                    matchingPreferences,
+                                })
+
+                        console.log(
+                            '[glance] reaction plan:',
+                            {
+                                mode:
+                                    reactionPlan
+                                        ?.mode,
+                                should_surface_now:
+                                    reactionPlan
+                                        ?.should_surface_now,
+                                strategy:
+                                    reactionPlan
+                                        ?.strategy,
+                                reason:
+                                    reactionPlan
+                                        ?.reason,
+                                notice_kind:
+                                    reactionPlan
+                                        ?.notice_kind,
+                                interest_signal:
+                                    reactionPlan
+                                        ?.interest_signal,
+                                character_targets:
+                                    reactionPlan
+                                        ?.character_targets,
+                                trope_signals:
+                                    reactionPlan
+                                        ?.trope_signals,
+                                preference_hypothesis:
+                                    reactionPlan
+                                        ?.preference_hypothesis,
+                            }
+                        )
+
+                        const liveEnabled =
+                            String(
+                                process.env
+                                    .GLANCE_LIVE_REACTION ||
+                                ''
+                            )
+                                .trim()
+                                .toLowerCase() ===
+                            'true'
+
+                        if (
+                            liveEnabled &&
+                            reactionPlan
+                                ?.should_surface_now &&
+                            typeof emitReaction ===
+                            'function'
+                        ) {
+                            emitReaction({
+                                ownerId,
+                                analysis,
+                                notice,
+                                reactionPlan,
+                            })
+                                .then(
+                                    liveResult => {
+                                        console.log(
+                                            '[glance] live reaction:',
+                                            {
+                                                sent:
+                                                    Boolean(
+                                                        liveResult
+                                                            ?.sent
+                                                    ),
+                                                reason:
+                                                    liveResult
+                                                        ?.reason ||
+                                                    null,
+                                                session_id:
+                                                    liveResult
+                                                        ?.session_id ||
+                                                    null,
+                                                message_id:
+                                                    liveResult
+                                                        ?.assistant_message_id ||
+                                                    null,
+                                                push_sent:
+                                                    Number(
+                                                        liveResult
+                                                            ?.push_sent ||
+                                                        0
+                                                    ),
+                                            }
+                                        )
+                                    }
+                                )
+                                .catch(
+                                    error => {
+                                        console.warn(
+                                            '[glance] live reaction error:',
+                                            String(
+                                                error
+                                                    ?.message ||
+                                                error
+                                            )
+                                        )
+                                    }
+                                )
+                        }
+                    } else {
+                        console.log(
+                            '[glance] notice decision:',
+                            {
+                                created:
+                                    false,
+                                reason:
+                                    noticeResult
+                                        ?.reason,
+                            }
+                        )
+                    }
+                }
+
+            if (postSessionId) {
                 const samples =
                     service
                         .getPostSamples(
                             postSessionId
                         )
 
-                semanticService
-                    .analyze({
-                        post:
-                            result.post,
-                        samples,
-                    })
-                    .then(
-                        semanticResult => {
-                            if (
-                                semanticResult
-                                    ?.status ===
-                                'analyzed'
-                            ) {
-                                const analysis =
+                const dwell =
+                    Number(
+                        result
+                            ?.post
+                            ?.total_dwell_seconds ||
+                        0
+                    )
+
+                const fullReady =
+                    dwell >= 18 &&
+                    Array.isArray(samples) &&
+                    samples.length >= 2
+
+                const quickReady =
+                    !fullReady &&
+                    interestService
+                        .shouldQuickAnalyzeText(
+                            req.body?.text
+                        )
+
+                const existingAnalysis =
+                    semanticService
+                        .getAnalysis(
+                            postSessionId
+                        )
+
+                if (
+                    existingAnalysis &&
+                    !(
+                        existingAnalysis
+                            ?.analysis_stage ===
+                            'quick' &&
+                        fullReady
+                    )
+                ) {
+                    const refreshed = {
+                        ...existingAnalysis,
+
+                        engagement: {
+                            dwell_seconds:
+                                Number(
+                                    result
+                                        ?.post
+                                        ?.total_dwell_seconds ||
+                                    existingAnalysis
+                                        ?.engagement
+                                        ?.dwell_seconds ||
+                                    0
+                                ),
+
+                            body_seen:
+                                Boolean(
+                                    result
+                                        ?.post
+                                        ?.body_seen ||
+                                    existingAnalysis
+                                        ?.engagement
+                                        ?.body_seen
+                                ),
+
+                            comments_seen:
+                                Boolean(
+                                    result
+                                        ?.post
+                                        ?.comments_seen ||
+                                    existingAnalysis
+                                        ?.engagement
+                                        ?.comments_seen
+                                ),
+
+                            sample_count:
+                                Math.max(
+                                    Number(
+                                        result
+                                            ?.post
+                                            ?.sample_count ||
+                                        0
+                                    ),
+                                    Number(
+                                        existingAnalysis
+                                            ?.engagement
+                                            ?.sample_count ||
+                                        0
+                                    )
+                                ),
+                        },
+                    }
+
+                    processAnalysis(
+                        refreshed
+                    )
+                }
+
+                if (
+                    fullReady ||
+                    (
+                        quickReady &&
+                        !existingAnalysis
+                    )
+                ) {
+                    semanticService
+                        .analyze({
+                            post:
+                                result.post,
+                            samples,
+                            analysisStage:
+                                fullReady
+                                    ? 'full'
+                                    : 'quick',
+                        })
+                        .then(
+                            semanticResult => {
+                                if (
                                     semanticResult
-                                        .analysis
-
-                                console.log(
-                                    '[glance] semantic:',
-                                    {
-                                        post_session_id:
-                                            analysis
-                                                ?.post_session_id,
-                                        content_type:
-                                            analysis
-                                                ?.content_type,
-                                        relationship_context:
-                                            analysis
-                                                ?.relationship_context,
-                                        romantic_context:
-                                            analysis
-                                                ?.romantic_context,
-                                        named_characters:
-                                            analysis
-                                                ?.named_characters,
-                                        love_and_deepspace_characters:
-                                            analysis
-                                                ?.love_and_deepspace_characters,
-                                        primary_focus:
-                                            analysis
-                                                ?.primary_focus,
-                                        fandom_or_work:
-                                            analysis
-                                                ?.fandom_or_work,
-                                        trope_signals:
-                                            analysis
-                                                ?.trope_signals,
-                                        interaction_pattern:
-                                            analysis
-                                                ?.interaction_pattern,
-                                        confidence:
-                                            analysis
-                                                ?.confidence,
-                                        dwell_seconds:
-                                            analysis
-                                                ?.engagement
-                                                ?.dwell_seconds,
-                                        body_seen:
-                                            analysis
-                                                ?.engagement
-                                                ?.body_seen,
-                                        comments_seen:
-                                            analysis
-                                                ?.engagement
-                                                ?.comments_seen,
-                                        summary:
-                                            analysis
-                                                ?.summary,
-                                    }
-                                )
-
-
-                                const preferenceResult =
-                                    preferenceService
-                                        .observe(
-                                            analysis
-                                        )
-
-                                if (
-                                    preferenceResult
-                                        ?.updated
+                                        ?.status ===
+                                        'analyzed'
                                 ) {
-                                    const related =
-                                        preferenceService
-                                            .getForTropes(
-                                                analysis
-                                                    ?.trope_signals
-                                            )
-
-                                    console.log(
-                                        '[glance] preference hypothesis:',
-                                        related
-                                            .map(
-                                                item => ({
-                                                    trope:
-                                                        item
-                                                            .trope,
-                                                    confidence:
-                                                        item
-                                                            .confidence,
-                                                    evidence_count:
-                                                        item
-                                                            .evidence_count,
-                                                    score:
-                                                        item
-                                                            .score,
-                                                    reading_is_not_consent:
-                                                        true,
-                                                })
-                                            )
+                                    processAnalysis(
+                                        semanticResult
+                                            .analysis
+                                    )
+                                } else if (
+                                    semanticResult
+                                        ?.status ===
+                                        'error'
+                                ) {
+                                    console.warn(
+                                        '[glance] semantic error:',
+                                        semanticResult
+                                            ?.reason
                                     )
                                 }
-
-                                const noticeResult =
-                                    noticeService
-                                        .evaluate(
-                                            analysis
-                                        )
-
-                                if (
-                                    noticeResult
-                                        ?.created
-                                ) {
-                                    const notice =
-                                        noticeResult
-                                            .notice
-
-                                    console.log(
-                                        '[glance] notice:',
-                                        {
-                                            status:
-                                                notice
-                                                    ?.status,
-                                            kind:
-                                                notice
-                                                    ?.kind,
-                                            level:
-                                                notice
-                                                    ?.level,
-                                            salience:
-                                                notice
-                                                    ?.salience,
-                                            character_targets:
-                                                notice
-                                                    ?.character_targets,
-                                            dwell_seconds:
-                                                notice
-                                                    ?.context
-                                                    ?.dwell_seconds,
-                                            comments_seen:
-                                                notice
-                                                    ?.context
-                                                    ?.comments_seen,
-                                            should_surface_now:
-                                                notice
-                                                    ?.should_surface_now,
-                                        }
-                                    )
-
-
-                                    const matchingPreferences =
-                                        preferenceService
-                                            .getForTropes(
-                                                analysis
-                                                    ?.trope_signals
-                                            )
-
-                                    const reactionPlan =
-                                        reactionService
-                                            .plan({
-                                                analysis,
-                                                notice,
-                                                matchingPreferences,
-                                            })
-
-                                    console.log(
-                                        '[glance] reaction plan:',
-                                        {
-                                            mode:
-                                                reactionPlan
-                                                    ?.mode,
-                                            should_surface_now:
-                                                reactionPlan
-                                                    ?.should_surface_now,
-                                            strategy:
-                                                reactionPlan
-                                                    ?.strategy,
-                                            reason:
-                                                reactionPlan
-                                                    ?.reason,
-                                            character_targets:
-                                                reactionPlan
-                                                    ?.character_targets,
-                                            trope_signals:
-                                                reactionPlan
-                                                    ?.trope_signals,
-                                            preference_hypothesis:
-                                                reactionPlan
-                                                    ?.preference_hypothesis,
-                                        }
-                                    )
-
-
-                                    const liveEnabled =
-                                        String(
-                                            process.env
-                                                .GLANCE_LIVE_REACTION ||
-                                            ''
-                                        )
-                                            .trim()
-                                            .toLowerCase() ===
-                                        'true'
-
-                                    if (
-                                        liveEnabled &&
-                                        reactionPlan
-                                            ?.should_surface_now &&
-                                        typeof emitReaction ===
-                                        'function'
-                                    ) {
-                                        emitReaction({
-                                            ownerId,
-                                            analysis,
-                                            notice,
-                                            reactionPlan,
-                                        })
-                                            .then(
-                                                liveResult => {
-                                                    console.log(
-                                                        '[glance] live reaction:',
-                                                        {
-                                                            sent:
-                                                                Boolean(
-                                                                    liveResult
-                                                                        ?.sent
-                                                                ),
-                                                            reason:
-                                                                liveResult
-                                                                    ?.reason ||
-                                                                null,
-                                                            session_id:
-                                                                liveResult
-                                                                    ?.session_id ||
-                                                                null,
-                                                            message_id:
-                                                                liveResult
-                                                                    ?.assistant_message_id ||
-                                                                null,
-                                                            push_sent:
-                                                                Number(
-                                                                    liveResult
-                                                                        ?.push_sent ||
-                                                                    0
-                                                                ),
-                                                        }
-                                                    )
-                                                }
-                                            )
-                                            .catch(
-                                                error => {
-                                                    console.warn(
-                                                        '[glance] live reaction error:',
-                                                        String(
-                                                            error
-                                                                ?.message ||
-                                                            error
-                                                        )
-                                                    )
-                                                }
-                                            )
-                                    }
-                                } else {
-                                    console.log(
-                                        '[glance] notice decision:',
-                                        {
-                                            created:
-                                                false,
-                                            reason:
-                                                noticeResult
-                                                    ?.reason,
-                                        }
-                                    )
-                                }
-                            } else if (
-                                semanticResult
-                                    ?.status ===
-                                'error'
-                            ) {
+                            }
+                        )
+                        .catch(
+                            error => {
                                 console.warn(
                                     '[glance] semantic error:',
-                                    semanticResult
-                                        ?.reason
+                                    String(
+                                        error
+                                            ?.message ||
+                                        error
+                                    )
                                 )
                             }
-                        }
-                    )
-                    .catch(
-                        error => {
-                            console.warn(
-                                '[glance] semantic error:',
-                                String(
-                                    error
-                                        ?.message ||
-                                    error
-                                )
-                            )
-                        }
-                    )
+                        )
+                }
             }
+
 
             return res
                 .status(200)
@@ -902,6 +1105,39 @@ function createGlanceRouter({
         (req, res) => {
             preferenceService.clear()
             reactionService.clear()
+
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                })
+        }
+    )
+
+    router.get(
+        '/xhs/interests',
+        (req, res) => {
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                    thresholds:
+                        interestService
+                            .getConfig(),
+                    latest_signals:
+                        interestService
+                            .getLatestSignals(),
+                    events:
+                        interestService
+                            .listEvents(),
+                })
+        }
+    )
+
+    router.delete(
+        '/xhs/interests',
+        (req, res) => {
+            interestService.clear()
 
             return res
                 .status(200)

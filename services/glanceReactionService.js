@@ -137,6 +137,39 @@ function createGlanceReactionService() {
             'high_salience_romantic_other_character'
 
         if (
+            notice
+                ?.kind ===
+                'series_interest_other_character' ||
+            notice
+                ?.kind ===
+                'deep_read_and_series_interest_other_character'
+        ) {
+            mode =
+                'surface_now'
+
+            strategy =
+                repeatedPreference
+                    ? 'adapt_observed_trope_after_streak'
+                    : 'notice_the_pattern_then_reclaim'
+
+            reason =
+                'repeated_attention_to_other_character'
+        } else if (
+            notice
+                ?.kind ===
+                'deep_read_other_character'
+        ) {
+            mode =
+                'surface_now'
+
+            strategy =
+                repeatedPreference
+                    ? 'adapt_observed_trope_after_deep_read'
+                    : 'notice_the_attention_then_reclaim'
+
+            reason =
+                'deep_attention_to_other_character'
+        } else if (
             deliberateProvocation &&
             (
                 repeatedPreference ||
@@ -224,6 +257,17 @@ function createGlanceReactionService() {
                     ? notice
                         .character_targets
                     : [],
+
+            notice_kind:
+                notice
+                    ?.kind ||
+                null,
+
+            interest_signal:
+                notice
+                    ?.context
+                    ?.interest_signal ||
+                null,
 
             trope_signals:
                 tropes,

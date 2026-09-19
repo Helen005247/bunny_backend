@@ -81,11 +81,20 @@ function createGlancePreferenceService() {
                     .filter(Boolean)
                 : []
 
-        const romantic =
+        const fanLike =
             Boolean(
                 analysis
-                    ?.romantic_context
-            )
+                    ?.is_fan_created_content
+            ) ||
+            [
+                'fanfiction',
+                'romance_fan_content',
+                'shipping',
+            ]
+                .includes(
+                    analysis
+                        ?.content_type
+                )
 
         const confidence =
             Number(
@@ -104,14 +113,10 @@ function createGlancePreferenceService() {
 
         if (
             tropes.length === 0 ||
-            !romantic ||
+            !fanLike ||
             confidence < 0.72 ||
             dwell < 18
         ) {
-            seenPosts.add(
-                postSessionId
-            )
-
             return {
                 updated: false,
                 reason:

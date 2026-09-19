@@ -206,7 +206,10 @@ function createGlanceNoticeService() {
     }
 
     function evaluate(
-        analysis
+        analysis,
+        {
+            interestSignal = null,
+        } = {}
     ) {
         const postSessionId =
             cleanText(
@@ -266,16 +269,7 @@ function createGlanceNoticeService() {
                         ?.relationship_context
                 )
 
-        if (!romantic) {
-            return {
-                created: false,
-                reason:
-                    'non_romantic',
-                notice: null,
-            }
-        }
-
-        const contentLooksRomantic =
+        const fanLike =
             ROMANTIC_CONTENT_TYPES
                 .has(
                     analysis
@@ -286,7 +280,32 @@ function createGlanceNoticeService() {
                     ?.is_fan_created_content
             )
 
-        if (!contentLooksRomantic) {
+        const interestOverride =
+            Boolean(
+                interestSignal
+                    ?.triggered
+            ) &&
+            !Boolean(
+                interestSignal
+                    ?.self_related
+            )
+
+        if (
+            !romantic &&
+            !interestOverride
+        ) {
+            return {
+                created: false,
+                reason:
+                    'non_romantic',
+                notice: null,
+            }
+        }
+
+        if (
+            !fanLike &&
+            !interestOverride
+        ) {
             return {
                 created: false,
                 reason:
@@ -374,7 +393,10 @@ function createGlanceNoticeService() {
                 0
             )
 
-        if (dwell < 18) {
+        if (
+            dwell < 18 &&
+            !interestOverride
+        ) {
             return {
                 created: false,
                 reason:
@@ -383,16 +405,48 @@ function createGlanceNoticeService() {
             }
         }
 
-        const score =
+        const baseScore =
             scoreNotice(
                 analysis,
                 targets
             )
 
+        const score =
+            interestOverride
+                ? Math.max(
+                    baseScore,
+                    Number(
+                        interestSignal
+                            ?.salience ||
+                        0
+                    )
+                )
+                : baseScore
+
         const reasonCodes = [
-            'romantic_context',
+            ...(romantic
+                ? [
+                    'romantic_context',
+                ]
+                : []),
+
             'other_character',
-            'engaged_reading',
+
+            ...(dwell >= 18
+                ? [
+                    'engaged_reading',
+                ]
+                : []),
+
+            ...(interestOverride
+                ? (
+                    interestSignal
+                        ?.reason_codes ||
+                    [
+                        'interest_signal',
+                    ]
+                )
+                : []),
         ]
 
         if (
@@ -426,7 +480,19 @@ function createGlanceNoticeService() {
                 'noticed_but_unsaid',
 
             kind:
-                'romantic_other_character',
+                interestOverride
+                    ? (
+                        interestSignal
+                            ?.kind ===
+                            'interest_streak'
+                            ? 'series_interest_other_character'
+                            : interestSignal
+                                ?.kind ===
+                                'deep_read'
+                                ? 'deep_read_other_character'
+                                : 'deep_read_and_series_interest_other_character'
+                    )
+                    : 'romantic_other_character',
 
             salience:
                 score,
@@ -504,6 +570,42 @@ function createGlanceNoticeService() {
                             ?.engagement
                             ?.comments_seen
                     ),
+
+                interest_signal:
+                    interestOverride
+                        ? {
+                            kind:
+                                interestSignal
+                                    ?.kind ||
+                                null,
+
+                            target:
+                                interestSignal
+                                    ?.target ||
+                                null,
+
+                            distinct_posts:
+                                Number(
+                                    interestSignal
+                                        ?.distinct_posts ||
+                                    0
+                                ),
+
+                            cumulative_dwell_seconds:
+                                Number(
+                                    interestSignal
+                                        ?.cumulative_dwell_seconds ||
+                                    0
+                                ),
+
+                            current_post_dwell_seconds:
+                                Number(
+                                    interestSignal
+                                        ?.current_post_dwell_seconds ||
+                                    0
+                                ),
+                        }
+                        : null,
             },
         }
 

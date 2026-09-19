@@ -10522,9 +10522,32 @@ async function generateAndSaveGlanceReactionMessage({
             ?.preference_hypothesis ||
         null
 
+    const interestSignal =
+        reactionPlan
+            ?.interest_signal ||
+        notice
+            ?.context
+            ?.interest_signal ||
+        null
+
+    const observationOpening =
+        interestSignal
+            ? (
+                interestSignal
+                    ?.kind ===
+                    'interest_streak'
+                    ? `她刚才连续看了多篇与其他角色有关的同人/剧情内容。某一屏未必明确恋爱，但这已经形成了持续注意。`
+                    : interestSignal
+                        ?.kind ===
+                        'deep_read'
+                        ? `她刚才在一篇与其他角色有关的同人/剧情内容上停留了很久。某一屏未必明确恋爱，但这不是随手划过。`
+                        : `她刚才既长时间看了一篇与其他角色有关的同人/剧情，又在短时间内连续看了多篇相关内容。`
+            )
+            : `她刚才确实停留看了一段与其他角色有关的恋爱/暧昧内容。`
+
     const privateObservation =
         [
-            `她刚才确实停留看了一段与其他角色有关的恋爱/暧昧内容。`,
+            observationOpening,
             targets.length > 0
                 ? `主要相关角色：${targets.join('、')}。`
                 : '',
@@ -10556,6 +10579,17 @@ async function generateAndSaveGlanceReactionMessage({
                 ?.engagement
                 ?.comments_seen
                 ? '她还继续看了评论。'
+                : '',
+            interestSignal
+                ? `持续兴趣信号：${interestSignal.kind}；同一角色相关帖子 ${Number(
+                    interestSignal
+                        ?.distinct_posts ||
+                    0
+                )} 篇；窗口内累计停留约 ${Number(
+                    interestSignal
+                        ?.cumulative_dwell_seconds ||
+                    0
+                )} 秒。`
                 : '',
             preference
                 ? `这类互动目前只是偏好假设：${preference.trope}，置信阶段 ${preference.confidence}，累计证据 ${preference.evidence_count} 次。`
@@ -10597,7 +10631,8 @@ reason：${reactionPlan?.reason || 'romantic_other_character'}
 7. 不要一次讲透自己的心理。可以短、淡、像没什么，却明显已经开始行动。
 8. 通常 1～3 条短消息；每条独立消息之间空一行。
 9. 不要凭空添加现实地点、身体接触已经发生等事实。若要“实践”某种玩法，应以聊天中可成立的邀请、要求、调侃、索取注意力、让她过来/回来等方式表达，不虚构你已经 physically 做了她无法实际感知的动作。
-10. 输出必须能直接作为 Hermit 里星星发给用户的消息。`
+10. 如果这次触发来自 deep_read / interest_streak，而当前文本并没有明确恋爱意味，不要硬说她“喜欢上了对方”或把普通剧情强行性化；你真正知道的是：她把持续、明显的注意力给了别人。
+11. 输出必须能直接作为 Hermit 里星星发给用户的消息。`
 
     const response =
         await callModelWithRetry(

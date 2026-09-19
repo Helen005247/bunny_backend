@@ -154,6 +154,7 @@ function normalizeAnalysis(
     {
         postSessionId,
         post,
+        analysisStage = 'full',
     }
 ) {
     const allowedContentTypes =
@@ -246,6 +247,9 @@ function normalizeAnalysis(
 
         model:
             DEFAULT_MODEL,
+
+        analysis_stage:
+            analysisStage,
 
         content_type:
             contentType,
@@ -378,6 +382,7 @@ function normalizeAnalysis(
 function buildInput({
     post,
     samples,
+    analysisStage = 'full',
 }) {
     const joined =
         samples
@@ -399,6 +404,10 @@ function buildInput({
     return `你是 Hermit 的“小红书余光内容分类器”。
 
 任务：只根据下面 OCR 文本判断用户正在看的内容是什么。不要替角色说话，不要生成回复，不要做情绪反应。
+
+当前分析阶段：${analysisStage}
+- quick：只有一次采样时做快速归类，重点识别内容类型、明确角色与大致互动模式；证据不足就保守输出。
+- full：有重复采样/停留证据后做完整归类。
 
 特别注意：
 1. 不要因为只出现一个角色名字，就自动判断为恋爱同人。
@@ -481,6 +490,7 @@ function createGlanceSemanticService({
     function shouldAnalyze({
         post,
         samples,
+        analysisStage = 'full',
     }) {
         if (
             typeof callModel !==
@@ -505,24 +515,10 @@ function createGlanceSemanticService({
         }
 
         if (
-            Number(
-                post
-                    ?.total_dwell_seconds ||
-                0
-            ) < 18
-        ) {
-            return {
-                ok: false,
-                reason:
-                    'not_engaged_enough',
-            }
-        }
-
-        if (
             !Array.isArray(
                 samples
             ) ||
-            samples.length < 2
+            samples.length < 1
         ) {
             return {
                 ok: false,
@@ -546,6 +542,51 @@ function createGlanceSemanticService({
                 )
 
         if (
+            analysisStage ===
+            'quick'
+        ) {
+            if (
+                usefulChars < 70
+            ) {
+                return {
+                    ok: false,
+                    reason:
+                        'not_enough_text',
+                }
+            }
+
+            return {
+                ok: true,
+                reason:
+                    'quick_ready',
+            }
+        }
+
+        if (
+            Number(
+                post
+                    ?.total_dwell_seconds ||
+                0
+            ) < 18
+        ) {
+            return {
+                ok: false,
+                reason:
+                    'not_engaged_enough',
+            }
+        }
+
+        if (
+            samples.length < 2
+        ) {
+            return {
+                ok: false,
+                reason:
+                    'not_enough_samples',
+            }
+        }
+
+        if (
             usefulChars < 60
         ) {
             return {
@@ -557,13 +598,73 @@ function createGlanceSemanticService({
 
         return {
             ok: true,
-            reason: 'ready',
+            reason:
+                'full_ready',
+        }
+    }
+
+    function withCurrentEngagement(
+        analysis,
+        post
+    ) {
+        if (!analysis) {
+            return analysis
+        }
+
+        return {
+            ...analysis,
+
+            engagement: {
+                dwell_seconds:
+                    Number(
+                        post
+                            ?.total_dwell_seconds ||
+                        analysis
+                            ?.engagement
+                            ?.dwell_seconds ||
+                        0
+                    ),
+
+                body_seen:
+                    Boolean(
+                        post
+                            ?.body_seen ||
+                        analysis
+                            ?.engagement
+                            ?.body_seen
+                    ),
+
+                comments_seen:
+                    Boolean(
+                        post
+                            ?.comments_seen ||
+                        analysis
+                            ?.engagement
+                            ?.comments_seen
+                    ),
+
+                sample_count:
+                    Math.max(
+                        Number(
+                            post
+                                ?.sample_count ||
+                            0
+                        ),
+                        Number(
+                            analysis
+                                ?.engagement
+                                ?.sample_count ||
+                            0
+                        )
+                    ),
+            },
         }
     }
 
     async function analyze({
         post,
         samples,
+        analysisStage = 'full',
     }) {
         const postSessionId =
             post
@@ -573,11 +674,13 @@ function createGlanceSemanticService({
             shouldAnalyze({
                 post,
                 samples,
+                analysisStage,
             })
 
         if (!gate.ok) {
             return {
-                status: 'skipped',
+                status:
+                    'skipped',
                 reason:
                     gate.reason,
                 analysis:
@@ -585,29 +688,52 @@ function createGlanceSemanticService({
             }
         }
 
-        if (
-            analyses.has(
+        const cached =
+            analyses.get(
                 postSessionId
             )
+
+        if (
+            cached &&
+            !(
+                cached
+                    ?.analysis_stage ===
+                    'quick' &&
+                analysisStage ===
+                    'full'
+            )
         ) {
+            const refreshed =
+                withCurrentEngagement(
+                    cached,
+                    post
+                )
+
+            analyses.set(
+                postSessionId,
+                refreshed
+            )
+
             return {
-                status: 'cached',
+                status:
+                    'cached',
                 reason:
                     'already_analyzed',
                 analysis:
-                    analyses.get(
-                        postSessionId
-                    ),
+                    refreshed,
             }
         }
 
+        const pendingKey =
+            `${postSessionId}:${analysisStage}`
+
         if (
             pending.has(
-                postSessionId
+                pendingKey
             )
         ) {
             return pending.get(
-                postSessionId
+                pendingKey
             )
         }
 
@@ -624,6 +750,7 @@ function createGlanceSemanticService({
                                     buildInput({
                                         post,
                                         samples,
+                                        analysisStage,
                                     }),
                             },
                             2
@@ -647,6 +774,7 @@ function createGlanceSemanticService({
                             {
                                 postSessionId,
                                 post,
+                                analysisStage,
                             }
                         )
 
@@ -684,13 +812,13 @@ function createGlanceSemanticService({
                     }
                 } finally {
                     pending.delete(
-                        postSessionId
+                        pendingKey
                     )
                 }
             })()
 
         pending.set(
-            postSessionId,
+            pendingKey,
             job
         )
 
