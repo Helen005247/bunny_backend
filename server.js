@@ -7,6 +7,7 @@ const { createClient } = require('@supabase/supabase-js')
 const webpush = require('web-push')
 const crypto = require('crypto')
 const { DateTime } = require('luxon')
+const createGlanceRouter = require('./routes/glance')
 
 
 
@@ -196,6 +197,24 @@ if (
         }
     )
 }
+
+
+// ======================================================
+// 余光模式 v0.1
+//
+// iPhone 快捷指令使用独立 GLANCE_SHORTCUT_TOKEN。
+// v0.1 只验证“小红书状态 + OCR 文字”通路：
+// - 不写数据库
+// - 不调用 AI
+// - 不触发星星消息
+// ======================================================
+
+app.use(
+    '/api/glance',
+    createGlanceRouter({
+        supabase,
+    })
+)
 
 
 // ======================================================
