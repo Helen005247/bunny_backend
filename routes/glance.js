@@ -111,7 +111,7 @@ function createGlanceRouter({
                 .json({
                     ok: true,
                     feature:
-                        'hermit-glance-v0.3',
+                        'hermit-glance-v0.3.1',
                     shortcut_token_configured:
                         Boolean(
                             shortcutToken
@@ -170,6 +170,26 @@ function createGlanceRouter({
             }
 
             return next()
+        }
+    )
+
+    // 给 iOS 快捷指令使用的最简单前台状态门控。
+    // 返回纯文本 1 / 0，避免 Shortcuts 对 JSON Boolean 的类型判断问题。
+    router.get(
+        '/xhs/active',
+        (req, res) => {
+            const state =
+                service
+                    .getPublicState()
+
+            return res
+                .status(200)
+                .type('text/plain')
+                .send(
+                    state.active
+                        ? '1'
+                        : '0'
+                )
         }
     )
 
