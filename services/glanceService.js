@@ -2,6 +2,10 @@
 
 const crypto = require('crypto')
 
+const {
+    createGlancePostTracker,
+} = require('./glancePostTracker')
+
 const MAX_TEXT = 12000
 const MAX_RECENT = 18
 const ACTIVE_TTL_MS = 2 * 60 * 60 * 1000
@@ -170,6 +174,9 @@ function createGlanceService({
     activeTtlMs = ACTIVE_TTL_MS,
 } = {}) {
 
+    const postTracker =
+        createGlancePostTracker()
+
     const xhs = {
         active: false,
         sessionId: null,
@@ -224,6 +231,9 @@ function createGlanceService({
             recent_count: xhs.recent.length,
             owner_configured: Boolean(String(ownerId || '').trim()),
             reading: getReadingSummary(),
+            post:
+                postTracker
+                    .getSummary(),
         }
     }
 
@@ -240,6 +250,7 @@ function createGlanceService({
             xhs.openedAt = now
             xhs.closedAt = null
             resetReading()
+            postTracker.reset()
         } else {
             xhs.active = false
             xhs.closedAt = now
@@ -365,6 +376,16 @@ function createGlanceService({
             exactDuplicate
         )
 
+        const post =
+            postTracker
+                .record({
+                    text:
+                        cleanText,
+                    sampleAt,
+                    reading,
+                    exactDuplicate,
+                })
+
         xhs.observationCount += 1
         xhs.lastObservationAt = now
 
@@ -386,6 +407,7 @@ function createGlanceService({
                     seen_count: last.seen_count,
                 },
                 reading,
+                post,
                 state: getPublicState(),
             }
         }
@@ -405,6 +427,7 @@ function createGlanceService({
             text: cleanText,
             truncated,
             reading,
+            post,
         }
 
         xhs.recent.push(observation)
@@ -425,6 +448,7 @@ function createGlanceService({
                 seen_count: observation.seen_count,
             },
             reading,
+            post,
             state: getPublicState(),
         }
     }
@@ -446,6 +470,7 @@ function createGlanceService({
                 preview: item.preview,
                 truncated: Boolean(item.truncated),
                 reading: item.reading || null,
+                post: item.post || null,
             }
 
             if (includeText) out.text = item.text
@@ -459,12 +484,17 @@ function createGlanceService({
         xhs.duplicateCount = 0
         xhs.lastObservationAt = null
         resetReading()
+        postTracker.reset()
         return getPublicState()
     }
 
     return {
         getPublicState,
         getReadingSummary,
+        getPostSummary:
+            () =>
+                postTracker
+                    .getSummary(),
         setXhsActive,
         recordXhsObservation,
         getRecentObservations,

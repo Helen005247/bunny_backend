@@ -111,7 +111,7 @@ function createGlanceRouter({
                 .json({
                     ok: true,
                     feature:
-                        'hermit-glance-v0.2',
+                        'hermit-glance-v0.3',
                     shortcut_token_configured:
                         Boolean(
                             shortcutToken
@@ -288,6 +288,22 @@ function createGlanceRouter({
                         result.reading?.similarity,
                     repeated_terms:
                         result.reading?.repeated_terms,
+                    post_session_id:
+                        result.post?.post_session_id,
+                    post_status:
+                        result.post?.status,
+                    post_dwell_seconds:
+                        result.post?.total_dwell_seconds,
+                    screen_mode:
+                        result.post?.current_screen_mode,
+                    body_seen:
+                        result.post?.body_seen,
+                    comments_seen:
+                        result.post?.comments_seen,
+                    same_post_confidence:
+                        result.post?.same_post_confidence,
+                    post_transition:
+                        result.post?.transition_reason,
                     preview:
                         String(
                             result.observation?.preview || ''
@@ -317,6 +333,20 @@ function createGlanceRouter({
                     reading:
                         service
                             .getReadingSummary(),
+                })
+        }
+    )
+
+    router.get(
+        '/xhs/post-summary',
+        (req, res) => {
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                    post:
+                        service
+                            .getPostSummary(),
                 })
         }
     )
