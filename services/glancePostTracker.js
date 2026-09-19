@@ -67,14 +67,68 @@ function secondsBetween(a, b) {
     )
 }
 
+function countOccurrences(value, needle) {
+    if (!needle) return 0
+
+    let count = 0
+    let from = 0
+
+    while (true) {
+        const index = value.indexOf(
+            needle,
+            from
+        )
+
+        if (index === -1) break
+
+        count += 1
+        from =
+            index +
+            needle.length
+    }
+
+    return count
+}
+
 function detectScreenMode(text) {
     const value = cleanText(text)
 
-    const commentHits =
+    const uniqueCommentMarkers =
         COMMENT_MARKERS.filter(
             marker =>
                 value.includes(marker)
         ).length
+
+    const replyCount =
+        countOccurrences(
+            value,
+            '回复'
+        )
+
+    const relativeTimeMatches =
+        value.match(
+            /\d+\s*(?:秒前|分钟前|小时前|天前|周前|月前)/g
+        ) || []
+
+    const commentScore =
+        uniqueCommentMarkers +
+        Math.min(2, replyCount) +
+        Math.min(
+            2,
+            relativeTimeMatches.length
+        )
+
+    if (
+        /共\s*\d+\s*条评论/.test(value) ||
+        replyCount >= 2 ||
+        (
+            replyCount >= 1 &&
+            relativeTimeMatches.length >= 2
+        ) ||
+        commentScore >= 4
+    ) {
+        return 'comments'
+    }
 
     const feedHits =
         FEED_MARKERS.filter(
@@ -83,20 +137,11 @@ function detectScreenMode(text) {
         ).length
 
     if (
-        commentHits >= 2 ||
-        /共\s*\d+\s*条评论/.test(value)
-    ) {
-        return 'comments'
-    }
-
-    // 小红书推荐流通常会同时出现多项顶栏/频道词。
-    if (
         feedHits >= 4
     ) {
         return 'feed'
     }
 
-    // 文字量较多、又不像 feed / 评论区，先视为正文候选。
     if (
         value.length >= 90
     ) {

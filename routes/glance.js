@@ -111,7 +111,7 @@ function createGlanceRouter({
                 .json({
                     ok: true,
                     feature:
-                        'hermit-glance-v0.3.1',
+                        'hermit-glance-v0.3.2',
                     shortcut_token_configured:
                         Boolean(
                             shortcutToken
