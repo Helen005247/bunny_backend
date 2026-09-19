@@ -7,6 +7,10 @@ const {
     createGlanceService,
 } = require('../services/glanceService')
 
+const {
+    createGlanceSemanticService,
+} = require('../services/glanceSemanticService')
+
 function safeEqualString(
     left,
     right
@@ -78,6 +82,7 @@ function getShortcutKey(req) {
 
 function createGlanceRouter({
     supabase = null,
+    callModel = null,
 } = {}) {
 
     const router =
@@ -102,6 +107,11 @@ function createGlanceRouter({
             ownerId,
         })
 
+    const semanticService =
+        createGlanceSemanticService({
+            callModel,
+        })
+
     // 公开健康检查：只确认功能是否部署成功，不返回 Secret。
     router.get(
         '/health',
@@ -111,7 +121,7 @@ function createGlanceRouter({
                 .json({
                     ok: true,
                     feature:
-                        'hermit-glance-v0.3.2',
+                        'hermit-glance-v0.4',
                     shortcut_token_configured:
                         Boolean(
                             shortcutToken
@@ -123,7 +133,11 @@ function createGlanceRouter({
                     storage:
                         'memory-only',
                     ai_enabled:
-                        false,
+                        typeof callModel ===
+                        'function',
+                    semantic_analysis_enabled:
+                        typeof callModel ===
+                        'function',
                     database_write_enabled:
                         false,
                     supabase_available:
@@ -245,7 +259,7 @@ function createGlanceRouter({
                     )
 
             console.log(
-                `[glance] xhs ${active ? 'opened' : 'closed'}`
+                `[glance] xhs ${state.state_transition}`
             )
 
             return res
@@ -331,6 +345,120 @@ function createGlanceRouter({
                 }
             )
 
+
+            // v0.4：只在确认用户已在同一篇内容上停留后，
+            // 异步做一次语义分类。不会阻塞快捷指令响应。
+            const postSessionId =
+                result
+                    ?.post
+                    ?.post_session_id
+
+            if (
+                postSessionId &&
+                Number(
+                    result
+                        ?.post
+                        ?.total_dwell_seconds ||
+                    0
+                ) >= 18
+            ) {
+                const samples =
+                    service
+                        .getPostSamples(
+                            postSessionId
+                        )
+
+                semanticService
+                    .analyze({
+                        post:
+                            result.post,
+                        samples,
+                    })
+                    .then(
+                        semanticResult => {
+                            if (
+                                semanticResult
+                                    ?.status ===
+                                'analyzed'
+                            ) {
+                                const analysis =
+                                    semanticResult
+                                        .analysis
+
+                                console.log(
+                                    '[glance] semantic:',
+                                    {
+                                        post_session_id:
+                                            analysis
+                                                ?.post_session_id,
+                                        content_type:
+                                            analysis
+                                                ?.content_type,
+                                        relationship_context:
+                                            analysis
+                                                ?.relationship_context,
+                                        romantic_context:
+                                            analysis
+                                                ?.romantic_context,
+                                        named_characters:
+                                            analysis
+                                                ?.named_characters,
+                                        love_and_deepspace_characters:
+                                            analysis
+                                                ?.love_and_deepspace_characters,
+                                        primary_focus:
+                                            analysis
+                                                ?.primary_focus,
+                                        fandom_or_work:
+                                            analysis
+                                                ?.fandom_or_work,
+                                        confidence:
+                                            analysis
+                                                ?.confidence,
+                                        dwell_seconds:
+                                            analysis
+                                                ?.engagement
+                                                ?.dwell_seconds,
+                                        body_seen:
+                                            analysis
+                                                ?.engagement
+                                                ?.body_seen,
+                                        comments_seen:
+                                            analysis
+                                                ?.engagement
+                                                ?.comments_seen,
+                                        summary:
+                                            analysis
+                                                ?.summary,
+                                    }
+                                )
+                            } else if (
+                                semanticResult
+                                    ?.status ===
+                                'error'
+                            ) {
+                                console.warn(
+                                    '[glance] semantic error:',
+                                    semanticResult
+                                        ?.reason
+                                )
+                            }
+                        }
+                    )
+                    .catch(
+                        error => {
+                            console.warn(
+                                '[glance] semantic error:',
+                                String(
+                                    error
+                                        ?.message ||
+                                    error
+                                )
+                            )
+                        }
+                    )
+            }
+
             return res
                 .status(200)
                 .json({
@@ -367,6 +495,49 @@ function createGlanceRouter({
                     post:
                         service
                             .getPostSummary(),
+                })
+        }
+    )
+
+    router.get(
+        '/xhs/semantic',
+        (req, res) => {
+            const postSessionId =
+                typeof req.query
+                    ?.post_session_id ===
+                    'string'
+                    ? req.query
+                        .post_session_id
+                        .trim()
+                    : ''
+
+            const analysis =
+                postSessionId
+                    ? semanticService
+                        .getAnalysis(
+                            postSessionId
+                        )
+                    : semanticService
+                        .getLatest()
+
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                    analysis,
+                })
+        }
+    )
+
+    router.delete(
+        '/xhs/semantic',
+        (req, res) => {
+            semanticService.clear()
+
+            return res
+                .status(200)
+                .json({
+                    ok: true,
                 })
         }
     )

@@ -244,20 +244,41 @@ function createGlanceService({
         expire()
         const now = new Date().toISOString()
 
+        let stateTransition =
+            'unchanged'
+
         if (active) {
-            xhs.active = true
-            xhs.sessionId = sessionId()
-            xhs.openedAt = now
-            xhs.closedAt = null
-            resetReading()
-            postTracker.reset()
+            // iOS 快捷指令可能在同一次刷小红书过程中重复触发“打开 App”。
+            // 如果余光 session 已经是 active，就不要重置 reading / post session。
+            if (!xhs.active) {
+                xhs.active = true
+                xhs.sessionId = sessionId()
+                xhs.openedAt = now
+                xhs.closedAt = null
+                resetReading()
+                postTracker.reset()
+                stateTransition =
+                    'opened'
+            } else {
+                stateTransition =
+                    'already_active'
+            }
         } else {
-            xhs.active = false
-            xhs.closedAt = now
+            if (xhs.active) {
+                xhs.active = false
+                xhs.closedAt = now
+                stateTransition =
+                    'closed'
+            } else {
+                stateTransition =
+                    'already_inactive'
+            }
         }
 
         return {
             ...getPublicState(),
+            state_transition:
+                stateTransition,
             trigger: String(trigger || '').slice(0, 80),
             device: String(device || '').slice(0, 80),
         }
@@ -478,6 +499,46 @@ function createGlanceService({
         })
     }
 
+    function getPostSamples(
+        postSessionId
+    ) {
+        const id =
+            String(
+                postSessionId || ''
+            )
+                .trim()
+
+        if (!id) {
+            return []
+        }
+
+        return xhs.recent
+            .filter(
+                item =>
+                    item
+                        ?.post
+                        ?.post_session_id ===
+                    id
+            )
+            .map(
+                item => ({
+                    captured_at:
+                        item
+                            .captured_at,
+
+                    screen_mode:
+                        item
+                            ?.post
+                            ?.current_screen_mode ||
+                        'unknown',
+
+                    text:
+                        item
+                            .text,
+                })
+            )
+    }
+
     function clearRecent() {
         xhs.recent = []
         xhs.observationCount = 0
@@ -498,6 +559,7 @@ function createGlanceService({
         setXhsActive,
         recordXhsObservation,
         getRecentObservations,
+        getPostSamples,
         clearRecent,
     }
 }

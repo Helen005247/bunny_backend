@@ -213,6 +213,8 @@ app.use(
     '/api/glance',
     createGlanceRouter({
         supabase,
+        callModel:
+            callModelWithRetry,
     })
 )
 
