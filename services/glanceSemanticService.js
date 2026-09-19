@@ -570,7 +570,7 @@ function createGlanceSemanticService({
                                         samples,
                                     }),
                             },
-                            1
+                            2
                         )
 
                     const parsed =

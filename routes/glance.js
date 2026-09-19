@@ -11,6 +11,10 @@ const {
     createGlanceSemanticService,
 } = require('../services/glanceSemanticService')
 
+const {
+    createGlanceNoticeService,
+} = require('../services/glanceNoticeService')
+
 function safeEqualString(
     left,
     right
@@ -112,6 +116,9 @@ function createGlanceRouter({
             callModel,
         })
 
+    const noticeService =
+        createGlanceNoticeService()
+
     // 公开健康检查：只确认功能是否部署成功，不返回 Secret。
     router.get(
         '/health',
@@ -121,7 +128,7 @@ function createGlanceRouter({
                 .json({
                     ok: true,
                     feature:
-                        'hermit-glance-v0.4',
+                        'hermit-glance-v0.5',
                     shortcut_token_configured:
                         Boolean(
                             shortcutToken
@@ -138,6 +145,12 @@ function createGlanceRouter({
                     semantic_analysis_enabled:
                         typeof callModel ===
                         'function',
+                    notice_engine_enabled:
+                        true,
+                    notice_storage:
+                        'memory-only',
+                    proactive_message_enabled:
+                        false,
                     database_write_enabled:
                         false,
                     supabase_available:
@@ -432,6 +445,65 @@ function createGlanceRouter({
                                                 ?.summary,
                                     }
                                 )
+
+
+                                const noticeResult =
+                                    noticeService
+                                        .evaluate(
+                                            analysis
+                                        )
+
+                                if (
+                                    noticeResult
+                                        ?.created
+                                ) {
+                                    const notice =
+                                        noticeResult
+                                            .notice
+
+                                    console.log(
+                                        '[glance] notice:',
+                                        {
+                                            status:
+                                                notice
+                                                    ?.status,
+                                            kind:
+                                                notice
+                                                    ?.kind,
+                                            level:
+                                                notice
+                                                    ?.level,
+                                            salience:
+                                                notice
+                                                    ?.salience,
+                                            character_targets:
+                                                notice
+                                                    ?.character_targets,
+                                            dwell_seconds:
+                                                notice
+                                                    ?.context
+                                                    ?.dwell_seconds,
+                                            comments_seen:
+                                                notice
+                                                    ?.context
+                                                    ?.comments_seen,
+                                            should_surface_now:
+                                                notice
+                                                    ?.should_surface_now,
+                                        }
+                                    )
+                                } else {
+                                    console.log(
+                                        '[glance] notice decision:',
+                                        {
+                                            created:
+                                                false,
+                                            reason:
+                                                noticeResult
+                                                    ?.reason,
+                                        }
+                                    )
+                                }
                             } else if (
                                 semanticResult
                                     ?.status ===
@@ -533,6 +605,47 @@ function createGlanceRouter({
         '/xhs/semantic',
         (req, res) => {
             semanticService.clear()
+
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                })
+        }
+    )
+
+    router.get(
+        '/xhs/notices',
+        (req, res) => {
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                    notices:
+                        noticeService
+                            .list(),
+                })
+        }
+    )
+
+    router.get(
+        '/xhs/notices/latest',
+        (req, res) => {
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                    notice:
+                        noticeService
+                            .getLatest(),
+                })
+        }
+    )
+
+    router.delete(
+        '/xhs/notices',
+        (req, res) => {
+            noticeService.clear()
 
             return res
                 .status(200)
