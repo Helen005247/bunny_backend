@@ -111,7 +111,7 @@ function createGlanceRouter({
                 .json({
                     ok: true,
                     feature:
-                        'hermit-glance-v0.1',
+                        'hermit-glance-v0.2',
                     shortcut_token_configured:
                         Boolean(
                             shortcutToken
@@ -272,27 +272,26 @@ function createGlanceRouter({
                         ...result,
                     })
             }
-
-            // 只打短 preview，避免 Render 日志长期留下整篇正文。
+            // v0.2：日志同时显示停留判断。
             console.log(
                 '[glance] xhs observation:',
                 {
                     duplicate:
                         result.duplicate,
                     char_count:
-                        result
-                            .observation
-                            ?.char_count,
+                        result.observation?.char_count,
+                    reading_state:
+                        result.reading?.reading_state,
+                    dwell_seconds:
+                        result.reading?.dwell_seconds,
+                    similarity:
+                        result.reading?.similarity,
+                    repeated_terms:
+                        result.reading?.repeated_terms,
                     preview:
                         String(
-                            result
-                                .observation
-                                ?.preview ||
-                            ''
-                        ).slice(
-                            0,
-                            160
-                        ),
+                            result.observation?.preview || ''
+                        ).slice(0, 160),
                 }
             )
 
@@ -301,6 +300,23 @@ function createGlanceRouter({
                 .json({
                     ok: true,
                     ...result,
+                })
+        }
+    )
+
+    router.get(
+        '/xhs/summary',
+        (req, res) => {
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                    state:
+                        service
+                            .getPublicState(),
+                    reading:
+                        service
+                            .getReadingSummary(),
                 })
         }
     )
