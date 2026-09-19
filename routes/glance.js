@@ -15,6 +15,14 @@ const {
     createGlanceNoticeService,
 } = require('../services/glanceNoticeService')
 
+const {
+    createGlancePreferenceService,
+} = require('../services/glancePreferenceService')
+
+const {
+    createGlanceReactionService,
+} = require('../services/glanceReactionService')
+
 function safeEqualString(
     left,
     right
@@ -119,6 +127,12 @@ function createGlanceRouter({
     const noticeService =
         createGlanceNoticeService()
 
+    const preferenceService =
+        createGlancePreferenceService()
+
+    const reactionService =
+        createGlanceReactionService()
+
     // 公开健康检查：只确认功能是否部署成功，不返回 Secret。
     router.get(
         '/health',
@@ -128,7 +142,7 @@ function createGlanceRouter({
                 .json({
                     ok: true,
                     feature:
-                        'hermit-glance-v0.5',
+                        'hermit-glance-v0.6',
                     shortcut_token_configured:
                         Boolean(
                             shortcutToken
@@ -148,6 +162,12 @@ function createGlanceRouter({
                     notice_engine_enabled:
                         true,
                     notice_storage:
+                        'memory-only',
+                    preference_hypothesis_enabled:
+                        true,
+                    reaction_planner_enabled:
+                        true,
+                    reaction_storage:
                         'memory-only',
                     proactive_message_enabled:
                         false,
@@ -425,6 +445,12 @@ function createGlanceRouter({
                                         fandom_or_work:
                                             analysis
                                                 ?.fandom_or_work,
+                                        trope_signals:
+                                            analysis
+                                                ?.trope_signals,
+                                        interaction_pattern:
+                                            analysis
+                                                ?.interaction_pattern,
                                         confidence:
                                             analysis
                                                 ?.confidence,
@@ -446,6 +472,47 @@ function createGlanceRouter({
                                     }
                                 )
 
+
+                                const preferenceResult =
+                                    preferenceService
+                                        .observe(
+                                            analysis
+                                        )
+
+                                if (
+                                    preferenceResult
+                                        ?.updated
+                                ) {
+                                    const related =
+                                        preferenceService
+                                            .getForTropes(
+                                                analysis
+                                                    ?.trope_signals
+                                            )
+
+                                    console.log(
+                                        '[glance] preference hypothesis:',
+                                        related
+                                            .map(
+                                                item => ({
+                                                    trope:
+                                                        item
+                                                            .trope,
+                                                    confidence:
+                                                        item
+                                                            .confidence,
+                                                    evidence_count:
+                                                        item
+                                                            .evidence_count,
+                                                    score:
+                                                        item
+                                                            .score,
+                                                    reading_is_not_consent:
+                                                        true,
+                                                })
+                                            )
+                                    )
+                                }
 
                                 const noticeResult =
                                     noticeService
@@ -490,6 +557,49 @@ function createGlanceRouter({
                                             should_surface_now:
                                                 notice
                                                     ?.should_surface_now,
+                                        }
+                                    )
+
+
+                                    const matchingPreferences =
+                                        preferenceService
+                                            .getForTropes(
+                                                analysis
+                                                    ?.trope_signals
+                                            )
+
+                                    const reactionPlan =
+                                        reactionService
+                                            .plan({
+                                                analysis,
+                                                notice,
+                                                matchingPreferences,
+                                            })
+
+                                    console.log(
+                                        '[glance] reaction plan:',
+                                        {
+                                            mode:
+                                                reactionPlan
+                                                    ?.mode,
+                                            should_surface_now:
+                                                reactionPlan
+                                                    ?.should_surface_now,
+                                            strategy:
+                                                reactionPlan
+                                                    ?.strategy,
+                                            reason:
+                                                reactionPlan
+                                                    ?.reason,
+                                            character_targets:
+                                                reactionPlan
+                                                    ?.character_targets,
+                                            trope_signals:
+                                                reactionPlan
+                                                    ?.trope_signals,
+                                            preference_hypothesis:
+                                                reactionPlan
+                                                    ?.preference_hypothesis,
                                         }
                                     )
                                 } else {
@@ -646,6 +756,62 @@ function createGlanceRouter({
         '/xhs/notices',
         (req, res) => {
             noticeService.clear()
+
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                })
+        }
+    )
+
+    router.get(
+        '/xhs/preferences',
+        (req, res) => {
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                    hypotheses:
+                        preferenceService
+                            .list(),
+                })
+        }
+    )
+
+    router.get(
+        '/xhs/reactions',
+        (req, res) => {
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                    reactions:
+                        reactionService
+                            .list(),
+                })
+        }
+    )
+
+    router.get(
+        '/xhs/reactions/latest',
+        (req, res) => {
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                    reaction:
+                        reactionService
+                            .getLatest(),
+                })
+        }
+    )
+
+    router.delete(
+        '/xhs/preferences',
+        (req, res) => {
+            preferenceService.clear()
+            reactionService.clear()
 
             return res
                 .status(200)

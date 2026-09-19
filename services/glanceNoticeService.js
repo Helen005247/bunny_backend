@@ -418,7 +418,7 @@ function createGlanceNoticeService() {
                 getLevel(score),
 
             should_surface_now:
-                false,
+                score >= 0.80,
 
             character_targets:
                 targets,

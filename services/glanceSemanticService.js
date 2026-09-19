@@ -180,6 +180,31 @@ function normalizeAnalysis(
             'none',
         ])
 
+    const allowedTropeSignals =
+        new Set([
+            'caught_looking_elsewhere',
+            'jealousy_reclaim',
+            'attention_reclaim',
+            'provoking_jealousy',
+            'possessive_claim',
+            'role_reversal',
+            'teasing_control',
+            'protective_control',
+            'direct_pursuit',
+            'other',
+        ])
+
+    const tropeSignals =
+        uniqueStrings(
+            raw?.trope_signals,
+            8
+        )
+            .filter(
+                item =>
+                    allowedTropeSignals
+                        .has(item)
+            )
+
     const contentType =
         allowedContentTypes.has(
             raw?.content_type
@@ -274,6 +299,23 @@ function normalizeAnalysis(
                 raw?.is_gameplay_or_strategy
             ),
 
+        trope_signals:
+            tropeSignals,
+
+        interaction_pattern:
+            cleanText(
+                raw?.interaction_pattern
+            )
+                .replace(
+                    /\s+/g,
+                    ' '
+                )
+                .slice(
+                    0,
+                    180
+                ) ||
+            null,
+
         summary:
             cleanText(
                 raw?.summary
@@ -366,7 +408,19 @@ function buildInput({
 5. 《恋与深空》关注角色包括：沈星回、秦彻、黎深、祁煜、夏以昼。
 6. 正文与评论可以属于同一篇帖子。评论里的讨论可以帮助判断原帖内容，但不要把评论者昵称当角色名。
 7. 如果证据不足，宁可输出 unclear / ambiguous。
-8. 只输出一个 JSON 对象，不要 Markdown，不要解释。
+8. 另外识别文本里明显存在的“互动玩法/情境 trope”。只能从下面这些标签里选，证据不够就输出空数组：
+   - caught_looking_elsewhere：恋人发现对方在看/关注其他暧昧对象
+   - jealousy_reclaim：吃醋后主动把注意力、亲密位置或关系位置拿回来
+   - attention_reclaim：不一定明显吃醋，但主动重新占据注意力中心
+   - provoking_jealousy：一方故意逗、试探或刺激另一方吃醋
+   - possessive_claim：强调“我的位置 / 不让出 / 归属感”的关系表达
+   - role_reversal：表面弱势、猎物、无辜，实际反过来掌控节奏
+   - teasing_control：用玩笑、游戏、装无辜等方式逐步接管互动节奏
+   - protective_control：安全/照顾场景里直接接管行动
+   - direct_pursuit：明确主动追近、索取亲密或推进关系
+   - other：确有明显互动套路但不属于上面
+9. trope 只描述“帖子里的玩法”，绝不能因为用户看了它，就断言用户已经同意现实中被这样对待。
+10. 只输出一个 JSON 对象，不要 Markdown，不要解释。
 
 JSON 格式：
 {
@@ -380,6 +434,8 @@ JSON 格式：
   "is_fictional_character_content": true,
   "is_fan_created_content": true,
   "is_gameplay_or_strategy": false,
+  "trope_signals": ["caught_looking_elsewhere", "jealousy_reclaim"],
+  "interaction_pattern": "一句话描述帖子中的互动套路；没有明显套路则空字符串",
   "summary": "一句客观摘要，不超过60字",
   "confidence": 0.0,
   "evidence_terms": ["支持判断的短词/短语"]
