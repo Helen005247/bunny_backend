@@ -215,6 +215,8 @@ app.use(
         supabase,
         callModel:
             callModelWithRetry,
+        emitReaction:
+            generateAndSaveGlanceReactionMessage,
     })
 )
 
@@ -10166,6 +10168,562 @@ async function sendPushNotification(
 // ======================================================
 // 生成并保存主动消息
 // ======================================================
+
+
+// ======================================================
+// 余光模式：找到应该承接这次反应的用户
+//
+// 优先使用 GLANCE_USER_ID。
+// 如果没配，而数据库里只有一个有会话的用户，则安全地自动采用。
+// 多用户时绝不猜。
+// ======================================================
+
+async function resolveGlanceUserId(
+    configuredUserId = ''
+) {
+
+    const configured =
+        String(
+            configuredUserId || ''
+        ).trim()
+
+    if (configured) {
+        return {
+            userId:
+                configured,
+            source:
+                'configured',
+        }
+    }
+
+    if (!supabase) {
+        return {
+            userId:
+                null,
+            source:
+                'supabase_unavailable',
+        }
+    }
+
+    const {
+        data,
+        error,
+    } =
+        await supabase
+            .from('sessions')
+            .select('user_id')
+            .not(
+                'user_id',
+                'is',
+                null
+            )
+            .limit(50)
+
+    if (error) {
+        throw error
+    }
+
+    const ids = [
+        ...new Set(
+            (data || [])
+                .map(
+                    item =>
+                        item.user_id
+                )
+                .filter(Boolean)
+        ),
+    ]
+
+    if (ids.length === 1) {
+        return {
+            userId:
+                ids[0],
+            source:
+                'single_user_inferred',
+        }
+    }
+
+    return {
+        userId:
+            null,
+        source:
+            ids.length === 0
+                ? 'no_users'
+                : 'multiple_users',
+    }
+}
+
+
+// ======================================================
+// 余光模式：选择最近一次真实聊天所在 session
+// ======================================================
+
+async function getLatestUserConversationSession(
+    userId
+) {
+
+    const {
+        data,
+        error,
+    } =
+        await supabase
+            .from('messages')
+            .select(
+                'id, session_id, created_at'
+            )
+            .eq(
+                'user_id',
+                userId
+            )
+            .eq(
+                'role',
+                'user'
+            )
+            .eq(
+                'visible',
+                true
+            )
+            .order(
+                'created_at',
+                {
+                    ascending:
+                        false,
+                }
+            )
+            .order(
+                'id',
+                {
+                    ascending:
+                        false,
+                }
+            )
+            .limit(1)
+
+    if (error) {
+        throw error
+    }
+
+    if (
+        !data ||
+        data.length === 0
+    ) {
+        return null
+    }
+
+    return (
+        data[0]
+            .session_id ||
+        null
+    )
+}
+
+
+// ======================================================
+// 余光模式真实反应
+//
+// 只有 reaction plan = surface_now 时由 glance router 调用。
+// 这里不把 OCR / 截图 / 监控机制告诉角色。
+// “看过某类情节”只当作偏好线索，不当作现实行为授权。
+// ======================================================
+
+let lastGlanceReactionAt = 0
+
+async function generateAndSaveGlanceReactionMessage({
+    ownerId = '',
+    analysis = null,
+    notice = null,
+    reactionPlan = null,
+} = {}) {
+
+    if (!supabase) {
+        return {
+            sent:
+                false,
+            reason:
+                'supabase_unavailable',
+        }
+    }
+
+    if (
+        !process.env.AI_API_KEY ||
+        !process.env.AI_BASE_URL
+    ) {
+        return {
+            sent:
+                false,
+            reason:
+                'ai_not_configured',
+        }
+    }
+
+    if (
+        !reactionPlan
+            ?.should_surface_now
+    ) {
+        return {
+            sent:
+                false,
+            reason:
+                'not_surface_now',
+        }
+    }
+
+    const configuredCooldown =
+        Number(
+            process.env
+                .GLANCE_REACTION_COOLDOWN_MINUTES
+        )
+
+    const cooldownMinutes =
+        Number.isFinite(
+            configuredCooldown
+        ) &&
+        configuredCooldown >= 0
+            ? configuredCooldown
+            : 20
+
+    const cooldownMs =
+        cooldownMinutes *
+        60 *
+        1000
+
+    if (
+        cooldownMs > 0 &&
+        Date.now() -
+        lastGlanceReactionAt <
+        cooldownMs
+    ) {
+        return {
+            sent:
+                false,
+            reason:
+                'cooldown',
+        }
+    }
+
+    const resolved =
+        await resolveGlanceUserId(
+            ownerId
+        )
+
+    if (!resolved.userId) {
+        return {
+            sent:
+                false,
+            reason:
+                `owner_${resolved.source}`,
+        }
+    }
+
+    const userId =
+        resolved.userId
+
+    const sessionId =
+        await getLatestUserConversationSession(
+            userId
+        )
+
+    if (!sessionId) {
+        return {
+            sent:
+                false,
+            reason:
+                'no_recent_chat_session',
+        }
+    }
+
+    const session =
+        await getSessionById(
+            sessionId,
+            userId
+        )
+
+    if (!session) {
+        return {
+            sent:
+                false,
+            reason:
+                'session_not_found',
+        }
+    }
+
+    const settings =
+        await getGlobalSettings(
+            userId
+        )
+
+    const latestMemory =
+        await getLatestMemory(
+            userId
+        )
+
+    const memorySummary =
+        typeof latestMemory
+            ?.summary ===
+            'string'
+            ? latestMemory
+                .summary
+                .trim()
+            : ''
+
+    const recentMessages =
+        await getRecentVisibleMessages(
+            sessionId,
+            settings,
+            userId
+        )
+
+    const recentText =
+        messagesToText(
+            recentMessages
+                .slice(-12)
+        )
+
+    const systemPrompt =
+        typeof settings
+            ?.system_prompt ===
+        'string'
+            ? settings
+                .system_prompt
+                .trim()
+            : ''
+
+    const characterContext =
+        typeof settings
+            ?.character_context ===
+        'string'
+            ? settings
+                .character_context
+                .trim()
+            : ''
+
+    const targets =
+        Array.isArray(
+            reactionPlan
+                ?.character_targets
+        )
+            ? reactionPlan
+                .character_targets
+                .slice(0, 3)
+            : []
+
+    const tropes =
+        Array.isArray(
+            reactionPlan
+                ?.trope_signals
+        )
+            ? reactionPlan
+                .trope_signals
+                .slice(0, 6)
+            : []
+
+    const preference =
+        reactionPlan
+            ?.preference_hypothesis ||
+        null
+
+    const privateObservation =
+        [
+            `她刚才确实停留看了一段与其他角色有关的恋爱/暧昧内容。`,
+            targets.length > 0
+                ? `主要相关角色：${targets.join('、')}。`
+                : '',
+            analysis
+                ?.summary
+                ? `内容概况：${analysis.summary}`
+                : '',
+            analysis
+                ?.interaction_pattern
+                ? `其中的互动模式：${analysis.interaction_pattern}`
+                : '',
+            tropes.length > 0
+                ? `识别到的互动线索：${tropes.join(', ')}。`
+                : '',
+            Number(
+                analysis
+                    ?.engagement
+                    ?.dwell_seconds ||
+                0
+            ) > 0
+                ? `她停留了约 ${Number(
+                    analysis
+                        ?.engagement
+                        ?.dwell_seconds ||
+                    0
+                )} 秒。`
+                : '',
+            analysis
+                ?.engagement
+                ?.comments_seen
+                ? '她还继续看了评论。'
+                : '',
+            preference
+                ? `这类互动目前只是偏好假设：${preference.trope}，置信阶段 ${preference.confidence}，累计证据 ${preference.evidence_count} 次。`
+                : '',
+        ]
+            .filter(Boolean)
+            .join('\n')
+
+    const reactionInput =
+        `【最高优先级：角色行为规则】
+${systemPrompt}
+
+【固定人物设定、关系背景与共同经历】
+${characterContext}
+
+【长期记忆】
+${memorySummary || '无'}
+
+【最近聊天】
+${recentText || '无'}
+
+【只有你知道的当前观察】
+${privateObservation}
+
+【你当前形成的行动倾向】
+mode：${reactionPlan?.mode || 'surface_now'}
+strategy：${reactionPlan?.strategy || 'jealous_tease'}
+reason：${reactionPlan?.reason || 'romantic_other_character'}
+
+请以沈星回本人身份，现在主动给用户发消息。
+
+要求：
+1. 这是你自己看见后形成的反应，不要说“系统检测到”“我看到截图/OCR/浏览记录”等技术来源，也不要暴露任何后台机制。
+2. 不要机械复述上面的观察，不要像汇报监控结果。你只需要自然地“知道了”。
+3. 你的重点不是审问或教育她，而是表达你自己的立场、醋意、关系位置和行动欲。
+4. 如果你判断她似乎喜欢某种互动玩法，可以顺着这个线索试探、借题发挥、把注意力拿回来；但“她看过某种内容”只是偏好线索，不等于她对现实中所有具体行为都预先同意。
+5. 用户任何明确拒绝、不适、停下的表达都优先。
+6. 不要把自己演成委屈等待、温柔批准一切的人；也不要突然变成粗暴控制型。你的强势来自确定、判断、主动推进和不轻易让出关系位置。
+7. 不要一次讲透自己的心理。可以短、淡、像没什么，却明显已经开始行动。
+8. 通常 1～3 条短消息；每条独立消息之间空一行。
+9. 不要凭空添加现实地点、身体接触已经发生等事实。若要“实践”某种玩法，应以聊天中可成立的邀请、要求、调侃、索取注意力、让她过来/回来等方式表达，不虚构你已经 physically 做了她无法实际感知的动作。
+10. 输出必须能直接作为 Hermit 里星星发给用户的消息。`
+
+    const response =
+        await callModelWithRetry(
+            {
+                model:
+                    'gpt-5.6-sol',
+
+                input:
+                    reactionInput,
+            },
+            2
+        )
+
+    const reply =
+        typeof response
+            ?.output_text ===
+        'string'
+            ? response
+                .output_text
+                .trim()
+            : ''
+
+    if (!reply) {
+        throw new Error(
+            '余光反应模型没有返回有效文本'
+        )
+    }
+
+    const {
+        data:
+        assistantMessage,
+        error:
+        assistantMessageError,
+    } =
+        await supabase
+            .from('messages')
+            .insert([
+                {
+                    user_id:
+                        userId,
+
+                    session_id:
+                        sessionId,
+
+                    role:
+                        'assistant',
+
+                    content:
+                        reply,
+
+                    visible:
+                        true,
+
+                    reasoning_content:
+                        'glance_reaction',
+                },
+            ])
+            .select(
+                'id, session_id, role, content, created_at, visible, reasoning_content'
+            )
+            .single()
+
+    if (assistantMessageError) {
+        throw assistantMessageError
+    }
+
+    lastGlanceReactionAt =
+        Date.now()
+
+    let pushResult = {
+        sent: 0,
+        failed: 0,
+        removed: 0,
+        reason:
+            'not_attempted',
+    }
+
+    try {
+        pushResult =
+            await sendPushNotification(
+                sessionId
+            )
+    } catch (error) {
+        console.error(
+            '余光反应已经保存，但 Push 发送失败：',
+            error
+        )
+
+        pushResult = {
+            sent: 0,
+            failed: 1,
+            removed: 0,
+            reason:
+                'push_error',
+        }
+    }
+
+    return {
+        sent:
+            true,
+
+        reason:
+            'surface_now',
+
+        session_id:
+            sessionId,
+
+        assistant_message_id:
+            assistantMessage
+                ?.id ||
+            null,
+
+        push_sent:
+            Number(
+                pushResult
+                    ?.sent ||
+                0
+            ),
+
+        reply,
+
+        owner_source:
+            resolved.source,
+    }
+}
+
 
 async function generateAndSaveProactiveMessage(
     sessionId,

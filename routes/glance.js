@@ -95,6 +95,7 @@ function getShortcutKey(req) {
 function createGlanceRouter({
     supabase = null,
     callModel = null,
+    emitReaction = null,
 } = {}) {
 
     const router =
@@ -142,7 +143,7 @@ function createGlanceRouter({
                 .json({
                     ok: true,
                     feature:
-                        'hermit-glance-v0.6',
+                        'hermit-glance-v0.7',
                     shortcut_token_configured:
                         Boolean(
                             shortcutToken
@@ -169,8 +170,27 @@ function createGlanceRouter({
                         true,
                     reaction_storage:
                         'memory-only',
+                    live_reaction_enabled:
+                        String(
+                            process.env
+                                .GLANCE_LIVE_REACTION ||
+                            ''
+                        )
+                            .trim()
+                            .toLowerCase() ===
+                        'true',
+                    live_reaction_handler_ready:
+                        typeof emitReaction ===
+                        'function',
                     proactive_message_enabled:
-                        false,
+                        String(
+                            process.env
+                                .GLANCE_LIVE_REACTION ||
+                            ''
+                        )
+                            .trim()
+                            .toLowerCase() ===
+                        'true',
                     database_write_enabled:
                         false,
                     supabase_available:
@@ -602,6 +622,76 @@ function createGlanceRouter({
                                                     ?.preference_hypothesis,
                                         }
                                     )
+
+
+                                    const liveEnabled =
+                                        String(
+                                            process.env
+                                                .GLANCE_LIVE_REACTION ||
+                                            ''
+                                        )
+                                            .trim()
+                                            .toLowerCase() ===
+                                        'true'
+
+                                    if (
+                                        liveEnabled &&
+                                        reactionPlan
+                                            ?.should_surface_now &&
+                                        typeof emitReaction ===
+                                        'function'
+                                    ) {
+                                        emitReaction({
+                                            ownerId,
+                                            analysis,
+                                            notice,
+                                            reactionPlan,
+                                        })
+                                            .then(
+                                                liveResult => {
+                                                    console.log(
+                                                        '[glance] live reaction:',
+                                                        {
+                                                            sent:
+                                                                Boolean(
+                                                                    liveResult
+                                                                        ?.sent
+                                                                ),
+                                                            reason:
+                                                                liveResult
+                                                                    ?.reason ||
+                                                                null,
+                                                            session_id:
+                                                                liveResult
+                                                                    ?.session_id ||
+                                                                null,
+                                                            message_id:
+                                                                liveResult
+                                                                    ?.assistant_message_id ||
+                                                                null,
+                                                            push_sent:
+                                                                Number(
+                                                                    liveResult
+                                                                        ?.push_sent ||
+                                                                    0
+                                                                ),
+                                                        }
+                                                    )
+                                                }
+                                            )
+                                            .catch(
+                                                error => {
+                                                    console.warn(
+                                                        '[glance] live reaction error:',
+                                                        String(
+                                                            error
+                                                                ?.message ||
+                                                            error
+                                                        )
+                                                    )
+                                                }
+                                            )
+                                    }
                                 } else {
                                     console.log(
                                         '[glance] notice decision:',

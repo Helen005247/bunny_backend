@@ -307,16 +307,33 @@ function createGlanceNoticeService() {
                     ?.love_and_deepspace_characters
             )
 
-        const targets =
-            uniqueStrings([
-                ...tracked,
-                ...named,
-            ])
+        // 优先使用“明确追踪角色”作为关系竞争目标。
+        // named_characters 里经常包含同人正文的朋友、家人、配角，
+        // 不能全部当成星星真正会在意的对象。
+        const trackedTargets =
+            uniqueStrings(
+                tracked
+            )
                 .filter(
                     name =>
                         name !==
                         SELF_CHARACTER
                 )
+
+        const namedFallbackTargets =
+            uniqueStrings(
+                named
+            )
+                .filter(
+                    name =>
+                        name !==
+                        SELF_CHARACTER
+                )
+
+        const targets =
+            trackedTargets.length > 0
+                ? trackedTargets
+                : namedFallbackTargets.slice(0, 1)
 
         const onlySelf =
             targets.length === 0 &&
