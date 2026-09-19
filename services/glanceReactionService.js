@@ -216,7 +216,9 @@ function createGlanceReactionService() {
         } else if (
             notice
                 ?.level ===
-                'medium'
+                'medium' &&
+            !notice
+                ?.should_surface_now
         ) {
             mode =
                 'hold_for_opening'
@@ -226,6 +228,20 @@ function createGlanceReactionService() {
 
             reason =
                 'medium_salience'
+        } else if (
+            notice
+                ?.should_surface_now
+        ) {
+            mode =
+                'surface_now'
+
+            strategy =
+                roleReverse
+                    ? 'notice_the_trope_then_take_back_attention'
+                    : 'notice_then_take_back_attention'
+
+            reason =
+                'explicit_romantic_other_character'
         }
 
         const result = {

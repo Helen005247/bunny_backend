@@ -465,6 +465,15 @@ function createGlanceNoticeService() {
             )
         }
 
+        const explicitRomanticOtherCharacter =
+            Boolean(
+                romantic &&
+                fanLike &&
+                targets.length > 0 &&
+                confidence >= 0.90 &&
+                dwell >= 20
+            )
+
         const notice = {
             id:
                 createId(),
@@ -501,13 +510,21 @@ function createGlanceNoticeService() {
                 getLevel(score),
 
             should_surface_now:
+                explicitRomanticOtherCharacter ||
                 score >= 0.80,
 
             character_targets:
                 targets,
 
             reason_codes:
-                reasonCodes,
+                [
+                    ...reasonCodes,
+                    ...(explicitRomanticOtherCharacter
+                        ? [
+                            'explicit_romantic_other_character',
+                        ]
+                        : []),
+                ],
 
             source:
                 'xiaohongshu_glance',
