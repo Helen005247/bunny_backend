@@ -8,6 +8,9 @@ const webpush = require('web-push')
 const crypto = require('crypto')
 const { DateTime } = require('luxon')
 const createGlanceRouter = require('./routes/glance')
+const {
+    buildMemoryCompressionPlan,
+} = require('./services/memoryRetentionPolicy')
 
 
 
@@ -8284,12 +8287,45 @@ async function compressMemoryIfNeeded(
     }
 
     // ==================================================
-    // 只统计真正准备压缩的旧聊天
+    // 压缩前先做“长期记忆资格”过滤。
+    //
+    // 普通做题 / 翻译 / 查知识 / 临时代码调试：
+    // - 仍然属于聊天记录
+    // - 在近期上下文里照常可见
+    // - 进入旧消息压缩时会被隐藏
+    // - 但不会送给长期记忆整理器
+    //
+    // 长期学习目标、稳定学习偏好、用户明确要求记住的内容
+    // 会继续进入长期记忆候选。
+    // ==================================================
+
+    const memoryCompressionPlan =
+        buildMemoryCompressionPlan(
+            compressibleMessages
+        )
+
+    const memoryCandidateMessages =
+        memoryCompressionPlan
+            .memoryMessages
+
+    const memoryExcludedMessages =
+        memoryCompressionPlan
+            .excludedMessages
+
+    // ==================================================
+    // 阈值仍按“真正准备从近期上下文移走的全部旧聊天”计算。
+    // 这样大量学习问答不会永久堆在 visible messages 里，
+    // 但它们也不会污染长期记忆。
     // ==================================================
 
     const oldConversationText =
         messagesToText(
             compressibleMessages
+        )
+
+    const memoryCandidateText =
+        messagesToText(
+            memoryCandidateMessages
         )
 
     const beforeTokens =
@@ -8328,7 +8364,107 @@ async function compressMemoryIfNeeded(
     }
 
     // ==================================================
-    // 真正达到阈值以后才调用模型整理长期记忆
+    // 如果这一批旧消息全部都是“学习 / 临时知识问答”等
+    // 不应进入长期记忆的内容，就直接完成上下文清理：
+    // 隐藏旧消息，但不创建一条没有意义的新 memory。
+    // ==================================================
+
+    const compressedMessageIds =
+        compressibleMessages
+            .map(
+                (
+                    message
+                ) =>
+                    message.id
+            )
+
+    const memoryCandidateMessageIds =
+        memoryCompressionPlan
+            .memoryMessageIds
+
+    const memoryExcludedMessageIds =
+        memoryCompressionPlan
+            .excludedMessageIds
+
+    if (
+        memoryCandidateMessages
+            .length === 0
+    ) {
+
+        const {
+            error:
+            hideEphemeralMessagesError,
+        } =
+            await supabase
+                .from(
+                    'messages'
+                )
+                .update({
+                    visible:
+                        false,
+                })
+                .in(
+                    'id',
+                    compressedMessageIds
+                )
+                .eq(
+                    'user_id',
+                    userId
+                )
+
+        if (
+            hideEphemeralMessagesError
+        ) {
+            throw hideEphemeralMessagesError
+        }
+
+        const keptMessagesText =
+            messagesToText(
+                keptMessages
+            )
+
+        const afterTokens =
+            estimateTokens(
+                keptMessagesText
+            )
+
+        console.log(
+            `User ${userId} / Session ${sessionId} 已清理仅含临时学习/知识问答的旧消息：${compressedMessageIds.length} 条；未写入长期记忆；过滤版本 ${memoryCompressionPlan.version}`
+        )
+
+        return {
+            triggered:
+                true,
+            reason:
+                'compressed_ephemeral_only',
+            before_tokens:
+                beforeTokens,
+            after_tokens:
+                afterTokens,
+            compressed_message_count:
+                compressedMessageIds
+                    .length,
+            compressed_message_ids:
+                compressedMessageIds,
+            memory_eligible_message_count:
+                0,
+            memory_excluded_message_count:
+                memoryExcludedMessages
+                    .length,
+            memory_filter_version:
+                memoryCompressionPlan
+                    .version,
+            memory_id:
+                previousMemory
+                    ?.id ||
+                null,
+        }
+    }
+
+    // ==================================================
+    // 真正达到阈值以后才调用模型整理长期记忆。
+    // 这里送给模型的已经不是全部旧聊天，
+    // 而是通过代码过滤后的“长期记忆候选”。
     // ==================================================
 
     const compressionInput =
@@ -8342,7 +8478,7 @@ ${previousMemorySummary ||
         }
 
 【需要整理的旧聊天】
-${oldConversationText}
+${memoryCandidateText}
 
 【规则】
 
@@ -8350,12 +8486,14 @@ ${oldConversationText}
 2. 保留人物关系、重要经历、偏好、习惯、承诺、长期计划和重要情绪事件。
 3. 删除寒暄、重复内容和已经没有意义的临时细节。
 4. 技术内容只保留长期项目、最终架构和已经确定的重要结果；不要保存代码、具体行号、报错日志和临时调试过程。
-5. 已经解决的一次性问题不要保留。
-6. 不要保存 API Key、密码、Token、私钥或其他秘密值。
-7. 新信息明确更新旧信息时，以新信息为准。
-8. 不要编造不存在的事实。
-9. 尽量控制在约 1500～2000 个中文字符以内。
-10. 只输出长期记忆正文，不要解释，不要输出 JSON。`
+5. 学习和知识问答只保留用户长期稳定的学习状态、长期目标与稳定偏好；不要保存具体题目、答案、解题过程、公式推导、单词解释、翻译正文、课堂作业、临时知识点、一次性查资料内容或某次答题对错。
+6. 用户明确要求长期记住的学习偏好或长期目标可以保留，例如“以后讲数学先给提示，不要直接公布答案”。
+7. 已经解决的一次性问题不要保留。
+8. 不要保存 API Key、密码、Token、私钥或其他秘密值。
+9. 新信息明确更新旧信息时，以新信息为准。
+10. 不要编造不存在的事实。
+11. 尽量控制在约 1500～2000 个中文字符以内。
+12. 只输出长期记忆正文，不要解释，不要输出 JSON。`
 
 
 
@@ -8387,15 +8525,6 @@ ${oldConversationText}
         )
 
     }
-
-    const compressedMessageIds =
-        compressibleMessages
-            .map(
-                (
-                    message
-                ) =>
-                    message.id
-            )
 
     const {
         data:
@@ -8454,6 +8583,20 @@ ${oldConversationText}
                             compressedMessageIds
                                 .length,
 
+                        memory_filter_version:
+                            memoryCompressionPlan
+                                .version,
+
+                        memory_candidate_message_ids:
+                            memoryCandidateMessageIds,
+
+                        memory_excluded_message_ids:
+                            memoryExcludedMessageIds,
+
+                        memory_excluded_message_count:
+                            memoryExcludedMessageIds
+                                .length,
+
                     },
 
                 },
@@ -8507,7 +8650,7 @@ ${oldConversationText}
         )
 
     console.log(
-        `User ${userId} / Session ${sessionId} 已执行记忆压缩（${hasPreviousMemory ? 'incremental' : 'bootstrap'}）：${compressedMessageIds.length} 条消息；阈值 ${compressThreshold} Token；待压缩旧消息 Token ${beforeTokens}；保留近期消息 Token ${afterTokens}`
+        `User ${userId} / Session ${sessionId} 已执行记忆压缩（${hasPreviousMemory ? 'incremental' : 'bootstrap'}）：${compressedMessageIds.length} 条旧消息；其中 ${memoryCandidateMessages.length} 条进入长期记忆候选，${memoryExcludedMessages.length} 条学习/临时问答被过滤；阈值 ${compressThreshold} Token；待压缩旧消息 Token ${beforeTokens}；保留近期消息 Token ${afterTokens}`
     )
 
     return {
@@ -8530,6 +8673,18 @@ ${oldConversationText}
 
         compressed_message_ids:
             compressedMessageIds,
+
+        memory_eligible_message_count:
+            memoryCandidateMessages
+                .length,
+
+        memory_excluded_message_count:
+            memoryExcludedMessages
+                .length,
+
+        memory_filter_version:
+            memoryCompressionPlan
+                .version,
 
         memory_id:
             newMemory.id,
