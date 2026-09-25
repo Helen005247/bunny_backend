@@ -784,7 +784,7 @@ async function callModelWithRetry(
             const outputText =
                 typeof response
                     ?.output_text ===
-                'string'
+                    'string'
                     ? response
                         .output_text
                         .trim()
@@ -2106,7 +2106,7 @@ function scoreLoreChunkFocus(
 
         if (
             fields.sourceTitle ===
-                term ||
+            term ||
             fields.sourceTitle.includes(
                 term
             )
@@ -2219,7 +2219,7 @@ function scoreLoreChunk(
 
         if (
             fields.sourceTitle ===
-                term ||
+            term ||
             fields.sourceTitle.includes(
                 term
             )
@@ -2235,13 +2235,13 @@ function scoreLoreChunk(
             fields.keywords.some(
                 (keyword) =>
                     keyword ===
-                        term ||
+                    term ||
                     keyword.includes(
                         term
                     ) ||
                     (
                         term.length >=
-                            3 &&
+                        3 &&
                         term.includes(
                             keyword
                         )
@@ -2318,9 +2318,9 @@ async function getCachedLoreChunks() {
             .rows
             .length > 0 &&
         now -
-            loreChunksCache
-                .loadedAt <
-            LORE_CHUNKS_CACHE_TTL_MS
+        loreChunksCache
+            .loadedAt <
+        LORE_CHUNKS_CACHE_TTL_MS
     ) {
         return loreChunksCache.rows
     }
@@ -2363,8 +2363,8 @@ async function getCachedLoreChunks() {
                 .range(
                     from,
                     from +
-                        pageSize -
-                        1
+                    pageSize -
+                    1
                 )
 
         if (error) {
@@ -2447,7 +2447,7 @@ function findBestStoryMatchIndex(
         if (
             index >= 0 &&
             term.length >
-                bestTermLength
+            bestTermLength
         ) {
             bestIndex =
                 index
@@ -2474,7 +2474,7 @@ function clipLoreChunkAroundTerms(
     if (
         !text ||
         text.length <=
-            maxLength
+        maxLength
     ) {
         return text
     }
@@ -2493,7 +2493,7 @@ function clipLoreChunkAroundTerms(
             Math.max(
                 1,
                 maxLength -
-                    1
+                1
             )
         )}…`
     }
@@ -2508,26 +2508,26 @@ function clipLoreChunkAroundTerms(
         Math.max(
             0,
             matchIndex -
-                half
+            half
         )
 
     let end =
         Math.min(
             text.length,
             start +
-                maxLength
+            maxLength
         )
 
     if (
         end -
-            start <
+        start <
         maxLength
     ) {
         start =
             Math.max(
                 0,
                 end -
-                    maxLength
+                maxLength
             )
     }
 
@@ -2867,10 +2867,10 @@ async function getLoreChunksContext({
 
         if (
             budgeted.length >
-                0 &&
+            0 &&
             usedTokens +
-                blockTokens >
-                maxStoryTokens
+            blockTokens >
+            maxStoryTokens
         ) {
             continue
         }
@@ -3248,7 +3248,7 @@ ${characterContext}`
 
     if (
         typeof characterLoreContext ===
-            'string' &&
+        'string' &&
         characterLoreContext.trim()
     ) {
 
@@ -3260,7 +3260,7 @@ ${characterContext}`
 
     if (
         typeof storyLoreContext ===
-            'string' &&
+        'string' &&
         storyLoreContext.trim()
     ) {
 
@@ -3607,7 +3607,7 @@ function buildGameReplyContext({
     const memoryHint =
         typeof memorySummary ===
             'string' &&
-        memorySummary.trim()
+            memorySummary.trim()
             ? '长期记忆中可能同时包含多个游戏的信息；只取与当前游戏明确匹配的那部分。'
             : '当前没有可用的长期记忆摘要时，只根据最近聊天判断，不要凭空补一个游戏身份。'
 
@@ -4167,7 +4167,7 @@ async function getWebSearchContext({
         })
 
     } catch (
-        error
+    error
     ) {
 
         console.warn(
@@ -4912,7 +4912,7 @@ function collectBilibiliDynamicText(
         if (
             wanted &&
             typeof value ===
-                'string'
+            'string'
         ) {
 
             const text =
@@ -4936,7 +4936,7 @@ function collectBilibiliDynamicText(
         if (
             value &&
             typeof value ===
-                'object'
+            'object'
         ) {
             collectBilibiliDynamicText(
                 value,
@@ -5248,7 +5248,7 @@ async function fetchBilibiliDynamicFeedByUid(
             if (
                 authorMid &&
                 authorMid !==
-                    hostMid
+                hostMid
             ) {
                 continue
             }
@@ -5267,7 +5267,7 @@ async function fetchBilibiliDynamicFeedByUid(
                     ) &&
                 pubTs > 0 &&
                 pubTs <
-                    cutoff
+                cutoff
             ) {
                 continue
             }
@@ -5406,7 +5406,7 @@ async function fetchBilibiliDynamicFeedByUid(
             !hasMore ||
             !nextOffset ||
             nextOffset ===
-                offset
+            offset
         ) {
             break
         }
@@ -5687,7 +5687,7 @@ async function fetchBilibiliOpusFeedByUid(
             !hasMore ||
             !nextOffset ||
             nextOffset ===
-                offset
+            offset
         ) {
             break
         }
@@ -5993,7 +5993,7 @@ async function searchPrivateGameOfficialReruns() {
 
         const result =
             settled[
-                index
+            index
             ]
 
         const sourceKind =
@@ -6418,18 +6418,18 @@ function getPrivateGameSocialExcerpt(
         Math.max(
             0,
             bestIndex -
-                160
+            160
         )
 
     const end =
         Math.min(
             text.length,
             bestIndex +
-                String(
-                    bestKeyword
-                )
-                    .length +
-                420
+            String(
+                bestKeyword
+            )
+                .length +
+            420
         )
 
     return sanitizePrivateGameSocialDiagnosticText(
@@ -6698,9 +6698,9 @@ ${formatPrivateGameSearchResults(
                     typeof event
                         ?.pool_name ===
                         'string' &&
-                    event
-                        .pool_name
-                        .trim()
+                        event
+                            .pool_name
+                            .trim()
                         ? event
                             .pool_name
                             .trim()
@@ -7004,7 +7004,7 @@ async function upsertPrivateGameRerunForUser({
 
     const existing =
         existingRows &&
-        existingRows.length > 0
+            existingRows.length > 0
             ? existingRows[0]
             : null
 
@@ -7104,7 +7104,7 @@ async function upsertPrivateGameRerunForUser({
                     metadata: {
                         ...(existing
                             .metadata ||
-                        {}),
+                            {}),
 
                         last_updated_by:
                             'official_rerun_watch_v8',
@@ -7495,10 +7495,9 @@ ${facts}
         ]
 
     return sanitizePrivateGameUserFacingText(
-        `宝宝，那个游戏有新的复刻消息了。${
-            uniqueTargets.length
-                ? `这次是${uniqueTargets.join('、')}。`
-                : ''
+        `宝宝，那个游戏有新的复刻消息了。${uniqueTargets.length
+            ? `这次是${uniqueTargets.join('、')}。`
+            : ''
         }我先替你记着。`
     )
 }
@@ -10533,7 +10532,7 @@ async function generateAndSaveGlanceReactionMessage({
         Number.isFinite(
             configuredCooldown
         ) &&
-        configuredCooldown >= 0
+            configuredCooldown >= 0
             ? configuredCooldown
             : 20
 
@@ -10637,7 +10636,7 @@ async function generateAndSaveGlanceReactionMessage({
     const systemPrompt =
         typeof settings
             ?.system_prompt ===
-        'string'
+            'string'
             ? settings
                 .system_prompt
                 .trim()
@@ -10646,7 +10645,7 @@ async function generateAndSaveGlanceReactionMessage({
     const characterContext =
         typeof settings
             ?.character_context ===
-        'string'
+            'string'
             ? settings
                 .character_context
                 .trim()
@@ -10804,7 +10803,7 @@ reason：${reactionPlan?.reason || 'romantic_other_character'}
     const reply =
         typeof response
             ?.output_text ===
-        'string'
+            'string'
             ? response
                 .output_text
                 .trim()
@@ -11948,9 +11947,9 @@ function getCallAgentKey(
 
     if (
         displayName ===
-            'mom' ||
+        'mom' ||
         displayName ===
-            '妈妈'
+        '妈妈'
     ) {
         return 'guai'
     }
@@ -11965,7 +11964,7 @@ function getMiniMaxVoiceIdForAgent(
 
     if (
         agentKey ===
-            'guai'
+        'guai'
     ) {
         return MINIMAX_GUAI_VOICE_ID
     }
@@ -12124,7 +12123,7 @@ async function loadVoiceAgentSettings(
     agentKey,
     {
         force =
-            false,
+        false,
     } = {}
 ) {
 
@@ -12146,8 +12145,8 @@ async function loadVoiceAgentSettings(
         !force &&
         cached &&
         now -
-            cached.loadedAt <
-            VOICE_AGENT_SETTINGS_CACHE_MS
+        cached.loadedAt <
+        VOICE_AGENT_SETTINGS_CACHE_MS
     ) {
         return cached.settings
     }
@@ -12317,67 +12316,67 @@ const VOICE_PRESET_CACHE_MS = 5000
 const voicePresetCache = new Map()
 
 const FALLBACK_VOICE_PRESETS = [
-    ['normal','自然','普通、自然、日常，没有明显额外情绪。',10,0.28,1,0,1,0,0,0],
-    ['soft','温柔','温柔、安抚、低声、体贴，适合亲近或安慰。',20,0.38,0.99,-0.015,0.98,0,0,0],
-    ['playful','逗弄','轻松、逗弄、带一点笑意或故意撩拨。',30,0.42,1.005,0.015,1,0,0,0],
-    ['serious','认真','认真、郑重、专注，语气更稳，不需要刻意低沉。',40,0.40,0.995,-0.015,1,0,0,0],
-].map(([style_key,display_name,prompt_hint,sort_order,default_intensity,speed_base,speed_intensity_delta,vol_base,vol_intensity_delta,pitch_base,pitch_intensity_delta])=>({
-    style_key,display_name,prompt_hint,sort_order,default_intensity,speed_base,speed_intensity_delta,
-    vol_base,vol_intensity_delta,pitch_base,pitch_intensity_delta,enabled:true,voice_id:null,tts_model:null,
-    tiny_merge_chars:3,long_clause_chars:28,comma_min_chunk_chars:14,
-    modify_pitch_base:0,modify_pitch_intensity_delta:0,
-    modify_intensity_base:0,modify_intensity_intensity_delta:0,
-    modify_timbre_base:0,modify_timbre_intensity_delta:0,
-    modify_sound_effect:null,
-    extra_voice_setting:{}
+    ['normal', '自然', '普通、自然、日常，没有明显额外情绪。', 10, 0.28, 1, 0, 1, 0, 0, 0],
+    ['soft', '温柔', '温柔、安抚、低声、体贴，适合亲近或安慰。', 20, 0.38, 0.99, -0.015, 0.98, 0, 0, 0],
+    ['playful', '逗弄', '轻松、逗弄、带一点笑意或故意撩拨。', 30, 0.42, 1.005, 0.015, 1, 0, 0, 0],
+    ['serious', '认真', '认真、郑重、专注，语气更稳，不需要刻意低沉。', 40, 0.40, 0.995, -0.015, 1, 0, 0, 0],
+].map(([style_key, display_name, prompt_hint, sort_order, default_intensity, speed_base, speed_intensity_delta, vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta]) => ({
+    style_key, display_name, prompt_hint, sort_order, default_intensity, speed_base, speed_intensity_delta,
+    vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta, enabled: true, voice_id: null, tts_model: null,
+    tiny_merge_chars: 3, long_clause_chars: 28, comma_min_chunk_chars: 14,
+    modify_pitch_base: 0, modify_pitch_intensity_delta: 0,
+    modify_intensity_base: 0, modify_intensity_intensity_delta: 0,
+    modify_timbre_base: 0, modify_timbre_intensity_delta: 0,
+    modify_sound_effect: null,
+    extra_voice_setting: {}
 }))
 
 function normalizeVoiceStyleKey(value) {
-    return String(value||'').trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'_').replace(/^_+|_+$/g,'').slice(0,40)
+    return String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40)
 }
 
 function normalizeExtraVoiceSetting(value) {
-    return value && typeof value==='object' && !Array.isArray(value) ? {...value} : {}
+    return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {}
 }
 
-function normalizeVoicePresetRow(row, agentKey='xingxing') {
-    const agent = agentKey==='guai' ? 'guai' : 'xingxing'
-    const style = normalizeVoiceStyleKey(row?.style_key)||'normal'
+function normalizeVoicePresetRow(row, agentKey = 'xingxing') {
+    const agent = agentKey === 'guai' ? 'guai' : 'xingxing'
+    const style = normalizeVoiceStyleKey(row?.style_key) || 'normal'
     return {
         id: row?.id ?? null,
-        agent_key: row?.agent_key==='guai' ? 'guai' : agent,
+        agent_key: row?.agent_key === 'guai' ? 'guai' : agent,
         style_key: style,
-        display_name: String(row?.display_name||style).trim().slice(0,80),
-        prompt_hint: String(row?.prompt_hint||'').trim().slice(0,600),
-        enabled: row?.enabled!==false,
-        sort_order: Math.trunc(clampNumber(row?.sort_order,-10000,10000,100)),
-        voice_id: typeof row?.voice_id==='string' && row.voice_id.trim() ? row.voice_id.trim() : null,
-        tts_model: typeof row?.tts_model==='string' && row.tts_model.trim() ? row.tts_model.trim() : null,
-        default_intensity: clampNumber(row?.default_intensity,0,1,0.35),
-        speed_base: clampNumber(row?.speed_base,0.5,2,1),
-        speed_intensity_delta: clampNumber(row?.speed_intensity_delta,-1,1,0),
-        vol_base: clampNumber(row?.vol_base,0.1,5,1),
-        vol_intensity_delta: clampNumber(row?.vol_intensity_delta,-3,3,0),
-        pitch_base: clampNumber(row?.pitch_base,-12,12,0),
-        pitch_intensity_delta: clampNumber(row?.pitch_intensity_delta,-12,12,0),
-        tiny_merge_chars: Math.trunc(clampNumber(row?.tiny_merge_chars,0,20,3)),
-        long_clause_chars: Math.trunc(clampNumber(row?.long_clause_chars,8,120,28)),
-        comma_min_chunk_chars: Math.trunc(clampNumber(row?.comma_min_chunk_chars,4,80,14)),
+        display_name: String(row?.display_name || style).trim().slice(0, 80),
+        prompt_hint: String(row?.prompt_hint || '').trim().slice(0, 600),
+        enabled: row?.enabled !== false,
+        sort_order: Math.trunc(clampNumber(row?.sort_order, -10000, 10000, 100)),
+        voice_id: typeof row?.voice_id === 'string' && row.voice_id.trim() ? row.voice_id.trim() : null,
+        tts_model: typeof row?.tts_model === 'string' && row.tts_model.trim() ? row.tts_model.trim() : null,
+        default_intensity: clampNumber(row?.default_intensity, 0, 1, 0.35),
+        speed_base: clampNumber(row?.speed_base, 0.5, 2, 1),
+        speed_intensity_delta: clampNumber(row?.speed_intensity_delta, -1, 1, 0),
+        vol_base: clampNumber(row?.vol_base, 0.1, 5, 1),
+        vol_intensity_delta: clampNumber(row?.vol_intensity_delta, -3, 3, 0),
+        pitch_base: clampNumber(row?.pitch_base, -12, 12, 0),
+        pitch_intensity_delta: clampNumber(row?.pitch_intensity_delta, -12, 12, 0),
+        tiny_merge_chars: Math.trunc(clampNumber(row?.tiny_merge_chars, 0, 20, 3)),
+        long_clause_chars: Math.trunc(clampNumber(row?.long_clause_chars, 8, 120, 28)),
+        comma_min_chunk_chars: Math.trunc(clampNumber(row?.comma_min_chunk_chars, 4, 80, 14)),
 
         // MiniMax top-level voice_modify.
         // final value = base + intensity_delta * current state intensity
-        modify_pitch_base: clampNumber(row?.modify_pitch_base,-100,100,0),
-        modify_pitch_intensity_delta: clampNumber(row?.modify_pitch_intensity_delta,-100,100,0),
+        modify_pitch_base: clampNumber(row?.modify_pitch_base, -100, 100, 0),
+        modify_pitch_intensity_delta: clampNumber(row?.modify_pitch_intensity_delta, -100, 100, 0),
 
-        modify_intensity_base: clampNumber(row?.modify_intensity_base,-100,100,0),
-        modify_intensity_intensity_delta: clampNumber(row?.modify_intensity_intensity_delta,-100,100,0),
+        modify_intensity_base: clampNumber(row?.modify_intensity_base, -100, 100, 0),
+        modify_intensity_intensity_delta: clampNumber(row?.modify_intensity_intensity_delta, -100, 100, 0),
 
-        modify_timbre_base: clampNumber(row?.modify_timbre_base,-100,100,0),
-        modify_timbre_intensity_delta: clampNumber(row?.modify_timbre_intensity_delta,-100,100,0),
+        modify_timbre_base: clampNumber(row?.modify_timbre_base, -100, 100, 0),
+        modify_timbre_intensity_delta: clampNumber(row?.modify_timbre_intensity_delta, -100, 100, 0),
 
         modify_sound_effect:
-            ['spacious_echo','auditorium_echo','lofi_telephone','robotic']
-                .includes(String(row?.modify_sound_effect||'').trim())
+            ['spacious_echo', 'auditorium_echo', 'lofi_telephone', 'robotic']
+                .includes(String(row?.modify_sound_effect || '').trim())
                 ? String(row.modify_sound_effect).trim()
                 : null,
 
@@ -12386,52 +12385,52 @@ function normalizeVoicePresetRow(row, agentKey='xingxing') {
 }
 
 function fallbackVoicePresets(agentKey) {
-    return FALLBACK_VOICE_PRESETS.map(row=>normalizeVoicePresetRow({...row,agent_key:agentKey},agentKey))
+    return FALLBACK_VOICE_PRESETS.map(row => normalizeVoicePresetRow({ ...row, agent_key: agentKey }, agentKey))
 }
 
-function clearVoicePresetCache(agentKey=null) {
+function clearVoicePresetCache(agentKey = null) {
     if (agentKey) voicePresetCache.delete(agentKey); else voicePresetCache.clear()
 }
 
-async function loadVoicePresets(agentKey,{force=false}={}) {
-    const agent=agentKey==='guai'?'guai':'xingxing'
-    const cached=voicePresetCache.get(agent), now=Date.now()
-    if (!force && cached && now-cached.loadedAt<VOICE_PRESET_CACHE_MS) return cached.presets
+async function loadVoicePresets(agentKey, { force = false } = {}) {
+    const agent = agentKey === 'guai' ? 'guai' : 'xingxing'
+    const cached = voicePresetCache.get(agent), now = Date.now()
+    if (!force && cached && now - cached.loadedAt < VOICE_PRESET_CACHE_MS) return cached.presets
     try {
-        const {data,error}=await supabase.from('voice_presets')
+        const { data, error } = await supabase.from('voice_presets')
             .select('id, agent_key, style_key, display_name, prompt_hint, enabled, sort_order, voice_id, tts_model, default_intensity, speed_base, speed_intensity_delta, vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta, tiny_merge_chars, long_clause_chars, comma_min_chunk_chars, modify_pitch_base, modify_pitch_intensity_delta, modify_intensity_base, modify_intensity_intensity_delta, modify_timbre_base, modify_timbre_intensity_delta, modify_sound_effect, extra_voice_setting')
-            .eq('agent_key',agent).order('sort_order',{ascending:true}).order('id',{ascending:true})
+            .eq('agent_key', agent).order('sort_order', { ascending: true }).order('id', { ascending: true })
         if (error) throw error
-        const presets=Array.isArray(data)&&data.length ? data.map(r=>normalizeVoicePresetRow(r,agent)) : fallbackVoicePresets(agent)
-        voicePresetCache.set(agent,{loadedAt:now,presets})
+        const presets = Array.isArray(data) && data.length ? data.map(r => normalizeVoicePresetRow(r, agent)) : fallbackVoicePresets(agent)
+        voicePresetCache.set(agent, { loadedAt: now, presets })
         return presets
-    } catch(error) {
-        console.warn('读取 voice_presets 失败，使用默认值：',error?.message||error)
-        const presets=fallbackVoicePresets(agent)
-        voicePresetCache.set(agent,{loadedAt:now,presets})
+    } catch (error) {
+        console.warn('读取 voice_presets 失败，使用默认值：', error?.message || error)
+        const presets = fallbackVoicePresets(agent)
+        voicePresetCache.set(agent, { loadedAt: now, presets })
         return presets
     }
 }
 
-function enabledVoicePresets(presets,agentKey='xingxing') {
-    const enabled=Array.isArray(presets)?presets.filter(p=>p?.enabled!==false):[]
-    return enabled.length?enabled:fallbackVoicePresets(agentKey)
+function enabledVoicePresets(presets, agentKey = 'xingxing') {
+    const enabled = Array.isArray(presets) ? presets.filter(p => p?.enabled !== false) : []
+    return enabled.length ? enabled : fallbackVoicePresets(agentKey)
 }
 
-function resolveVoicePreset(presets,styleKey,agentKey='xingxing') {
-    const enabled=enabledVoicePresets(presets,agentKey), key=normalizeVoiceStyleKey(styleKey)
-    return enabled.find(p=>p.style_key===key)||enabled.find(p=>p.style_key==='normal')||enabled[0]
+function resolveVoicePreset(presets, styleKey, agentKey = 'xingxing') {
+    const enabled = enabledVoicePresets(presets, agentKey), key = normalizeVoiceStyleKey(styleKey)
+    return enabled.find(p => p.style_key === key) || enabled.find(p => p.style_key === 'normal') || enabled[0]
 }
 
-function buildMiniMaxVoiceSetting({voiceId,voiceStyle,voicePreset}) {
-    const p=voicePreset||normalizeVoicePresetRow({style_key:'normal'})
-    const intensity=clampNumber(voiceStyle?.intensity,0,1,p.default_intensity)
-    const speed=clampNumber(p.speed_base+p.speed_intensity_delta*intensity,0.5,2,1)
-    const vol=clampNumber(p.vol_base+p.vol_intensity_delta*intensity,0.1,5,1)
-    const pitch=Math.round(clampNumber(p.pitch_base+p.pitch_intensity_delta*intensity,-12,12,0))
-    const extra=normalizeExtraVoiceSetting(p.extra_voice_setting)
+function buildMiniMaxVoiceSetting({ voiceId, voiceStyle, voicePreset }) {
+    const p = voicePreset || normalizeVoicePresetRow({ style_key: 'normal' })
+    const intensity = clampNumber(voiceStyle?.intensity, 0, 1, p.default_intensity)
+    const speed = clampNumber(p.speed_base + p.speed_intensity_delta * intensity, 0.5, 2, 1)
+    const vol = clampNumber(p.vol_base + p.vol_intensity_delta * intensity, 0.1, 5, 1)
+    const pitch = Math.round(clampNumber(p.pitch_base + p.pitch_intensity_delta * intensity, -12, 12, 0))
+    const extra = normalizeExtraVoiceSetting(p.extra_voice_setting)
     delete extra.voice_id; delete extra.speed; delete extra.vol; delete extra.pitch
-    return {...extra,voice_id:voiceId,speed:Number(speed.toFixed(3)),vol:Number(vol.toFixed(3)),pitch}
+    return { ...extra, voice_id: voiceId, speed: Number(speed.toFixed(3)), vol: Number(vol.toFixed(3)), pitch }
 }
 
 
@@ -12439,13 +12438,13 @@ function buildMiniMaxVoiceModify({
     voiceStyle,
     voicePreset,
 }) {
-    const p=
-        voicePreset||
+    const p =
+        voicePreset ||
         normalizeVoicePresetRow({
-            style_key:'normal'
+            style_key: 'normal'
         })
 
-    const stateIntensity=
+    const stateIntensity =
         clampNumber(
             voiceStyle?.intensity,
             0,
@@ -12453,7 +12452,7 @@ function buildMiniMaxVoiceModify({
             p.default_intensity
         )
 
-    const pitch=
+    const pitch =
         Math.round(
             clampNumber(
                 p.modify_pitch_base +
@@ -12464,7 +12463,7 @@ function buildMiniMaxVoiceModify({
             )
         )
 
-    const intensity=
+    const intensity =
         Math.round(
             clampNumber(
                 p.modify_intensity_base +
@@ -12475,7 +12474,7 @@ function buildMiniMaxVoiceModify({
             )
         )
 
-    const timbre=
+    const timbre =
         Math.round(
             clampNumber(
                 p.modify_timbre_base +
@@ -12486,11 +12485,11 @@ function buildMiniMaxVoiceModify({
             )
         )
 
-    const soundEffect=
-        ['spacious_echo','auditorium_echo','lofi_telephone','robotic']
+    const soundEffect =
+        ['spacious_echo', 'auditorium_echo', 'lofi_telephone', 'robotic']
             .includes(
                 String(
-                    p.modify_sound_effect||
+                    p.modify_sound_effect ||
                     ''
                 )
                     .trim()
@@ -12504,9 +12503,9 @@ function buildMiniMaxVoiceModify({
     // Neutral settings are omitted entirely, so an existing custom/clone
     // voice remains untouched unless the user explicitly changes voice_modify.
     if (
-        pitch===0 &&
-        intensity===0 &&
-        timbre===0 &&
+        pitch === 0 &&
+        intensity === 0 &&
+        timbre === 0 &&
         !soundEffect
     ) {
         return null
@@ -12685,7 +12684,7 @@ async function synthesizeMiniMaxSpeech({
                 statusCode
             ) &&
             statusCode !==
-                0
+            0
         ) {
 
             const error =
@@ -12734,7 +12733,7 @@ async function synthesizeMiniMaxSpeech({
 
         if (
             audioBuffer.length ===
-                0
+            0
         ) {
 
             throw new Error(
@@ -12764,143 +12763,143 @@ async function synthesizeMiniMaxSpeech({
 // ======================================================
 // v5 Voice Lab 管理 API
 // ======================================================
-const VOICE_PRESET_SELECT='id, agent_key, style_key, display_name, prompt_hint, enabled, sort_order, voice_id, tts_model, default_intensity, speed_base, speed_intensity_delta, vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta, tiny_merge_chars, long_clause_chars, comma_min_chunk_chars, modify_pitch_base, modify_pitch_intensity_delta, modify_intensity_base, modify_intensity_intensity_delta, modify_timbre_base, modify_timbre_intensity_delta, modify_sound_effect, extra_voice_setting, created_at, updated_at'
+const VOICE_PRESET_SELECT = 'id, agent_key, style_key, display_name, prompt_hint, enabled, sort_order, voice_id, tts_model, default_intensity, speed_base, speed_intensity_delta, vol_base, vol_intensity_delta, pitch_base, pitch_intensity_delta, tiny_merge_chars, long_clause_chars, comma_min_chunk_chars, modify_pitch_base, modify_pitch_intensity_delta, modify_intensity_base, modify_intensity_intensity_delta, modify_timbre_base, modify_timbre_intensity_delta, modify_sound_effect, extra_voice_setting, created_at, updated_at'
 
-async function requireVoiceLabAdmin(req,res) {
-    const {data,error}=await supabase.from('app_admins').select('user_id').eq('user_id',req.userId).maybeSingle()
+async function requireVoiceLabAdmin(req, res) {
+    const { data, error } = await supabase.from('app_admins').select('user_id').eq('user_id', req.userId).maybeSingle()
     if (error) throw error
-    if (!data) { res.status(403).json({ok:false,error:'当前账号没有 Voice Lab 管理权限'}); return false }
+    if (!data) { res.status(403).json({ ok: false, error: '当前账号没有 Voice Lab 管理权限' }); return false }
     return true
 }
 
 function voicePresetPayload(raw) {
-    const agent=raw?.agent_key==='guai'?'guai':'xingxing'
-    const key=normalizeVoiceStyleKey(raw?.style_key)
+    const agent = raw?.agent_key === 'guai' ? 'guai' : 'xingxing'
+    const key = normalizeVoiceStyleKey(raw?.style_key)
     if (!key) throw new Error('style_key 不能为空')
-    const p=normalizeVoicePresetRow({...raw,agent_key:agent,style_key:key},agent)
-    return {...p,id:undefined,updated_at:new Date().toISOString()}
+    const p = normalizeVoicePresetRow({ ...raw, agent_key: agent, style_key: key }, agent)
+    return { ...p, id: undefined, updated_at: new Date().toISOString() }
 }
 
-app.get('/api/voice-lab/config',async(req,res)=>{
+app.get('/api/voice-lab/config', async (req, res) => {
     try {
-        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
-        const agent=req.query?.agent_key==='guai'?'guai':'xingxing'
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req, res)) return
+        const agent = req.query?.agent_key === 'guai' ? 'guai' : 'xingxing'
 
         const [presets, agentSettings] =
             await Promise.all([
-                loadVoicePresets(agent,{force:true}),
-                loadVoiceAgentSettings(agent,{force:true}),
+                loadVoicePresets(agent, { force: true }),
+                loadVoiceAgentSettings(agent, { force: true }),
             ])
 
         res.json({
-            ok:true,
-            agent_key:agent,
+            ok: true,
+            agent_key: agent,
 
             // 新接口
-            agent_settings:agentSettings,
+            agent_settings: agentSettings,
 
             // 保留旧字段，兼容可能缓存着的旧前端。
-            base_voice_id:agentSettings.effective_base_voice_id||'',
-            default_tts_model:agentSettings.effective_tts_model||MINIMAX_TTS_MODEL,
+            base_voice_id: agentSettings.effective_base_voice_id || '',
+            default_tts_model: agentSettings.effective_tts_model || MINIMAX_TTS_MODEL,
 
             presets,
         })
-    } catch(error) { console.error('Voice Lab 读取失败：',error); res.status(500).json({ok:false,error:'Voice Lab 读取失败',detail:error.message}) }
+    } catch (error) { console.error('Voice Lab 读取失败：', error); res.status(500).json({ ok: false, error: 'Voice Lab 读取失败', detail: error.message }) }
 })
 
-app.put('/api/voice-lab/agent-settings',async(req,res)=>{
+app.put('/api/voice-lab/agent-settings', async (req, res) => {
     try {
-        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req, res)) return
 
-        const agent=req.body?.agent_key==='guai'?'guai':'xingxing'
+        const agent = req.body?.agent_key === 'guai' ? 'guai' : 'xingxing'
 
-        const settings=await saveVoiceAgentSettings({
-            agentKey:agent,
-            baseVoiceId:req.body?.base_voice_id,
-            defaultTtsModel:req.body?.default_tts_model,
+        const settings = await saveVoiceAgentSettings({
+            agentKey: agent,
+            baseVoiceId: req.body?.base_voice_id,
+            defaultTtsModel: req.body?.default_tts_model,
         })
 
         res.json({
-            ok:true,
-            agent_settings:settings,
+            ok: true,
+            agent_settings: settings,
         })
-    } catch(error) {
-        console.error('Voice Lab 保存角色基础声音失败：',error)
+    } catch (error) {
+        console.error('Voice Lab 保存角色基础声音失败：', error)
         res.status(400).json({
-            ok:false,
-            error:'保存角色基础声音失败',
-            detail:error.message,
+            ok: false,
+            error: '保存角色基础声音失败',
+            detail: error.message,
         })
     }
 })
 
 
-app.post('/api/voice-lab/presets',async(req,res)=>{
+app.post('/api/voice-lab/presets', async (req, res) => {
     try {
-        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
-        const payload=voicePresetPayload(req.body)
-        const {data,error}=await supabase.from('voice_presets').insert([payload]).select(VOICE_PRESET_SELECT).single()
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req, res)) return
+        const payload = voicePresetPayload(req.body)
+        const { data, error } = await supabase.from('voice_presets').insert([payload]).select(VOICE_PRESET_SELECT).single()
         if (error) throw error
         clearVoicePresetCache(payload.agent_key)
-        res.status(201).json({ok:true,preset:normalizeVoicePresetRow(data,payload.agent_key)})
-    } catch(error) { res.status(400).json({ok:false,error:'新增语音状态失败',detail:error.message}) }
+        res.status(201).json({ ok: true, preset: normalizeVoicePresetRow(data, payload.agent_key) })
+    } catch (error) { res.status(400).json({ ok: false, error: '新增语音状态失败', detail: error.message }) }
 })
 
-app.put('/api/voice-lab/presets/:id',async(req,res)=>{
+app.put('/api/voice-lab/presets/:id', async (req, res) => {
     try {
-        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
-        const id=Number(req.params.id); if (!Number.isInteger(id)||id<=0) return res.status(400).json({ok:false,error:'无效的 preset id'})
-        const payload=voicePresetPayload(req.body)
-        const {data,error}=await supabase.from('voice_presets').update(payload).eq('id',id).eq('agent_key',payload.agent_key).select(VOICE_PRESET_SELECT).single()
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req, res)) return
+        const id = Number(req.params.id); if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: '无效的 preset id' })
+        const payload = voicePresetPayload(req.body)
+        const { data, error } = await supabase.from('voice_presets').update(payload).eq('id', id).eq('agent_key', payload.agent_key).select(VOICE_PRESET_SELECT).single()
         if (error) throw error
         clearVoicePresetCache(payload.agent_key)
-        res.json({ok:true,preset:normalizeVoicePresetRow(data,payload.agent_key)})
-    } catch(error) { res.status(400).json({ok:false,error:'保存语音状态失败',detail:error.message}) }
+        res.json({ ok: true, preset: normalizeVoicePresetRow(data, payload.agent_key) })
+    } catch (error) { res.status(400).json({ ok: false, error: '保存语音状态失败', detail: error.message }) }
 })
 
-app.delete('/api/voice-lab/presets/:id',async(req,res)=>{
+app.delete('/api/voice-lab/presets/:id', async (req, res) => {
     try {
-        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
-        const id=Number(req.params.id), agent=req.query?.agent_key==='guai'?'guai':'xingxing'
-        if (!Number.isInteger(id)||id<=0) return res.status(400).json({ok:false,error:'无效的 preset id'})
-        const {error}=await supabase.from('voice_presets').delete().eq('id',id).eq('agent_key',agent)
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req, res)) return
+        const id = Number(req.params.id), agent = req.query?.agent_key === 'guai' ? 'guai' : 'xingxing'
+        if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: '无效的 preset id' })
+        const { error } = await supabase.from('voice_presets').delete().eq('id', id).eq('agent_key', agent)
         if (error) throw error
-        clearVoicePresetCache(agent); res.json({ok:true})
-    } catch(error) { res.status(400).json({ok:false,error:'删除语音状态失败',detail:error.message}) }
+        clearVoicePresetCache(agent); res.json({ ok: true })
+    } catch (error) { res.status(400).json({ ok: false, error: '删除语音状态失败', detail: error.message }) }
 })
 
-app.post('/api/voice-lab/preview',async(req,res)=>{
+app.post('/api/voice-lab/preview', async (req, res) => {
     try {
-        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req,res)) return
-        const agent=req.body?.agent_key==='guai'?'guai':'xingxing'
-        const text=String(req.body?.text||'').trim().slice(0,800)
-        if (!text) return res.status(400).json({ok:false,error:'预览文字不能为空'})
-        const preset=normalizeVoicePresetRow({...req.body?.preset,agent_key:agent},agent)
-        const intensity=clampNumber(req.body?.intensity,0,1,preset.default_intensity)
+        if (!requireSupabase(res) || !await requireVoiceLabAdmin(req, res)) return
+        const agent = req.body?.agent_key === 'guai' ? 'guai' : 'xingxing'
+        const text = String(req.body?.text || '').trim().slice(0, 800)
+        if (!text) return res.status(400).json({ ok: false, error: '预览文字不能为空' })
+        const preset = normalizeVoicePresetRow({ ...req.body?.preset, agent_key: agent }, agent)
+        const intensity = clampNumber(req.body?.intensity, 0, 1, preset.default_intensity)
 
-        const agentSettings=
+        const agentSettings =
             await loadVoiceAgentSettings(agent)
 
-        const voiceId=
-            preset.voice_id||
+        const voiceId =
+            preset.voice_id ||
             agentSettings.effective_base_voice_id
 
-        if (!voiceId) return res.status(400).json({ok:false,error:'这个状态没有 voice_id，且角色基础 voice_id 也未配置'})
+        if (!voiceId) return res.status(400).json({ ok: false, error: '这个状态没有 voice_id，且角色基础 voice_id 也未配置' })
 
-        const {audioBuffer,traceId}=await synthesizeMiniMaxSpeech({
+        const { audioBuffer, traceId } = await synthesizeMiniMaxSpeech({
             text,
             voiceId,
-            voiceStyle:{style:preset.style_key,intensity},
-            voicePreset:preset,
+            voiceStyle: { style: preset.style_key, intensity },
+            voicePreset: preset,
             ttsModel:
-                preset.tts_model||
-                agentSettings.effective_tts_model||
+                preset.tts_model ||
+                agentSettings.effective_tts_model ||
                 MINIMAX_TTS_MODEL,
         })
-        res.setHeader('Content-Type','audio/mpeg'); res.setHeader('Content-Length',String(audioBuffer.length)); res.setHeader('Cache-Control','no-store')
-        if (traceId) res.setHeader('X-MiniMax-Trace-Id',traceId)
+        res.setHeader('Content-Type', 'audio/mpeg'); res.setHeader('Content-Length', String(audioBuffer.length)); res.setHeader('Cache-Control', 'no-store')
+        if (traceId) res.setHeader('X-MiniMax-Trace-Id', traceId)
         res.status(200).send(audioBuffer)
-    } catch(error) { console.error('Voice Lab 试听失败：',error); res.status(500).json({ok:false,error:'试听失败',detail:error.message}) }
+    } catch (error) { console.error('Voice Lab 试听失败：', error); res.status(500).json({ ok: false, error: '试听失败', detail: error.message }) }
 })
 
 // ======================================================
@@ -12927,63 +12926,63 @@ function getTencentSttVoiceFormat(
 
     if (
         mimeType ===
-            'audio/mp4' ||
+        'audio/mp4' ||
         mimeType ===
-            'audio/x-m4a' ||
+        'audio/x-m4a' ||
         mimeType ===
-            'audio/m4a'
+        'audio/m4a'
     ) {
         return 'm4a'
     }
 
     if (
         mimeType ===
-            'audio/ogg'
+        'audio/ogg'
     ) {
         return 'ogg-opus'
     }
 
     if (
         mimeType ===
-            'audio/wav' ||
+        'audio/wav' ||
         mimeType ===
-            'audio/x-wav' ||
+        'audio/x-wav' ||
         mimeType ===
-            'audio/wave'
+        'audio/wave'
     ) {
         return 'wav'
     }
 
     if (
         mimeType ===
-            'audio/mpeg' ||
+        'audio/mpeg' ||
         mimeType ===
-            'audio/mp3'
+        'audio/mp3'
     ) {
         return 'mp3'
     }
 
     if (
         mimeType ===
-            'audio/aac' ||
+        'audio/aac' ||
         mimeType ===
-            'audio/x-aac'
+        'audio/x-aac'
     ) {
         return 'aac'
     }
 
     if (
         mimeType ===
-            'audio/amr'
+        'audio/amr'
     ) {
         return 'amr'
     }
 
     if (
         mimeType ===
-            'audio/pcm' ||
+        'audio/pcm' ||
         mimeType ===
-            'audio/l16'
+        'audio/l16'
     ) {
         return 'pcm'
     }
@@ -13413,7 +13412,7 @@ app.post(
 
             if (
                 audioBuffer.length ===
-                    0
+                0
             ) {
 
                 return res
@@ -13429,7 +13428,7 @@ app.post(
 
             if (
                 audioBuffer.length >
-                    TENCENT_ASR_MAX_AUDIO_BYTES
+                TENCENT_ASR_MAX_AUDIO_BYTES
             ) {
 
                 return res
@@ -13501,7 +13500,7 @@ app.post(
 
                     contentType:
                         req.headers[
-                            'content-type'
+                        'content-type'
                         ] ||
                         'application/octet-stream',
                 })
@@ -13540,17 +13539,17 @@ app.post(
             const timeout =
                 error
                     ?.name ===
-                    'AbortError'
+                'AbortError'
 
             const notConfigured =
                 error
                     ?.code ===
-                    'STT_NOT_CONFIGURED'
+                'STT_NOT_CONFIGURED'
 
             const unsupportedFormat =
                 error
                     ?.code ===
-                    'STT_UNSUPPORTED_AUDIO_FORMAT'
+                'STT_UNSUPPORTED_AUDIO_FORMAT'
 
             console.error(
                 '通话 STT 失败：',
@@ -15063,7 +15062,7 @@ function sanitizeVoiceTextBeforeTts(
 
     while (
         lines.length >
-            0
+        0
     ) {
 
         const first =
@@ -15092,7 +15091,7 @@ function sanitizeVoiceTextBeforeTts(
 
             if (
                 lines.length >
-                    0 &&
+                0 &&
                 /^(0(?:\.\d+)?|1(?:\.0+)?)$/
                     .test(
                         String(
@@ -15172,8 +15171,8 @@ app.post(
             const voiceStyle =
                 req.body
                     ?.voice_style &&
-                typeof req.body
-                    .voice_style ===
+                    typeof req.body
+                        .voice_style ===
                     'object'
                     ? req.body
                         .voice_style
@@ -15215,7 +15214,7 @@ app.post(
 
             if (
                 text.length >
-                    2000
+                2000
             ) {
 
                 return res
@@ -15414,7 +15413,7 @@ app.post(
             const timeout =
                 error
                     ?.name ===
-                    'AbortError'
+                'AbortError'
 
             console.error(
                 'MiniMax TTS 失败，前端将退回浏览器声音：',
@@ -17141,11 +17140,11 @@ app.get(
 // 放在开头是为了流式通话能在第一句话开口前就知道语气。
 // ======================================================
 
-function buildVoiceStyleReplyContext(messageChannel,voicePresets=[],agentKey='xingxing') {
-    if (messageChannel!=='voice') return ''
-    const enabled=enabledVoicePresets(voicePresets,agentKey)
-    const def=resolveVoicePreset(enabled,'normal',agentKey)
-    const lines=enabled.map(p=>`- ${p.style_key}：${p.display_name}${p.prompt_hint?`；${p.prompt_hint}`:''}`).join('\n')
+function buildVoiceStyleReplyContext(messageChannel, voicePresets = [], agentKey = 'xingxing') {
+    if (messageChannel !== 'voice') return ''
+    const enabled = enabledVoicePresets(voicePresets, agentKey)
+    const def = resolveVoicePreset(enabled, 'normal', agentKey)
+    const lines = enabled.map(p => `- ${p.style_key}：${p.display_name}${p.prompt_hint ? `；${p.prompt_hint}` : ''}`).join('\n')
     return `【语音通话模式：仅供系统读取，不向用户展示】
 这一轮来自 App 内语音通话。
 保持原有角色、人设、记忆、剧情、亲密程度，不要变成客服或播音稿。
@@ -17167,7 +17166,7 @@ function buildVoiceStyleReplyContext(messageChannel,voicePresets=[],agentKey='xi
 ${lines}
 
 intensity 必须是 0 到 1 之间的小数，表示状态明显程度；默认尽量中低强度。
-示例：[[VOICE_STYLE:${def.style_key}:${Number(def.default_intensity||0.35).toFixed(2)}]]
+示例：[[VOICE_STYLE:${def.style_key}:${Number(def.default_intensity || 0.35).toFixed(2)}]]
 不要解释标签，不要输出多个标签。`
 }
 
@@ -17240,7 +17239,7 @@ function extractLooseVoiceStyleHeader(
     agentKey = 'xingxing',
     {
         requireTerminator =
-            false,
+        false,
     } = {}
 ) {
 
@@ -17254,7 +17253,7 @@ function extractLooseVoiceStyleHeader(
         original.match(
             /^\s*/
         )
-            ?.[0] ||
+        ?.[0] ||
         ''
 
     const text =
@@ -17443,7 +17442,7 @@ function extractVoiceStyleFromReply(
 
     if (
         messageChannel !==
-            'voice'
+        'voice'
     ) {
 
         return {
@@ -17656,9 +17655,9 @@ app.post(
             const messageChannel =
                 channel ===
                     undefined ||
-                channel ===
+                    channel ===
                     null ||
-                channel ===
+                    channel ===
                     ''
                     ? 'text'
                     : String(
@@ -17669,9 +17668,9 @@ app.post(
 
             if (
                 messageChannel !==
-                    'text' &&
+                'text' &&
                 messageChannel !==
-                    'voice'
+                'voice'
             ) {
 
                 return res
@@ -17689,11 +17688,11 @@ app.post(
 
             const hasRetryUserMessageId =
                 retry_user_message_id !==
-                    undefined &&
+                undefined &&
                 retry_user_message_id !==
-                    null &&
+                null &&
                 retry_user_message_id !==
-                    ''
+                ''
 
             const retryUserMessageId =
                 hasRetryUserMessageId
@@ -17721,7 +17720,7 @@ app.post(
             if (
                 retryUserMessageId &&
                 messageChannel !==
-                    'text'
+                'text'
             ) {
 
                 return res
@@ -17738,11 +17737,11 @@ app.post(
 
             const hasRegenerateAssistantMessageId =
                 regenerate_assistant_message_id !==
-                    undefined &&
+                undefined &&
                 regenerate_assistant_message_id !==
-                    null &&
+                null &&
                 regenerate_assistant_message_id !==
-                    ''
+                ''
 
             const regenerateAssistantMessageId =
                 hasRegenerateAssistantMessageId
@@ -17771,7 +17770,7 @@ app.post(
                 regenerateAssistantMessageId &&
                 (
                     messageChannel !==
-                        'text' ||
+                    'text' ||
                     !retryUserMessageId
                 )
             ) {
@@ -17953,7 +17952,7 @@ app.post(
 
             if (
                 messageChannel ===
-                    'voice'
+                'voice'
             ) {
 
                 callSessionId =
@@ -18256,7 +18255,7 @@ app.post(
 
                     if (
                         nextVisibleMessage?.role !==
-                            'assistant' ||
+                        'assistant' ||
                         String(
                             nextVisibleMessage.id
                         ) !==
@@ -18340,7 +18339,7 @@ app.post(
 
                     if (
                         latestTextMessage?.role !==
-                            'assistant' ||
+                        'assistant' ||
                         String(
                             latestTextMessage?.id
                         ) !==
@@ -18584,7 +18583,7 @@ app.post(
 
             if (
                 reminderResult.status ===
-                    'none' &&
+                'none' &&
                 shouldAnalyzeReminderIntent(
                     cleanMessage,
                     reminderRecentMessages
@@ -18903,9 +18902,9 @@ app.post(
 
             const wantsVoiceStream =
                 messageChannel ===
-                    'voice' &&
+                'voice' &&
                 stream_voice ===
-                    true
+                true
 
 
             if (
@@ -18940,7 +18939,7 @@ app.post(
                 if (
                     typeof res
                         .flushHeaders ===
-                        'function'
+                    'function'
                 ) {
                     res.flushHeaders()
                 }
@@ -19426,7 +19425,7 @@ app.post(
                         value,
                         {
                             force =
-                                false,
+                            false,
                         } = {}
                     ) => {
 
@@ -19456,7 +19455,7 @@ app.post(
                         if (
                             !force &&
                             speechLength <=
-                                currentVoicePreset.tiny_merge_chars &&
+                            currentVoicePreset.tiny_merge_chars &&
                             !hasStrongQuestionOrExclamation(
                                 cleanValue
                             )
@@ -19535,13 +19534,13 @@ app.post(
                         for (
                             let index = 0;
                             index <
-                                text.length;
+                            text.length;
                             index += 1
                         ) {
 
                             const char =
                                 text[
-                                    index
+                                index
                                 ]
 
                             if (
@@ -19558,7 +19557,7 @@ app.post(
                                 text.slice(
                                     0,
                                     index +
-                                        1
+                                    1
                                 )
 
 
@@ -19842,10 +19841,10 @@ app.post(
                             if (
                                 event
                                     ?.type ===
-                                    'response.output_text.delta' &&
+                                'response.output_text.delta' &&
                                 typeof event
                                     ?.delta ===
-                                    'string'
+                                'string'
                             ) {
 
                                 rawStreamReply +=
@@ -19865,7 +19864,7 @@ app.post(
                             if (
                                 event
                                     ?.type ===
-                                    'error'
+                                'error'
                             ) {
 
                                 throw new Error(
@@ -19879,7 +19878,7 @@ app.post(
                             if (
                                 event
                                     ?.type ===
-                                    'response.failed'
+                                'response.failed'
                             ) {
 
                                 throw new Error(
@@ -19913,7 +19912,7 @@ app.post(
                             clientDisconnected ||
                             streamingError
                                 ?.name ===
-                                'AbortError'
+                            'AbortError'
 
                         if (
                             aborted
@@ -19926,7 +19925,7 @@ app.post(
                             !rawStreamReply
                                 .trim() &&
                             emittedSentenceCount ===
-                                0
+                            0
                         ) {
 
                             console.warn(
@@ -20298,7 +20297,7 @@ app.post(
                 await callModelWithRetry({
 
                     model:
-                        'gpt-5.6-sol',
+                        'grok-auto',
 
                     input:
                         modelInput,
@@ -20914,7 +20913,7 @@ app.post(
 
             const receivedSecret =
                 req.headers[
-                    'x-proactive-secret'
+                'x-proactive-secret'
                 ]
 
             if (
@@ -21696,7 +21695,7 @@ app.post(
             const receivedSecret =
                 String(
                     req.headers[
-                        'x-private-game-secret'
+                    'x-private-game-secret'
                     ] ||
                     ''
                 )
