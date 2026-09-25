@@ -20297,7 +20297,7 @@ app.post(
                 await callModelWithRetry({
 
                     model:
-                        'grok-auto',
+                        'gpt-5.6-sol',
 
                     input:
                         modelInput,
