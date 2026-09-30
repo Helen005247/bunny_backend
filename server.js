@@ -372,20 +372,49 @@ async function requireAuth(
                 })
         }
 
-        const {
-            data,
-            error,
-        } =
+        let authResult =
             await supabase
                 .auth
                 .getUser(
                     accessToken
                 )
 
+        // 某些环境下（例如部署节点时间刚恢复、客户端时间偏快）
+        // Supabase 可能短暂返回 JWT issued at future。
+        // 等待后重试一次，避免用户必须重新登录。
+        if (
+            authResult.error &&
+            String(authResult.error.message || authResult.error)
+                .toLowerCase()
+                .includes('issued at future')
+        ) {
+            await new Promise(
+                (resolve) => setTimeout(resolve, 5000)
+            )
+
+            authResult =
+                await supabase
+                    .auth
+                    .getUser(
+                        accessToken
+                    )
+        }
+
+        const {
+            data,
+            error,
+        } =
+            authResult
+
         if (
             error ||
             !data?.user?.id
         ) {
+
+            console.error(
+                'Supabase Token 验证失败：',
+                error?.message || error
+            )
 
             return res
                 .status(401)
