@@ -379,15 +379,27 @@ async function requireAuth(
                     accessToken
                 )
 
-        // 某些环境下（例如部署节点时间刚恢复、客户端时间偏快）
-        // Supabase 可能短暂返回 JWT issued at future。
-        // 等待后重试一次，避免用户必须重新登录。
-        if (
-            authResult.error &&
-            String(authResult.error.message || authResult.error)
-                .toLowerCase()
-                .includes('issued at future')
-        ) {
+        // 某些环境下（例如 Render 节点时间漂移、客户端时间偏快）
+        // Supabase 可能返回 JWT issued at future。
+        // 不直接让用户重新登录，进行多次短暂恢复尝试。
+        for (let retry = 0; retry < 3; retry++) {
+
+            const jwtError =
+                String(
+                    authResult.error?.message ||
+                    authResult.error ||
+                    ''
+                )
+                    .toLowerCase()
+
+            if (!jwtError.includes('issued at future')) {
+                break
+            }
+
+            console.warn(
+                `JWT issued at future，第 ${retry + 1} 次等待重试`
+            )
+
             await new Promise(
                 (resolve) => setTimeout(resolve, 5000)
             )
@@ -436,7 +448,9 @@ async function requireAuth(
     } catch (error) {
 
         console.error(
-            '验证登录 Token 失败：',
+            'JWT_FAIL:',
+            error?.name,
+            error?.message,
             error
         )
 
