@@ -1,7 +1,6 @@
 require('dotenv').config()
 
-const express = require('express')
-const cors = require('cors')
+const app = require('./app')
 const OpenAI = require('openai')
 const { createClient } = require('@supabase/supabase-js')
 const webpush = require('web-push')
@@ -14,7 +13,6 @@ const {
 
 
 
-const app = express()
 const PORT = process.env.PORT || 3000
 
 
@@ -118,9 +116,6 @@ const TENCENT_ASR_TIMEOUT_MS =
 const TENCENT_ASR_MAX_AUDIO_BYTES =
     2 * 1024 * 1024
 
-
-app.use(cors())
-app.use(express.json({ limit: '1mb' }))
 
 const AI_REQUEST_TIMEOUT_MS =
     Math.min(
