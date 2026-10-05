@@ -20,6 +20,7 @@ const {
 
 
 const {
+    createMilestone,
     getUpcomingMilestones,
 } = require('./services/milestones/milestoneService')
 const PORT = process.env.PORT || 3000
