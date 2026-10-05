@@ -12,6 +12,7 @@ const {
     resolveGlanceUserId,
 } = require('./services/glance/userResolver')
 const { generateReaction } = require('./services/glance/reactionGenerator')
+const { saveReactionMessage } = require('./services/glance/reactionPersistence')
 const {
     buildMemoryCompressionPlan,
 } = require('./services/memoryRetentionPolicy')
@@ -10826,50 +10827,13 @@ reason：${reactionPlan?.reason || 'romantic_other_character'}
             callModelWithRetry,
         })
 
-
-    if (!reply) {
-        throw new Error(
-            '余光反应模型没有返回有效文本'
-        )
-    }
-
-    const {
-        data:
-        assistantMessage,
-        error:
-        assistantMessageError,
-    } =
-        await supabase
-            .from('messages')
-            .insert([
-                {
-                    user_id:
-                        userId,
-
-                    session_id:
-                        sessionId,
-
-                    role:
-                        'assistant',
-
-                    content:
-                        reply,
-
-                    visible:
-                        true,
-
-                    reasoning_content:
-                        'glance_reaction',
-                },
-            ])
-            .select(
-                'id, session_id, role, content, created_at, visible, reasoning_content'
-            )
-            .single()
-
-    if (assistantMessageError) {
-        throw assistantMessageError
-    }
+    const assistantMessage =
+        await saveReactionMessage({
+            supabase,
+            userId,
+            sessionId,
+            content: reply,
+        })
 
     lastGlanceReactionAt =
         Date.now()
