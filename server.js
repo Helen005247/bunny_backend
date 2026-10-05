@@ -9,6 +9,9 @@ const crypto = require('crypto')
 const { DateTime } = require('luxon')
 const createGlanceRouter = require('./routes/glance')
 const {
+    resolveGlanceUserId,
+} = require('./services/glance/userResolver')
+const {
     buildMemoryCompressionPlan,
 } = require('./services/memoryRetentionPolicy')
 
@@ -10434,81 +10437,6 @@ async function sendPushNotification(
 // 多用户时绝不猜。
 // ======================================================
 
-async function resolveGlanceUserId(
-    configuredUserId = ''
-) {
-
-    const configured =
-        String(
-            configuredUserId || ''
-        ).trim()
-
-    if (configured) {
-        return {
-            userId:
-                configured,
-            source:
-                'configured',
-        }
-    }
-
-    if (!supabase) {
-        return {
-            userId:
-                null,
-            source:
-                'supabase_unavailable',
-        }
-    }
-
-    const {
-        data,
-        error,
-    } =
-        await supabase
-            .from('sessions')
-            .select('user_id')
-            .not(
-                'user_id',
-                'is',
-                null
-            )
-            .limit(50)
-
-    if (error) {
-        throw error
-    }
-
-    const ids = [
-        ...new Set(
-            (data || [])
-                .map(
-                    item =>
-                        item.user_id
-                )
-                .filter(Boolean)
-        ),
-    ]
-
-    if (ids.length === 1) {
-        return {
-            userId:
-                ids[0],
-            source:
-                'single_user_inferred',
-        }
-    }
-
-    return {
-        userId:
-            null,
-        source:
-            ids.length === 0
-                ? 'no_users'
-                : 'multiple_users',
-    }
-}
-
 
 // ======================================================
 // 余光模式：选择最近一次真实聊天所在 session
@@ -10659,7 +10587,8 @@ async function generateAndSaveGlanceReactionMessage({
 
     const resolved =
         await resolveGlanceUserId(
-            ownerId
+            ownerId,
+            supabase
         )
 
     if (!resolved.userId) {
