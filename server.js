@@ -10821,19 +10821,11 @@ reason：${reactionPlan?.reason || 'romantic_other_character'}
 11. 输出必须能直接作为 Hermit 里星星发给用户的消息。`
 
     const reply =
-            await generateReaction({
-                reactionInput,
-                callModelWithRetry,
-            })
+        await generateReaction({
+            reactionInput,
+            callModelWithRetry,
+        })
 
-    const reply =
-        typeof response
-            ?.output_text ===
-            'string'
-            ? response
-                .output_text
-                .trim()
-            : ''
 
     if (!reply) {
         throw new Error(
