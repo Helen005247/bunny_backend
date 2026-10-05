@@ -11,6 +11,7 @@ const createGlanceRouter = require('./routes/glance')
 const {
     resolveGlanceUserId,
 } = require('./services/glance/userResolver')
+const { generateReaction } = require('./services/glance/reactionGenerator')
 const {
     buildMemoryCompressionPlan,
 } = require('./services/memoryRetentionPolicy')
@@ -10819,17 +10820,11 @@ reason：${reactionPlan?.reason || 'romantic_other_character'}
 10. 如果这次触发来自 deep_read / interest_streak，而当前文本并没有明确恋爱意味，不要硬说她“喜欢上了对方”或把普通剧情强行性化；你真正知道的是：她把持续、明显的注意力给了别人。
 11. 输出必须能直接作为 Hermit 里星星发给用户的消息。`
 
-    const response =
-        await callModelWithRetry(
-            {
-                model:
-                    'gpt-5.6-sol',
-
-                input:
-                    reactionInput,
-            },
-            2
-        )
+    const reply =
+            await generateReaction({
+                reactionInput,
+                callModelWithRetry,
+            })
 
     const reply =
         typeof response
