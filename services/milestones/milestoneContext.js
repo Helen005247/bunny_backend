@@ -36,6 +36,7 @@ function buildMilestoneContext(milestones = []) {
             category: metadata.category || null,
             importance: metadata.importance || null,
             emotion: metadata.emotion || null,
+            relationshipType: metadata.relationship_type || 'other',
         }
     })
 
@@ -58,6 +59,12 @@ function buildMilestoneContext(milestones = []) {
             if (item.emotion) {
                 details.push(
                     `emotion: ${item.emotion}`
+                )
+            }
+
+            if (item.relationshipType) {
+                details.push(
+                    `relationship: ${item.relationshipType}`
                 )
             }
 
