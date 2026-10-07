@@ -19,25 +19,69 @@ function buildMilestoneContext(milestones = []) {
         }
     }
 
-    const upcomingMilestones = milestones.map((milestone) => ({
-        title: milestone.title,
-        description: milestone.description || null,
-        eventDate: milestone.event_date,
-        daysRemaining: calculateDaysRemaining(
-            milestone.event_date
-        ),
-    }))
+    const upcomingMilestones = milestones.map((milestone) => {
+        const metadata =
+            milestone.metadata &&
+            typeof milestone.metadata === 'object'
+                ? milestone.metadata
+                : {}
+
+        return {
+            title: milestone.title,
+            description: milestone.description || null,
+            eventDate: milestone.event_date,
+            daysRemaining: calculateDaysRemaining(
+                milestone.event_date
+            ),
+            category: metadata.category || null,
+            importance: metadata.importance || null,
+            emotion: metadata.emotion || null,
+        }
+    })
 
     const text = upcomingMilestones
         .map((item) => {
-            return `- ${item.title}: ${item.daysRemaining} days remaining`
+            const details = []
+
+            if (item.category) {
+                details.push(
+                    `category: ${item.category}`
+                )
+            }
+
+            if (item.importance) {
+                details.push(
+                    `importance: ${item.importance}`
+                )
+            }
+
+            if (item.emotion) {
+                details.push(
+                    `emotion: ${item.emotion}`
+                )
+            }
+
+            const extra =
+                details.length > 0
+                    ? ` (${details.join(', ')})`
+                    : ''
+
+            return (
+                `- ${item.title}: ` +
+                `${item.daysRemaining} days remaining` +
+                extra
+            )
         })
         .join('\n')
 
     return {
         hasUpcomingMilestones: true,
         upcomingMilestones,
-        text: `Upcoming important events:\n${text}`,
+        text:
+            'Upcoming meaningful events in the relationship.\n' +
+            'Use this information only when it is naturally relevant. ' +
+            'Do not mention upcoming events repeatedly unless the conversation calls for it.\n' +
+            `${text}`,
     }
 }
 
