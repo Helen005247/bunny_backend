@@ -513,6 +513,20 @@ app.use(
     requireAuth
 )
 
+// Milestone 健康检查：公开访问，用于确认 router 是否部署成功。
+// 不涉及用户数据，不需要登录态。
+app.get(
+    '/api/milestones/health',
+    (req, res) => {
+        return res
+            .status(200)
+            .json({
+                ok: true,
+                service: 'milestones',
+            })
+    }
+)
+
 // Milestone 真实数据库读取验证。
 // 仍然复用登录态，不接受 URL 中传入 user_id，避免跨用户读取。
 app.use(
