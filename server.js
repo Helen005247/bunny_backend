@@ -8,6 +8,7 @@ const webpush = require('web-push')
 const crypto = require('crypto')
 const { DateTime } = require('luxon')
 const createGlanceRouter = require('./routes/glance')
+const createMilestonesRouter = require('./routes/milestones')
 const {
     resolveGlanceUserId,
 } = require('./services/glance/userResolver')
@@ -17,12 +18,6 @@ const {
     buildMemoryCompressionPlan,
 } = require('./services/memoryRetentionPolicy')
 
-
-
-const {
-    createMilestone,
-    getUpcomingMilestones,
-} = require('./services/milestones/milestoneService')
 const PORT = process.env.PORT || 3000
 
 
@@ -516,6 +511,16 @@ app.use(
 app.use(
     '/api/db-test',
     requireAuth
+)
+
+// Milestone 真实数据库读取验证。
+// 仍然复用登录态，不接受 URL 中传入 user_id，避免跨用户读取。
+app.use(
+    '/api/milestones',
+    requireAuth,
+    createMilestonesRouter({
+        supabase,
+    })
 )
 
 
