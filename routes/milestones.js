@@ -68,6 +68,20 @@ function createMilestonesRouter({
 
     const router = express.Router()
 
+    // 健康检查：确认 milestones router 已被 server.js 正确挂载。
+    // GET /api/milestones/health
+    router.get(
+        '/health',
+        (req, res) => {
+            return res
+                .status(200)
+                .json({
+                    ok: true,
+                    service: 'milestones',
+                })
+        }
+    )
+
     // 临时验证入口：读取当前登录用户自己的 upcoming milestones。
     // GET /api/milestones/debug/upcoming?agentId=star&days=30
     //
