@@ -9,6 +9,8 @@ const crypto = require('crypto')
 const { DateTime } = require('luxon')
 const createGlanceRouter = require('./routes/glance')
 const createMilestonesRouter = require('./routes/milestones')
+const { getMilestoneContext } = require('./services/milestones/milestoneContext')
+const milestoneService = require('./services/milestones/milestoneService')
 const {
     resolveGlanceUserId,
 } = require('./services/glance/userResolver')
@@ -18753,6 +18755,25 @@ app.post(
                 })
 
 
+            const milestoneContext =
+                await getMilestoneContext({
+                    milestoneService,
+                    supabase,
+                    userId:
+                        req.userId,
+                    agentId:
+                        'star',
+                    days:
+                        365,
+                })
+
+
+            const milestoneReplyContext =
+                milestoneContext.hasUpcomingMilestones
+                    ? `Temporal context:\n${milestoneContext.text}`
+                    : ''
+
+
             const modelInputSections = [
                 baseModelInput,
             ]
@@ -18788,6 +18809,14 @@ app.post(
                 // 不改变普通聊天，也不改变长期人物设定。
                 modelInputSections.push(
                     intimacyReplyContext
+                )
+            }
+
+            if (
+                milestoneReplyContext
+            ) {
+                modelInputSections.push(
+                    milestoneReplyContext
                 )
             }
 
