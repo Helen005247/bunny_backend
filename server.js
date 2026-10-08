@@ -1,3 +1,5 @@
+
+const { decideMilestoneAttention } = require('./services/milestones/milestoneDecision')
 const express = require('express')
 require('dotenv').config()
 
@@ -21752,6 +21754,46 @@ app.post(
 // ======================================================
 // 启动服务器
 // ======================================================
+
+
+
+// TEMP DEBUG ONLY: remove after Step 9 verification
+app.get('/api/milestones/debug/decision', async (req, res) => {
+    try {
+        const milestones = await getUpcomingMilestones({
+            supabase,
+            userId: req.query.userId,
+            agentId: req.query.agentId || 'star',
+            days: Number(req.query.days || 365),
+        })
+
+        const results = milestones.map((item) => ({
+            title: item.title,
+            event_date: item.event_date,
+            metadata: item.metadata,
+            decision: decideMilestoneAttention({
+                ...item,
+                relationshipType: item.metadata?.relationship_type,
+                importance: item.metadata?.importance,
+                daysRemaining: Math.ceil(
+                    (new Date(item.event_date) - new Date()) /
+                    (1000 * 60 * 60 * 24)
+                ),
+            }),
+        }))
+
+        res.json({
+            success: true,
+            results,
+        })
+    } catch (error) {
+        console.error('milestone decision debug error:', error)
+        res.status(500).json({
+            success: false,
+            error: error.message,
+        })
+    }
+})
 
 app.listen(
     PORT,
