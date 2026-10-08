@@ -40,6 +40,13 @@ function buildMilestoneContext(milestones = []) {
         }
     })
 
+    const relationshipDescriptions = {
+        shared: 'This is a shared experience between the user and Star.',
+        user_related: 'This is directly related to the user.',
+        self: 'This is related to Star himself.',
+        other: 'This is related to other people or events.',
+    }
+
     const text = upcomingMilestones
         .map((item) => {
             const details = []
@@ -68,6 +75,11 @@ function buildMilestoneContext(milestones = []) {
                 )
             }
 
+            const relationshipNote =
+                relationshipDescriptions[item.relationshipType]
+                    ? ` ${relationshipDescriptions[item.relationshipType]}`
+                    : ''
+
             const extra =
                 details.length > 0
                     ? ` (${details.join(', ')})`
@@ -76,7 +88,8 @@ function buildMilestoneContext(milestones = []) {
             return (
                 `- ${item.title}: ` +
                 `${item.daysRemaining} days remaining` +
-                extra
+                extra +
+                relationshipNote
             )
         })
         .join('\n')
@@ -86,6 +99,8 @@ function buildMilestoneContext(milestones = []) {
         upcomingMilestones,
         text:
             'Upcoming meaningful events in the relationship.\n' +
+            'Prioritize shared experiences and events related to the user, ' +
+            'then Star-related events, then other events. ' +
             'Use this information only when it is naturally relevant. ' +
             'Do not mention upcoming events repeatedly unless the conversation calls for it.\n' +
             `${text}`,
