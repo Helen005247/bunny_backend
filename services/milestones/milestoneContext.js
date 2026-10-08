@@ -109,6 +109,7 @@ function buildMilestoneContext(milestones = []) {
 
 async function getMilestoneContext({
     milestoneService,
+    milestoneMemoryBridge,
     supabase,
     userId,
     agentId = 'star',
@@ -129,7 +130,27 @@ async function getMilestoneContext({
             days,
         })
 
-    return buildMilestoneContext(milestones)
+    const context = buildMilestoneContext(milestones)
+
+    if (
+        milestoneMemoryBridge &&
+        typeof milestoneMemoryBridge.buildMilestoneMemoryBridge === 'function'
+    ) {
+        const bridge =
+            await milestoneMemoryBridge.buildMilestoneMemoryBridge({
+                supabase,
+                userId,
+                milestones,
+            })
+
+        context.relatedMemories = bridge.memories
+        if (bridge.hasRelatedMemories) {
+            context.text +=
+                '\nRelated memories may provide emotional background. Use them only when naturally relevant.'
+        }
+    }
+
+    return context
 }
 
 module.exports = {
