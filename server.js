@@ -21758,7 +21758,7 @@ app.post(
 
 
 // TEMP DEBUG ONLY: remove after Step 9 verification
-app.get('/api/milestones/debug/decision', async (req, res) => {
+app.get('/api/milestones/debug/public/decision', async (req, res) => {
     try {
         const milestones = await getUpcomingMilestones({
             supabase,
