@@ -9,6 +9,7 @@ const crypto = require('crypto')
 const { DateTime } = require('luxon')
 const createGlanceRouter = require('./routes/glance')
 const createMilestonesRouter = require('./routes/milestones')
+const createCognitionRouter = require('./routes/cognition')
 const { getMilestoneContext } = require('./services/milestones/milestoneContext')
 const milestoneService = require('./services/milestones/milestoneService')
 const milestoneMemoryBridge = require('./services/milestones/milestoneMemoryBridge')
@@ -226,6 +227,30 @@ app.use(
     })
 )
 
+
+// ======================================================
+// Background Cognition Step 2：仅手动触发的私有内部接口
+// POST /internal/cognition/tick
+// 需要 x-cognition-secret（COGNITION_TICK_SECRET），不接自动心跳。
+// 无主动发消息、Diary 或 Memory 写入；所有业务逻辑在 cognition service 中。
+// ======================================================
+app.use(
+    '/internal/cognition',
+    createCognitionRouter({
+        supabase,
+        callModel: (request) => callModelWithRetry(request, 1),
+        getSettings: getGlobalSettings,
+        getLatestMemory,
+        getMilestoneContext: ({ userId, agentId }) => getMilestoneContext({
+            milestoneService,
+            milestoneMemoryBridge,
+            supabase,
+            userId,
+            agentId,
+            days: 30,
+        }),
+    })
+)
 
 // ======================================================
 // 基础工具
