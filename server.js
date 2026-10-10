@@ -18756,18 +18756,34 @@ app.post(
                 })
 
 
-            const milestoneContext =
-                await getMilestoneContext({
-                    milestoneService,
-                    milestoneMemoryBridge,
-                    supabase,
-                    userId:
-                        req.userId,
-                    agentId:
-                        'star',
-                    days:
-                        365,
-                })
+            let milestoneContext = {
+                hasUpcomingMilestones: false,
+                upcomingMilestones: [],
+                surfacedMilestones: [],
+                relatedMemories: [],
+                text: '',
+            }
+
+            try {
+                milestoneContext =
+                    await getMilestoneContext({
+                        milestoneService,
+                        milestoneMemoryBridge,
+                        supabase,
+                        userId:
+                            req.userId,
+                        agentId:
+                            'star',
+                        days:
+                            365,
+                    })
+            } catch (milestoneError) {
+                // Milestone 是增强上下文，不应该因为数据库或检索异常阻断普通聊天。
+                console.error(
+                    '[milestone-context] failed softly:',
+                    milestoneError?.message || milestoneError
+                )
+            }
 
 
             const milestoneReplyContext =
