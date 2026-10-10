@@ -10,6 +10,7 @@ const { DateTime } = require('luxon')
 const createGlanceRouter = require('./routes/glance')
 const createMilestonesRouter = require('./routes/milestones')
 const createCognitionRouter = require('./routes/cognition')
+const { recordUserMessage } = require('./services/cognition/runtimeStateService')
 const { getMilestoneContext } = require('./services/milestones/milestoneContext')
 const milestoneService = require('./services/milestones/milestoneService')
 const milestoneMemoryBridge = require('./services/milestones/milestoneMemoryBridge')
@@ -18432,6 +18433,25 @@ app.post(
                     userMessage
             }
 
+            // Background Cognition Step 3: a persisted user message closes any
+            // previous absence episode immediately. Best effort only: this
+            // bookkeeping may NEVER stop normal chat if cognition DB is down.
+            // The retry branch is safe: older/equal timestamps are ignored.
+            if (userMessage?.created_at) {
+                void Promise.resolve()
+                    .then(() => recordUserMessage({
+                        supabase,
+                        userId: req.userId,
+                        agentId: 'star',
+                        messageAt: userMessage.created_at,
+                    }))
+                    .catch((error) => {
+                        console.warn(
+                            '[cognition] chat activity update skipped:',
+                            error?.message || error
+                        )
+                    })
+            }
 
             // ==================================================
             // 如果用户在真实聊天消息里提到“那个游戏”，

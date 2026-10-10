@@ -42,6 +42,14 @@ function createCognitionRouter({ supabase, callModel,
                 return res.status(400).json({ ok: false,
                     error: '请提供有效的 userId；Step 2 目前仅支持 agentId=star' })
             }
+            // Private callers may use heartbeat to check absence/review
+            // checkpoints. Manual remains the Step 2 backwards-compatible default.
+            const triggerType = input.triggerType == null
+                ? 'manual' : input.triggerType
+            if (triggerType !== 'manual' && triggerType !== 'heartbeat') {
+                return res.status(400).json({ ok: false,
+                    error: 'Step 3 只支持 triggerType=manual 或 heartbeat' })
+            }
             if (!process.env.AI_API_KEY || !process.env.AI_BASE_URL) {
                 return res.status(503).json({ ok: false,
                     error: 'AI_API_KEY 或 AI_BASE_URL 尚未配置' })
@@ -49,6 +57,7 @@ function createCognitionRouter({ supabase, callModel,
 
             const result = await runTick({
                 supabase, userId: input.userId, agentId: 'star',
+                triggerType,
                 callModel, getSettings, getLatestMemory, getMilestoneContext,
             })
             return res.json({ ok: true, ...result })

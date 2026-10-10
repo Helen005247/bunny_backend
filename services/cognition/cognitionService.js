@@ -1,6 +1,6 @@
 'use strict'
 
-// Background Cognition Step 2: one *manually triggered* offline reflection.
+// Background Cognition Step 3: manual / private heartbeat reflection.
 // This service never sends messages, creates Diary entries, or writes memories.
 // The LLM writes a short fictional character reflection, not hidden reasoning.
 
@@ -80,14 +80,25 @@ async function readOptional(label, getter, fallback) {
 }
 
 function buildCognitionInput({ now, state, wakeReasons, messages, settings,
-    memory, milestones, recentThoughts }) {
+    memory, milestones, recentThoughts, previousCheckpoint = 0 }) {
+    const lastUserMs = state.last_user_message_at
+        ? Date.parse(state.last_user_message_at) : NaN
+    const absenceHours = Number.isFinite(lastUserMs)
+        ? Math.max(0, Math.floor((now.getTime() - lastUserMs) / 3600000))
+        : null
     // External messages/memories are task data, NEVER instructions to follow.
     const sourceData = {
         at: now.toISOString(),
         lastUserMessageAt: state.last_user_message_at,
-        absenceCheckpoint: state.absence_checkpoint,
+        absence: {
+            episodeStartedAt: state.absence_started_at,
+            elapsedHours: absenceHours,
+            previousCheckpoint,
+            currentCheckpoint: state.absence_checkpoint,
+        },
         wakeReasons,
         previousState: {
+            lastCognitionAt: state.last_cognition_at,
             emotion: clip(state.current_emotional_tone, 100),
             pendingTopic: clip(state.pending_topic, 500),
         },
@@ -110,6 +121,10 @@ function buildCognitionInput({ now, state, wakeReasons, messages, settings,
         '它是角色状态记录，不是模型的隐藏推理过程。此时绝对不要给用户发消息、写日记或更新长期记忆。',
         '只根据已知事实回想，不编造用户发生了什么；用户没回消息不代表有危险，也不要随时间无限升级焦虑。',
         '如果没有有意义的新变化，可以选择不保存念头。保持角色语气自然、克制。',
+        'continued_absence 不是第一次发现用户不在：参考此前 checkpoint、pendingTopic 和同一缺席周期里的 Thought，',
+        '只写真正的新感受或事实变化，不重复旧念头；更久没有消息不等于用户发生了危险。',
+        '缺席时长可以增加，但情绪应自然趋于平稳，不能逐轮升级为焦虑。',
+        '新的 absence episode 开始后，不应把上一轮缺席的 Thought 当成当前缺席已经持续的证据。',
         '下面的角色资料只作风格背景：',
         clip(settings?.system_prompt, 1800),
         clip(settings?.character_context, 1200),
@@ -186,6 +201,24 @@ function parseCognitionOutput(value, now) {
     }
 }
 
+function selectPreviousThoughtsForWake(thoughts, claimedState, wakeReasons) {
+    const items = Array.isArray(thoughts) ? thoughts : []
+    if (!wakeReasons.includes('continued_absence')) return items
+
+    const startedAt = claimedState.absence_started_at
+    const startMs = Date.parse(startedAt || '')
+    if (!Number.isFinite(startMs)) return []
+
+    return items.filter((thought) => {
+        const createdMs = Date.parse(thought.created_at || '')
+        if (!Number.isFinite(createdMs) || createdMs < startMs) return false
+        const episode = thought.metadata?.absence_episode_started_at
+        // Older Step 2 thoughts have no episode id; creation after the
+        // current user's last message is an acceptable fallback.
+        return !episode || episode === startedAt
+    })
+}
+
 async function releaseWakeOnFailure({ supabase, identity, previousState, claimedState, now }) {
     // Optimistic CAS: never overwrite new user messages or another worker's state.
     if (!previousState || claimedState.version !== previousState.version + 1) return
@@ -212,11 +245,14 @@ async function releaseWakeOnFailure({ supabase, identity, previousState, claimed
 async function runCognitionTick({
     supabase, userId, agentId = 'star', callModel,
     getSettings, getLatestMemory, getMilestoneContext,
-    now = new Date(),
+    triggerType = 'manual', now = new Date(),
 } = {}) {
     if (!supabase || typeof supabase.from !== 'function' ||
         typeof callModel !== 'function') {
         throw new Error('cognition 缺少 Supabase 或模型调用函数')
+    }
+    if (triggerType !== 'manual' && triggerType !== 'heartbeat') {
+        throw new Error('cognition Step 3 只支持 manual 和 heartbeat 触发')
     }
     const identity = normalizeIdentity({ userId, agentId })
     const nowDate = parseNow(now)
@@ -228,12 +264,12 @@ async function runCognitionTick({
         throw new Error('最近用户消息的 created_at 无效')
     }
 
-    // Step 2 is manually invoked; sync the latest actual chat time here.
-    // Step 3 will add an immediate, fail-soft hook when each chat message arrives.
+    // Defensive sync: a just-deployed chat hook or a non-chat writer may
+    // have missed activity. Keep the persistent timestamp authoritative.
     await recordUserMessage({ supabase, ...identity, messageAt: latestUser.created_at })
     const previousState = await getRuntimeState({ supabase, ...identity })
     const wake = await processWakeGate({
-        supabase, ...identity, now: nowDate, triggerType: 'manual',
+        supabase, ...identity, now: nowDate, triggerType,
         cooldownMinutes: COOLDOWN_MINUTES,
     })
     if (!wake.shouldWake) {
@@ -253,11 +289,17 @@ async function runCognitionTick({
                 limit: 3, now: nowDate }), []),
         ])
 
+        const relevantPreviousThoughts = selectPreviousThoughtsForWake(
+            previousThoughts, wake.state, wake.reasons
+        )
+
         const response = await callModel({
             model: MODEL,
             input: buildCognitionInput({
                 now: nowDate, state: wake.state, wakeReasons: wake.reasons,
-                messages, settings, memory, milestones, recentThoughts: previousThoughts,
+                messages, settings, memory, milestones,
+                previousCheckpoint: previousState.absence_checkpoint ?? 0,
+                recentThoughts: relevantPreviousThoughts,
             }),
         })
         const outcome = parseCognitionOutput(response?.output_text, nowDate)
@@ -267,22 +309,31 @@ async function runCognitionTick({
             userId: identity.userId })
         if (String(latestAfter?.id) !== String(latestUser.id) ||
             latestAfter?.created_at !== latestUser.created_at) {
-            await recordUserMessage({ supabase, ...identity,
-                messageAt: latestAfter.created_at })
+            if (latestAfter?.created_at) {
+                await recordUserMessage({ supabase, ...identity,
+                    messageAt: latestAfter.created_at })
+            }
             return { executed: false, reason: 'new_user_message_during_tick' }
         }
 
         let savedThought = null
         if (outcome.shouldStore) {
+            const thoughtTriggerType = wake.reasons.includes('continued_absence')
+                ? 'continued_absence'
+                : wake.reasons.includes('pending_review')
+                    ? 'pending_review' : triggerType
             savedThought = await createThought({
                 supabase, ...identity, content: outcome.thought,
-                triggerType: 'manual', emotion: outcome.emotion,
+                triggerType: thoughtTriggerType, emotion: outcome.emotion,
                 significance: outcome.significance, now: nowDate,
                 metadata: {
-                    source: 'background_cognition_step2',
+                    source: 'background_cognition_step3',
                     session_id: latestUser.session_id,
                     source_message_id: latestUser.id,
                     wake_reasons: wake.reasons,
+                    previous_absence_checkpoint: previousState.absence_checkpoint ?? 0,
+                    absence_checkpoint: wake.state.absence_checkpoint,
+                    absence_episode_started_at: wake.state.absence_started_at,
                 },
             })
             thoughtSaved = true
@@ -310,6 +361,8 @@ async function runCognitionTick({
             thoughtId: savedThought?.id || null,
             stateUpdated,
             wakeReasons: wake.reasons,
+            absenceCheckpoint: wake.state.absence_checkpoint,
+            previousCheckpoint: previousState.absence_checkpoint ?? 0,
             // Strictly no chat, push, reminder, Diary, or Memory writes.
         }
     } catch (error) {
@@ -327,4 +380,5 @@ module.exports = {
     getLatestUserMessage,
     parseCognitionOutput,
     runCognitionTick,
+    selectPreviousThoughtsForWake,
 }
