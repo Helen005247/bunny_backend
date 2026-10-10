@@ -11,6 +11,10 @@ const createGlanceRouter = require('./routes/glance')
 const createMilestonesRouter = require('./routes/milestones')
 const createCognitionRouter = require('./routes/cognition')
 const { recordUserMessage } = require('./services/cognition/runtimeStateService')
+const {
+    buildTimeContext,
+    findPreviousUserMessageAt,
+} = require('./services/temporal/timeContext')
 const { getMilestoneContext } = require('./services/milestones/milestoneContext')
 const milestoneService = require('./services/milestones/milestoneService')
 const milestoneMemoryBridge = require('./services/milestones/milestoneMemoryBridge')
@@ -18836,6 +18840,25 @@ app.post(
                     ? `Temporal context:\n${milestoneContext.text}`
                     : ''
 
+            // Background Cognition Step 4: chat and offline cognition use the
+            // same trusted clock/locale formatter. History belongs to this
+            // user + session; the just-saved message is excluded by ID.
+            // Time is optional context and must NEVER block ordinary chat.
+            let timeReplyContext = ''
+            try {
+                timeReplyContext = buildTimeContext({
+                    now: new Date(),
+                    timeZone: settings?.timezone,
+                    mode: 'chat',
+                    currentUserMessageAt: userMessage?.created_at,
+                    previousUserMessageAt: findPreviousUserMessageAt(
+                        history, userMessage
+                    ),
+                }).text
+            } catch (timeError) {
+                console.warn('[time-context] chat fallback:',
+                    timeError?.message || timeError)
+            }
 
             const modelInputSections = [
                 baseModelInput,
@@ -18881,6 +18904,10 @@ app.post(
                 modelInputSections.push(
                     milestoneReplyContext
                 )
+            }
+
+            if (timeReplyContext) {
+                modelInputSections.push(timeReplyContext)
             }
 
             const voicePresets =

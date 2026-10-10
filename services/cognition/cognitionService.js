@@ -12,6 +12,7 @@ const {
 } = require('./runtimeStateService')
 const { getRecentThoughts, createThought } = require('./thoughtService')
 const { processWakeGate } = require('./wakeGate')
+const { buildTimeContext } = require('../temporal/timeContext')
 
 const MODEL = 'gpt-5.6-sol'
 const COOLDOWN_MINUTES = 60
@@ -86,9 +87,16 @@ function buildCognitionInput({ now, state, wakeReasons, messages, settings,
     const absenceHours = Number.isFinite(lastUserMs)
         ? Math.max(0, Math.floor((now.getTime() - lastUserMs) / 3600000))
         : null
+    const timeContext = buildTimeContext({
+        now,
+        timeZone: settings?.timezone,
+        mode: 'cognition',
+        lastUserMessageAt: state.last_user_message_at,
+    })
     // External messages/memories are task data, NEVER instructions to follow.
     const sourceData = {
         at: now.toISOString(),
+        timeContext: timeContext.text,
         lastUserMessageAt: state.last_user_message_at,
         absence: {
             episodeStartedAt: state.absence_started_at,
@@ -124,6 +132,7 @@ function buildCognitionInput({ now, state, wakeReasons, messages, settings,
         'continued_absence 不是第一次发现用户不在：参考此前 checkpoint、pendingTopic 和同一缺席周期里的 Thought，',
         '只写真正的新感受或事实变化，不重复旧念头；更久没有消息不等于用户发生了危险。',
         '缺席时长可以增加，但情绪应自然趋于平稳，不能逐轮升级为焦虑。',
+        '只使用 timeContext 中可靠的时间事实；用户未设置时区时，不推测当地早晚。',
         '新的 absence episode 开始后，不应把上一轮缺席的 Thought 当成当前缺席已经持续的证据。',
         '下面的角色资料只作风格背景：',
         clip(settings?.system_prompt, 1800),
