@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # UTC: once every 3 hours. Wake Gate decides whether to call the LLM.
-    - cron: '23 */3 * * *'
+    - cron: '*/5 * * * *'
 
 permissions:
   contents: read
