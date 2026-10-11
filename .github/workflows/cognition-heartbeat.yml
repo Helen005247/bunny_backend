@@ -5,8 +5,8 @@ run-name: Cognition heartbeat (${{ github.event_name }})
 on:
   workflow_dispatch:
   schedule:
-    # 测试期间每5分钟检查一次
-    - cron: '3-59/5 * * * *'
+    # 正式运行：每3小时检查一次（UTC）
+    - cron: '23 */3 * * *'
 
   # 现有主动检查完成后，也触发 Cognition
   workflow_run:
