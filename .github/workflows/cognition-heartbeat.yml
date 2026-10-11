@@ -1,0 +1,32 @@
+name: Hermit Cognition Heartbeat
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC: once every 3 hours. Wake Gate decides whether to call the LLM.
+    - cron: '23 */3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermit-cognition-heartbeat
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check Cognition Wake Gate
+        env:
+          COGNITION_ENDPOINT: https://bunny-backend-19g1.onrender.com/internal/cognition/tick
+          COGNITION_USER_ID: ${{ secrets.COGNITION_USER_ID }}
+          COGNITION_TICK_SECRET: ${{ secrets.COGNITION_TICK_SECRET }}
+        run: node scripts/cognition-heartbeat.js
