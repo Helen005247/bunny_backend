@@ -17,6 +17,13 @@ test('workflow schedules heartbeat separately from proactive and never uses manu
     const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/cognition-heartbeat.yml'), 'utf8')
     assert.match(workflow, /cron:\s*['"]23 \*\/3 \* \* \*['"]/) // interval
     assert.match(workflow, /workflow_dispatch:/)
+    // Avoid relying on a new cron schedule alone: reuse an already working scheduler.
+    assert.match(workflow, /workflow_run:/)
+    assert.match(workflow, /workflows:\s*\[['"]Hermit Proactive Check['"]\]/)
+    assert.match(workflow, /types:\s*\[completed\]/)
+    assert.match(workflow, /github\.event\.workflow_run\.conclusion == 'success'/)
+    assert.match(workflow, /github\.event\.workflow_run\.head_branch == 'main'/)
+    assert.match(workflow, /GITHUB_EVENT_NAME/)
     assert.match(workflow, /COGNITION_USER_ID:.*secrets\.COGNITION_USER_ID/)
     assert.match(workflow, /COGNITION_TICK_SECRET:.*secrets\.COGNITION_TICK_SECRET/)
     assert.match(workflow, /node scripts\/cognition-heartbeat\.js/)

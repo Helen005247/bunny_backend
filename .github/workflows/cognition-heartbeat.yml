@@ -1,10 +1,17 @@
 name: Hermit Cognition Heartbeat
+# Distinguishes scheduled, upstream-completed, and manual checks in Actions UI.
+run-name: Cognition heartbeat (${{ github.event_name }})
 
 on:
   workflow_dispatch:
   schedule:
-    # UTC: once every 3 hours. Wake Gate decides whether to call the LLM.
+    # 测试期间每5分钟检查一次
     - cron: '3-59/5 * * * *'
+
+  # 现有主动检查完成后，也触发 Cognition
+  workflow_run:
+    workflows: ['Hermit Proactive Check']
+    types: [completed]
 
 permissions:
   contents: read
@@ -15,9 +22,20 @@ concurrency:
 
 jobs:
   heartbeat:
+    # Only trust successful default-branch runs of the existing workflow.
+    if: >-
+      ${{
+        github.event_name != 'workflow_run' ||
+        (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == 'main'
+        )
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
+      - name: Log trigger (non-sensitive)
+        run: echo "[cognition] trigger=${GITHUB_EVENT_NAME}; utc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Set up Node.js
