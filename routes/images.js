@@ -1,6 +1,7 @@
 'use strict'
 
 const express = require('express')
+const { searchPastImages, parseRecallFilters } = require('../services/images/imageRecallService')
 const { getVisionConfig, describeImage } = require('../services/images/visionService')
 const {
     MAX_IMAGE_BYTES, MIME_EXT, imageMimeFromBytes, parseSessionId,
@@ -45,6 +46,33 @@ function createImagesRouter({ supabase, vision = describeImage }) {
             return res.status(error.status >= 400 && error.status < 600 ? error.status : 500)
                 .json({ ok: false, code: error.code || 'IMAGE_UPLOAD_FAILED',
                     error: error.status ? error.message : '图片理解或保存失败，请稍后再试' })
+        }
+    })
+
+    // Phase 2 Step 1: authenticated, user-scoped image index across chat sessions.
+    // Example: GET /api/images/recall?q=小狗&limit=10
+    // No Storage URL or unreviewed historical image is passed to an AI at this step.
+    router.get('/recall', async (req, res) => {
+        try {
+            if (!supabase) throw httpError(503, 'DATABASE_UNAVAILABLE', '数据库未连接')
+            const filters = parseRecallFilters(req.query)
+            if (filters.sessionId !== null) {
+                await assertSessionOwned(supabase, req.userId, filters.sessionId)
+            }
+            const result = await searchPastImages({ supabase, userId: req.userId, filters: req.query })
+            return res.status(200).json({ ok: true, ...result })
+        } catch (error) {
+            console.error('[images] recall failed:', error?.code || 'database_error')
+            // Expose only our own validation/ownership errors, not SQL or storage details.
+            const isClientError = typeof error?.code === 'string' &&
+                (error.code.startsWith('INVALID_') || error.code === 'SESSION_NOT_FOUND' ||
+                    error.code === 'UNAUTHORIZED' || error.code === 'DATABASE_UNAVAILABLE')
+            const status = isClientError ? (error.status || 400) : 500
+            return res.status(status).json({
+                ok: false,
+                code: isClientError ? error.code : 'IMAGE_RECALL_FAILED',
+                error: isClientError ? error.message : '历史图片检索失败，请稍后重试',
+            })
         }
     })
 
