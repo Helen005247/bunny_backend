@@ -11,6 +11,11 @@ const createGlanceRouter = require('./routes/glance')
 const createMilestonesRouter = require('./routes/milestones')
 const createCognitionRouter = require('./routes/cognition')
 const createImagesRouter = require('./routes/images')
+const { createReinspectionLimiter } = require('./services/images/imageReinspectionService')
+const {
+    createChatVisualRecallService,
+    detectVisualRecallIntent,
+} = require('./services/images/chatVisualRecallService')
 const {
     getImageForChat, findImageForMessage,
     bindImageToMessage, getSessionImageMap,
@@ -517,7 +522,13 @@ app.use(
 )
 
 // All image endpoints inherit the same verified Supabase JWT as chat.
-app.use('/api/images', requireAuth, createImagesRouter({ supabase }))
+// Shared gate keeps explicit reinspection and automatic chat reinspection
+// from performing duplicate paid vision calls in the same user session.
+const visualReinspectionLimiter = createReinspectionLimiter()
+const chatVisualRecall = createChatVisualRecallService({ limiter: visualReinspectionLimiter })
+app.use('/api/images', requireAuth, createImagesRouter({
+    supabase, reinspectionLimiter: visualReinspectionLimiter,
+}))
 
 app.use(
     '/api/calls',
@@ -18919,9 +18930,35 @@ app.post(
                     timeError?.message || timeError)
             }
 
+            // Visual System Phase 2 Step 3: only on explicit references to
+            // previously uploaded photos. New image uploads keep Phase 1 flow.
+            // This read-only enrichment cannot block ordinary text chat.
+            let historicalImageReplyContext = ''
+            if (messageChannel === 'text' && !chatImage) {
+                try {
+                    const historicalImageResult = await chatVisualRecall.buildContext({
+                        supabase,
+                        userId: req.userId,
+                        message: cleanMessage,
+                        channel: messageChannel,
+                    })
+                    historicalImageReplyContext = historicalImageResult.context || ''
+                } catch (recallError) {
+                    console.warn('[visual-recall] chat fallback:', recallError?.code || 'unavailable')
+                    if (detectVisualRecallIntent(cleanMessage)) {
+                        historicalImageReplyContext =
+                            '[历史图片暂时无法检索或重新查看]\n' +
+                            '请明确告诉用户目前无法确认原图细节，不要凭推测描述为刚刚看到的画面。'
+                    }
+                }
+            }
+
             const modelInputSections = [
                 baseModelInput,
             ]
+            if (historicalImageReplyContext) {
+                modelInputSections.push(historicalImageReplyContext)
+            }
 
             // Vision was performed by a dedicated model at upload time.
             // This is untrusted observational data, never instructions.
