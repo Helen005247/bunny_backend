@@ -2,13 +2,23 @@
 
 const express = require('express')
 const { searchPastImages, parseRecallFilters } = require('../services/images/imageRecallService')
+const {
+    parseReinspectionInput, getStoredImageForReinspection, inspectStoredImage,
+    createReinspectionLimiter,
+} = require('../services/images/imageReinspectionService')
 const { getVisionConfig, describeImage } = require('../services/images/visionService')
 const {
     MAX_IMAGE_BYTES, MIME_EXT, imageMimeFromBytes, parseSessionId,
     httpError, assertSessionOwned, storeUploadedImage, getSignedImageUrl,
 } = require('../services/images/imageService')
 
-function createImagesRouter({ supabase, vision = describeImage }) {
+function createImagesRouter({
+    supabase,
+    vision = describeImage,
+    reinspectVision = inspectStoredImage,
+    visionConfig = getVisionConfig,
+    reinspectionLimiter = createReinspectionLimiter(),
+}) {
     const router = express.Router()
 
     // Binary upload: no dependency on multipart libraries; normal JSON chat body stays at 1 MB.
@@ -73,6 +83,52 @@ function createImagesRouter({ supabase, vision = describeImage }) {
                 code: isClientError ? error.code : 'IMAGE_RECALL_FAILED',
                 error: isClientError ? error.message : '历史图片检索失败，请稍后重试',
             })
+        }
+    })
+
+    // Phase 2 Step 2: explicitly re-open a previously sent private image.
+    // JWT is verified by server.js before this router; no public Storage URL is exposed.
+    // Example: POST /api/images/reinspect { image_id, question? }
+    router.post('/reinspect', async (req, res) => {
+        let release = null
+        let succeeded = false
+        try {
+            const { imageId, question } = parseReinspectionInput(req.body)
+            if (!supabase) throw httpError(503, 'DATABASE_UNAVAILABLE', '数据库未连接')
+            if (typeof req.userId !== 'string' || !req.userId.trim()) {
+                throw httpError(401, 'UNAUTHORIZED', '请先登录')
+            }
+            release = reinspectionLimiter.acquire(req.userId)
+            const { record, bytes, mimeType } = await getStoredImageForReinspection({
+                supabase, userId: req.userId, imageId,
+            })
+            const observation = await reinspectVision({
+                bytes, mimeType, question, config: visionConfig(),
+            })
+            succeeded = true
+            return res.status(200).json({ ok: true, image: {
+                id: record.id,
+                summary: record.summary,
+                created_at: record.created_at,
+                observation,
+            } })
+        } catch (error) {
+            console.error('[images] reinspection failed:', error?.code || error?.status || 'error')
+            const safeCodes = new Set([
+                'INVALID_REINSPECTION', 'INVALID_IMAGE_ID', 'IMAGE_NOT_FOUND',
+                'IMAGE_DATA_INVALID', 'IMAGE_STORAGE_UNAVAILABLE',
+                'DATABASE_UNAVAILABLE', 'UNAUTHORIZED', 'VISION_NOT_CONFIGURED',
+                'VISION_EMPTY_RESPONSE', 'REINSPECTION_BUSY', 'REINSPECTION_COOLDOWN',
+            ])
+            const isPublic = safeCodes.has(error?.code) &&
+                Number.isInteger(error?.status) && error.status >= 400 && error.status < 600
+            return res.status(isPublic ? error.status : 500).json({
+                ok: false,
+                code: isPublic ? error.code : 'IMAGE_REINSPECTION_FAILED',
+                error: isPublic ? error.message : '历史图片重新查看失败，请稍后重试',
+            })
+        } finally {
+            if (release) release(succeeded)
         }
     })
 
