@@ -12,6 +12,7 @@ const createMilestonesRouter = require('./routes/milestones')
 const createCognitionRouter = require('./routes/cognition')
 const createImagesRouter = require('./routes/images')
 const createVisualIdentityRouter = require('./routes/visualIdentity')
+const { detectVisualIdentityIntent, buildVisualIdentityChatContext } = require('./services/visualIdentity/visualIdentityContext')
 const { createReinspectionLimiter } = require('./services/images/imageReinspectionService')
 const {
     createChatVisualRecallService,
@@ -18956,11 +18957,37 @@ app.post(
                 }
             }
 
+            // Visual Phase 3 Step 3: only look up the confirmed visual identity
+            // when the user explicitly asks about Star's appearance. A missing
+            // record or a Supabase error never breaks the ordinary chat path.
+            // No image bytes/URLs are provided to the text model.
+            let visualIdentityReplyContext = ''
+            if (detectVisualIdentityIntent(cleanMessage, { channel: messageChannel })) {
+                try {
+                    const identityContextResult = await buildVisualIdentityChatContext({
+                        supabase,
+                        userId: req.userId,
+                        agentId: 'star',
+                        message: cleanMessage,
+                        channel: messageChannel,
+                    })
+                    visualIdentityReplyContext = identityContextResult.context || ''
+                } catch (identityError) {
+                    console.warn('[visual-identity] chat context unavailable:', identityError?.code || 'read_error')
+                    visualIdentityReplyContext =
+                        '[星星的视觉身份记录暂时无法读取]\n' +
+                        '不要猜测已确认的形象或声称刚刚看到了相关图片。请简短说明当前记录无法核实。'
+                }
+            }
+
             const modelInputSections = [
                 baseModelInput,
             ]
             if (historicalImageReplyContext) {
                 modelInputSections.push(historicalImageReplyContext)
+            }
+            if (visualIdentityReplyContext) {
+                modelInputSections.push(visualIdentityReplyContext)
             }
 
             // Vision was performed by a dedicated model at upload time.
