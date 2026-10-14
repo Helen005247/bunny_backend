@@ -11,6 +11,7 @@ const createGlanceRouter = require('./routes/glance')
 const createMilestonesRouter = require('./routes/milestones')
 const createCognitionRouter = require('./routes/cognition')
 const createImagesRouter = require('./routes/images')
+const createVisualIdentityRouter = require('./routes/visualIdentity')
 const { createReinspectionLimiter } = require('./services/images/imageReinspectionService')
 const {
     createChatVisualRecallService,
@@ -529,6 +530,8 @@ const chatVisualRecall = createChatVisualRecallService({ limiter: visualReinspec
 app.use('/api/images', requireAuth, createImagesRouter({
     supabase, reinspectionLimiter: visualReinspectionLimiter,
 }))
+
+app.use('/api/visual-identity', requireAuth, createVisualIdentityRouter({ supabase }))
 
 app.use(
     '/api/calls',
