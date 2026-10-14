@@ -121,29 +121,48 @@ async function addCandidate({ supabase, userId, payload, agentId = AGENT_ID }) {
         if (!image) throw identityError(404, 'SOURCE_IMAGE_NOT_FOUND', '来源图片不存在或无访问权限')
     }
 
-    let version = candidate.version
-    if (version === undefined) {
-        const { data: latest, error } = await supabase.from('visual_identity')
+    // The DB has a per-user+agent unique version index (Step 4 migration).
+    // Retrying only on a *version* unique conflict allows two concurrent
+    // candidate requests to receive distinct, monotonically increasing versions.
+    // Explicit versions may only name the next sequential number.
+    const maxAttempts = candidate.version === undefined ? 4 : 1
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const { data: latest, error: lookupError } = await supabase.from('visual_identity')
             .select('version').eq('user_id', userId).eq('agent_id', agentId)
             .order('version', { ascending: false }).limit(1).maybeSingle()
-        if (error) throw error
-        version = latest ? Number(latest.version) + 1 : 1
-        if (!Number.isSafeInteger(version) || version > 2147483647) {
+        if (lookupError) throw lookupError
+
+        const previousVersion = latest ? Number(latest.version) : 0
+        if (!Number.isSafeInteger(previousVersion) || previousVersion < 0 ||
+            previousVersion >= 2147483647) {
             throw identityError(409, 'VERSION_EXHAUSTED', '视觉身份版本号已达到上限')
         }
-    }
+        const nextVersion = previousVersion + 1
+        if (candidate.version !== undefined && candidate.version !== nextVersion) {
+            throw identityError(409, 'VERSION_CONFLICT', '只能使用当前身份的下一个版本号')
+        }
 
-    const { data, error } = await supabase.from('visual_identity').insert({
-        user_id: userId,
-        agent_id: agentId,
-        image_url: candidate.imageUrl,
-        source_image_id: candidate.sourceImageId,
-        description: candidate.description,
-        version,
-        status: STATUS.CANDIDATE,
-    }).select('*').single()
-    if (error) throw error
-    return data
+        const { data, error } = await supabase.from('visual_identity').insert({
+            user_id: userId,
+            agent_id: agentId,
+            image_url: candidate.imageUrl,
+            source_image_id: candidate.sourceImageId,
+            description: candidate.description,
+            version: nextVersion,
+            status: STATUS.CANDIDATE,
+        }).select('*').single()
+        if (!error) {
+            if (!data) throw identityError(500, 'EMPTY_CANDIDATE', '候选创建未返回记录')
+            return data
+        }
+        // The only unique constraint applicable to a new candidate is
+        // (user_id, agent_id, version). We do not retry unexpected DB errors.
+        if (error.code !== '23505') throw error
+        if (candidate.version !== undefined || attempt === maxAttempts - 1) {
+            throw identityError(409, 'VERSION_CONFLICT', '身份版本号冲突，请稍后重试')
+        }
+    }
+    throw identityError(409, 'VERSION_CONFLICT', '身份版本号冲突，请稍后重试')
 }
 
 async function approveVisualIdentity({ supabase, userId, id, agentId = AGENT_ID }) {
@@ -165,6 +184,7 @@ async function approveVisualIdentity({ supabase, userId, id, agentId = AGENT_ID 
     if (!data) throw identityError(404, 'IDENTITY_NOT_FOUND', '未找到可确认的候选形象')
     return Array.isArray(data) ? (data[0] || null) : data
 }
+
 
 module.exports = {
     AGENT_ID,
