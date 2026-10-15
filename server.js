@@ -23,6 +23,7 @@ const {
     bindImageToMessage, getSessionImageMap,
 } = require('./services/images/imageService')
 const { recordUserMessage } = require('./services/cognition/runtimeStateService')
+const { buildThoughtThreadChatContext } = require('./services/cognition/thoughtThreadChatContext')
 const {
     buildTimeContext,
     findPreviousUserMessageAt,
@@ -18980,6 +18981,32 @@ app.post(
                 }
             }
 
+            // Background Cognition v2 Step 5: read-only, relevance-gated recall.
+            // Internal drafts remain private unless the user asks to see the
+            // working text. Other voice agents never receive Star's Threads.
+            // A missing table or a slow DB must not interrupt ordinary chat.
+            let thoughtThreadReplyContext = ''
+            if (messageChannel === 'text' || callAgentKey === 'xingxing') {
+                try {
+                    const recall = await buildThoughtThreadChatContext({
+                        supabase,
+                        userId: req.userId,
+                        agentId: 'star',
+                        message: cleanMessage,
+                        channel: messageChannel,
+                        recentMessages: history,
+                        currentMessageId: userMessage?.id,
+                        currentMessageAt: userMessage?.created_at,
+                    })
+                    thoughtThreadReplyContext = recall.context || ''
+                    if (recall.unavailable) {
+                        console.warn('[thought-thread-recall] read unavailable, chat continues')
+                    }
+                } catch (_) {
+                    console.warn('[thought-thread-recall] context unavailable')
+                }
+            }
+
             const modelInputSections = [
                 baseModelInput,
             ]
@@ -18988,6 +19015,9 @@ app.post(
             }
             if (visualIdentityReplyContext) {
                 modelInputSections.push(visualIdentityReplyContext)
+            }
+            if (thoughtThreadReplyContext) {
+                modelInputSections.push(thoughtThreadReplyContext)
             }
 
             // Vision was performed by a dedicated model at upload time.
