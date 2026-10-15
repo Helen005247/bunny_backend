@@ -1,7 +1,7 @@
 'use strict'
 
-// Background Cognition v2 Step 3: reflection + optional Thought Thread continuation.
-// The Wake Gate is unchanged. This service never sends messages, writes Diary
+// Background Cognition v2 Step 4: reflection + scheduled Thought Thread wake.
+// The ordinary absence/review/cooldown gate is preserved. No chat messages, Diary
 // entries or updates long-term memories. Reflections are character state, not
 // hidden model reasoning.
 
@@ -14,8 +14,9 @@ const {
 const { getRecentThoughts, createThought } = require('./thoughtService')
 const { processWakeGate } = require('./wakeGate')
 const {
-    loadThreadContext, parseThreadAction, persistThreadAction,
-    preflightThreadAction, promptThreadContext,
+    deferUnadvancedDueThread, isDueThread, loadThreadContext,
+    parseThreadAction, persistThreadAction, preflightThreadAction,
+    promptThreadContext,
 } = require('./thoughtThreadCognition')
 const { buildTimeContext } = require('../temporal/timeContext')
 
@@ -139,7 +140,9 @@ function buildCognitionInput({ now, state, wakeReasons, messages, settings,
         '本轮若有值得以后再想的具体事情，可以从未完成想法中选一项续想，或新建一项；也完全可以什么都不做。',
         '不要为了显示自主性把每段聊天变成待办，不要仅重复已有草稿，不要编造新事实、用户承诺或未来已经发生的事情。',
         '优先考虑已有的 eligibleThreads；只允许更新、完成或放弃其中给出的 id，不可处理 otherKnownTopics。',
-        'next_review_at 为将来适合再想的时间，不是自动唤醒许可；如没有明确复查计划可以留空。',
+        'next_review_at 为将来适合再想的时间；只会在原有 Heartbeat 检查且通过冷却后触发，不是直接给用户发消息。',
+        '如果 wakeReasons 有 thought_thread_due，先考虑已到期的 eligibleThreads；若没有真正的新进展，就用 none，不必强行修改。',
+        '续想已到期草稿时，如果仍需要未来再看，给出新的 next_review_at；如果不用再定时复查，可以设为 null。',
         '尚未到 next_review_at 的主题不要提前修改；不要重复创建仍未完成的同一主题，除非用户后来明确提出新的独立需求，否则也不要重做已完成主题。',
         '处理前请区分“已有草稿”和“本轮新想出的内容”；没有真实推进就选择 none。',
         'continued_absence 不是第一次发现用户不在：参考此前 checkpoint、pendingTopic 和同一缺席周期里的 Thought，',
@@ -335,6 +338,20 @@ async function runCognitionTick({
             }), { available: false, eligible: [], known: [] }),
         ])
 
+        // The initial cheap due probe may become stale while another worker
+        // updates a thread. Never spend a model call on an already-closed or
+        // postponed draft, and don't hide a failed context read behind none.
+        if (wake.reasons.includes('thought_thread_due')) {
+            if (!threadContext.available) {
+                throw new Error('thought_thread_due 触发后无法读取待续想法')
+            }
+            if (!threadContext.eligible.some((t) => isDueThread(t, nowDate))) {
+                await releaseWakeOnFailure({ supabase, identity,
+                    previousState, claimedState: wake.state, now: nowDate })
+                return { executed: false, reason: 'wake_gate_skipped' }
+            }
+        }
+
         const relevantPreviousThoughts = selectPreviousThoughtsForWake(
             previousThoughts, wake.state, wake.reasons
         )
@@ -388,6 +405,16 @@ async function runCognitionTick({
         }
         durableEffectSaved = threadResult.persisted
 
+        // A due review with no progress must not keep waking every heartbeat.
+        // Versioned CAS only postpones the earliest unchanged due draft; it
+        // never changes its content, status, or another worker's newer edit.
+        const dueDisposition = await deferUnadvancedDueThread({
+            supabase, ...identity, now: nowDate, wakeReasons: wake.reasons,
+            action: invalidThreadAction ? { type: 'none' } : outcome.threadAction,
+            threadResult, context: threadContext,
+        })
+        durableEffectSaved ||= dueDisposition.persisted
+
         let savedThought = null
         if (outcome.shouldStore) {
             const thoughtTriggerType = wake.reasons.includes('continued_absence')
@@ -430,6 +457,8 @@ async function runCognitionTick({
         return {
             executed: true, stored: !!savedThought,
             threadStatus: threadResult.status,
+            threadWakeStatus: ['not_due', 'not_applicable'].includes(dueDisposition.status)
+                ? null : dueDisposition.status,
             threadId: threadResult.threadId || null,
             thought: savedThought?.content || null,
             thoughtId: savedThought?.id || null,

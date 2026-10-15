@@ -293,13 +293,15 @@ test('future scheduled idea is never eligible, and does NOT grant an extra wake 
     const noWake = await tick(db, async () => { throw Error('should not call model') },
         '2026-10-15T13:00:00.000Z')
     assert.equal(noWake.executed, false)
+    // Step 4 performs one extra indexed due probe when the old gate would
+    // otherwise skip. A future draft still cannot cause a model call.
     assert.equal(db.operations.filter((o) => o.table === 'agent_thought_threads').length,
-        readsBefore)
+        readsBefore + 1)
 })
 
-test('none and unchanged do not modify any thread version', async () => {
+test('none and unchanged do not modify unscheduled thread versions', async () => {
     const db = makeFakeDb(messages())
-    const row = seedThread(db)
+    const row = seedThread(db, { next_review_at: null })
     const first = await tick(db, async () => result(threadAction('none')))
     assert.equal(first.threadStatus, 'none')
     assert.equal(row.version, 0)
@@ -462,7 +464,7 @@ test('due threads are prioritized ahead of recent unscheduled items and future d
     assert.equal(ctx.known.length, 22)
 })
 
-test('missing optional fields in an update leave old next step and review schedule intact', async () => {
+test('missing optional update fields preserve next step but advance an overdue review', async () => {
     const db = makeFakeDb(messages())
     const item = seedThread(db, { next_review_at: DAY0, next_step: '看看语气是否自然' })
     const out = await tick(db, async () => result(threadAction('update', {
@@ -471,7 +473,8 @@ test('missing optional fields in an update leave old next step and review schedu
     assert.equal(out.threadStatus, 'updated')
     assert.equal(item.current_draft, '想到了不同的表达方式')
     assert.equal(item.next_step, '看看语气是否自然')
-    assert.equal(item.next_review_at, DAY0)
+    // Step 4 prevents stale, already-due review times from causing a second wake.
+    assert.equal(item.next_review_at, '2026-10-16T12:00:00.000Z')
     assert.equal(item.version, 1)
 })
 

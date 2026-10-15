@@ -9,6 +9,20 @@ const {
     saveRuntimeStatePatch,
 } = require('./runtimeStateService')
 
+// A minimal indexed due check; drafts themselves remain private and are loaded
+// only AFTER the ordinary versioned Wake Gate has granted a tick.
+async function hasDueThoughtThread({ supabase, userId, agentId, now }) {
+    const { data, error } = await supabase.from('agent_thought_threads')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('agent_id', agentId)
+        .eq('status', 'open')
+        .lte('next_review_at', new Date(now).toISOString())
+        .limit(1)
+    if (error) throw error
+    return Array.isArray(data) && data.length > 0
+}
+
 const HOUR_MS = 60 * 60 * 1000
 const ABSENCE_HOUR_THRESHOLDS = Object.freeze([
     6, 12, 18, 24, 36, 48, 72,
@@ -55,6 +69,7 @@ function evaluateWakeGate({
     triggerType = 'heartbeat',
     triggerKey = null,
     cooldownMinutes = 60,
+    thoughtThreadDue = false,
 } = {}) {
     if (!state || typeof state !== 'object' || Array.isArray(state)) {
         throw new Error('wake gate state 必须是对象')
@@ -64,6 +79,9 @@ function evaluateWakeGate({
     }
     if (!Number.isFinite(cooldownMinutes) || cooldownMinutes < 0) {
         throw new Error('cooldownMinutes 必须是非负数')
+    }
+    if (typeof thoughtThreadDue !== 'boolean') {
+        throw new Error('thoughtThreadDue 必须是布尔值')
     }
     if (EVENT_TRIGGERS.has(triggerType) &&
         (typeof triggerKey !== 'string' || !triggerKey.trim() ||
@@ -125,6 +143,12 @@ function evaluateWakeGate({
     }
     if (triggerType === 'manual') {
         reasons.push('manual')
+    }
+    // Due drafts are an additional HEARTBEAT reason, not a way to bypass the
+    // existing absence/review/manual gate. A normal wake already gives the
+    // model access to due drafts; only add a new reason if otherwise idle.
+    if (triggerType === 'heartbeat' && thoughtThreadDue && reasons.length === 0) {
+        reasons.push('thought_thread_due')
     }
 
     const lastWakeMs = parsedMs(state.last_wake_at, 'last_wake_at')
@@ -189,9 +213,28 @@ async function processWakeGate({
     }
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const state = await ensureRuntimeState({ supabase, ...identity })
-        const decision = evaluateWakeGate({
+        let decision = evaluateWakeGate({
             state, now, triggerType, triggerKey, cooldownMinutes,
         })
+        if (triggerType === 'heartbeat' && !decision.shouldWake &&
+            !decision.inCooldown && decision.pendingReasons.length === 0) {
+            // Only read the due index when the old gate would otherwise skip.
+            // A database outage in this optional feature must not disable
+            // ordinary chat, manual ticks or absence-based Cognition.
+            let threadDue = false
+            try {
+                threadDue = await hasDueThoughtThread({
+                    supabase, ...identity, now,
+                })
+            } catch (error) {
+                console.warn('[cognition] due-thread check unavailable:',
+                    error?.code || error?.message || 'database_error')
+            }
+            if (threadDue) {
+                decision = evaluateWakeGate({ state, now, triggerType,
+                    triggerKey, cooldownMinutes, thoughtThreadDue: true })
+            }
+        }
         if (Object.keys(decision.patch).length === 0) {
             return { ...decision, state }
         }
@@ -218,5 +261,6 @@ module.exports = {
     ABSENCE_HOUR_THRESHOLDS,
     evaluateWakeGate,
     getAbsenceCheckpoint,
+    hasDueThoughtThread,
     processWakeGate,
 }

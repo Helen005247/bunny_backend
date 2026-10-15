@@ -1,8 +1,8 @@
 'use strict'
 
-// Background Cognition v2 Step 3: decide and persist one durable Thought Thread
-// action inside an already-authorized cognition tick. No new Wake Gate reason,
-// no heartbeat schedule changes, no messages/Diary/long-term memory writes.
+// Background Cognition v2: handle Thought Thread decisions and, from Step 4,
+// safely postpone due reviews that did not progress. No new heartbeat schedule,
+// messages, Diary, or long-term memory writes.
 
 const crypto = require('node:crypto')
 const {
@@ -19,6 +19,7 @@ const MAX_RECENT_SCAN = 50
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MIN_REVIEW_DELAY_MS = 60 * 60 * 1000
 const MAX_REVIEW_DELAY_MS = 30 * 24 * 60 * 60 * 1000
+const IDLE_REVIEW_DELAY_MS = 24 * 60 * 60 * 1000
 
 function boundedText(value, label, maxLength, { nullable = false, allowEmpty = false } = {}) {
     if (value === null && nullable) return null
@@ -212,6 +213,52 @@ function createDedupeKey({ userId, agentId, sourceMessageId, title }) {
     return `cog-v2s3:${hash}`
 }
 
+// A due review is an opportunity to revisit an existing draft. If no
+// meaningful update happens, move its *schedule* forward one day, preserving
+// all draft content and the open status. Never repeatedly wake on a past date.
+function isDueThread(thread, now) {
+    return thread?.status === 'open' && thread.next_review_at != null &&
+        Number.isFinite(Date.parse(thread.next_review_at)) &&
+        Date.parse(thread.next_review_at) <= now.getTime()
+}
+
+function nextIdleReview(now) {
+    return new Date(now.getTime() + IDLE_REVIEW_DELAY_MS).toISOString()
+}
+
+async function deferUnadvancedDueThread({
+    supabase, userId, agentId, wakeReasons, action, threadResult,
+    context, now,
+}) {
+    if (!context?.available) {
+        return { status: 'not_applicable', persisted: false }
+    }
+    const due = context.eligible.find((thread) => isDueThread(thread, now))
+    if (!due) return { status: 'not_due', persisted: false }
+    if (['update', 'complete', 'abandon'].includes(action.type) &&
+        threadResult.persisted && context.eligible.some((thread) =>
+            thread.id === action.threadId && isDueThread(thread, now))) {
+        // At least one overdue draft was actually processed. Other due drafts
+        // remain due for a later Heartbeat, rather than being hidden for a day.
+        return { status: 'handled', persisted: false }
+    }
+    try {
+        const changed = await updateThoughtThread({
+            supabase, userId, agentId, threadId: due.id,
+            expectedVersion: due.version, now,
+            patch: { nextReviewAt: nextIdleReview(now) },
+        })
+        return { status: 'deferred', persisted: true, threadId: changed.id }
+    } catch (error) {
+        if (error?.code === 'THOUGHT_THREAD_CONFLICT') {
+            // Another worker changed the draft, owner, or schedule. Never
+            // overwrite it with our stale wake decision.
+            return { status: 'conflict', persisted: false }
+        }
+        throw error
+    }
+}
+
 function preflightThreadAction({ action, context }) {
     if (!context?.available || action.type === 'none') return
     assertEligibleThread(action, context)
@@ -259,6 +306,13 @@ async function persistThreadAction({
                     Date.parse(snapshot.next_review_at) === Date.parse(patch.nextReviewAt))))) {
                 return { status: 'unchanged', persisted: false }
             }
+            // When a due-triggered reflection changed a draft but omitted a
+            // new schedule, don't leave the old (already-expired) review time.
+            // An explicit nextReviewAt:null still clears scheduling instead.
+            if (isDueThread(snapshot, now) &&
+                !Object.hasOwn(patch, 'nextReviewAt')) {
+                patch.nextReviewAt = nextIdleReview(now)
+            }
             const result = await updateThoughtThread({ ...target, patch })
             return { status: 'updated', persisted: true, threadId: result.id }
         }
@@ -279,6 +333,8 @@ async function persistThreadAction({
 }
 
 module.exports = {
+    deferUnadvancedDueThread,
+    isDueThread,
     loadThreadContext,
     parseThreadAction,
     persistThreadAction,
