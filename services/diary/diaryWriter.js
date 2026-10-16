@@ -66,11 +66,65 @@ function buildReviewChunks(rows) {
     return chunks
 }
 
-async function modelText(callModel, input) {
+// Never log upstream error messages or bodies: they may contain private text.
+// Classifying status/transport codes allows safe diagnoses without leaking data.
+function classifyModelError(error) {
+    const statuses = [error?.status, error?.response?.status, error?.cause?.status]
+    const rawStatus = statuses.find((value) =>
+        (typeof value === 'number' || typeof value === 'string') &&
+        String(value).trim() !== '')
+    const status = Number(rawStatus)
+    if (Number.isInteger(status) && status >= 400 && status < 600) {
+        if (status === 400 || status === 422) return 'model_invalid_request'
+        if (status === 401) return 'model_auth_failed'
+        if (status === 403) return 'model_access_forbidden'
+        if (status === 404) return 'model_route_not_found'
+        if (status === 408 || status === 504) return 'model_timeout'
+        if (status === 413) return 'model_request_too_large'
+        if (status === 429) return 'model_rate_limited'
+        if (status >= 500) return 'model_upstream_failure'
+    }
+    const code = String(error?.code || error?.cause?.code || '').toUpperCase()
+    const name = String(error?.name || '')
+    if (name.includes('Timeout') ||
+        /^(ETIMEDOUT|ESOCKETTIMEDOUT|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT)$/.test(code)) {
+        return 'model_timeout'
+    }
+    if (name === 'AbortError' || code === 'ABORT_ERR') return 'model_timeout'
+    if (/^(ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|UND_ERR_SOCKET)$/.test(code) ||
+        name === 'APIConnectionError') return 'model_connection_failure'
+    if (error?.message === '模型返回了空文本' || error?.message === '模型正文为空') {
+        return 'model_empty_output'
+    }
+    return 'model_unavailable'
+}
+
+// One bounded retry for quick, transient upstream failures. Do not repeat
+// slow timeouts, authorization failures, bad requests or unavailable models.
+const QUICK_RETRYABLE_ERRORS = new Set([
+    'model_rate_limited', 'model_upstream_failure', 'model_connection_failure',
+])
+async function modelText(callModel, input, {
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    nowMs = () => Date.now(),
+} = {}) {
     if (typeof callModel !== 'function') throw new DiaryModelError('model_not_configured')
     let response
-    try { response = await callModel({ model: MODEL, input }) }
-    catch (_) { throw new DiaryModelError('model_unavailable') }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        const start = nowMs()
+        try {
+            response = await callModel({ model: MODEL, input })
+            break
+        } catch (error) {
+            const code = classifyModelError(error)
+            const quick = nowMs() - start < 8000
+            if (attempt === 0 && quick && QUICK_RETRYABLE_ERRORS.has(code)) {
+                await sleep(code === 'model_rate_limited' ? 3000 : 1200)
+                continue
+            }
+            throw new DiaryModelError(code)
+        }
+    }
     if (!response?.output_text?.trim() && typeof response !== 'string') {
         throw new DiaryModelError('model_empty_output')
     }
@@ -158,4 +212,4 @@ async function reviewAndWriteDiary({ callModel, settings, source, window,
 }
 
 module.exports = { DiaryModelError, parseJsonResponse, buildReviewChunks,
-    reviewAndWriteDiary }
+    reviewAndWriteDiary, modelText, classifyModelError }
