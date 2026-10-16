@@ -1,6 +1,6 @@
 'use strict'
 
-// Background Cognition v2 Step 4: reflection + scheduled Thought Thread wake.
+// Background Cognition v2: reflection + due Thread + six-hour autonomous wake.
 // The ordinary absence/review/cooldown gate is preserved. No chat messages, Diary
 // entries or updates long-term memories. Reflections are character state, not
 // hidden model reasoning.
@@ -80,8 +80,8 @@ async function readOptional(label, getter, fallback) {
     if (typeof getter !== 'function') return fallback
     try {
         return await getter()
-    } catch (error) {
-        console.warn(`[cognition] ${label} unavailable:`, error?.message || error)
+    } catch (_) {
+        console.warn(`[cognition] ${label} unavailable; using fallback`)
         return fallback
     }
 }
@@ -133,10 +133,13 @@ function buildCognitionInput({ now, state, wakeReasons, messages, settings,
     }
 
     return [
-        '你是 Hermit 中的角色「星星」，这是一次在用户没有聊天时的简短离线回想。',
+        '你是 Hermit 中的角色「星星」。这是一次聊天之外的简短后台整理，无论用户最近是否仍在聊天。',
         '它是角色状态记录，不是模型的隐藏推理过程。此时绝对不要给用户发消息、写日记或更新长期记忆。',
         '只根据已知事实回想，不编造用户发生了什么；用户没回消息不代表有危险，也不要随时间无限升级焦虑。',
-        '如果没有有意义的新变化，可以选择不保存念头。保持角色语气自然、克制。',
+        '即使用户近期持续聊天，也可以从已知对话里发现一个真正值得以后留意、整理或继续构思的小想法。不要只围绕缺席本身思考。',
+        '如果 wakeReasons 包含 periodic_autonomous，这只是一次独立思考机会，不代表用户离开、发生了新事件或有紧急情况。',
+        '优先寻找已有话题中的真实细节、未完成的构思或值得温和记下的观察；不要刻意写用户安危、等待或思念的套话。',
+        '如果没有有意义的新变化，可以选择不保存念头。保持角色语气自然、克制；不强制创造想法。',
         '本轮若有值得以后再想的具体事情，可以从未完成想法中选一项续想，或新建一项；也完全可以什么都不做。',
         '不要为了显示自主性把每段聊天变成待办，不要仅重复已有草稿，不要编造新事实、用户承诺或未来已经发生的事情。',
         '优先考虑已有的 eligibleThreads；只允许更新、完成或放弃其中给出的 id，不可处理 otherKnownTopics。',
@@ -282,9 +285,8 @@ async function releaseWakeOnFailure({ supabase, identity, previousState, claimed
     try {
         await saveRuntimeStatePatch({ supabase, ...identity,
             expectedVersion: claimedState.version, patch, now })
-    } catch (error) {
-        console.warn('[cognition] failed to release wake; state may have changed:',
-            error?.message || error)
+    } catch (_) {
+        console.warn('[cognition] failed to release wake; state may have changed')
     }
 }
 
@@ -302,7 +304,11 @@ async function runCognitionTick({
     }
     const identity = normalizeIdentity({ userId, agentId })
     const nowDate = parseNow(now)
-    const latestUser = await getLatestUserMessage({ supabase, userId: identity.userId })
+    const latestUser = await getLatestUserMessage({ supabase,
+        userId: identity.userId }).catch((error) => {
+        console.warn('[cognition] tick failed; stage=read_latest_user')
+        throw error
+    })
     if (!latestUser) {
         return { executed: false, reason: 'no_user_messages' }
     }
@@ -312,18 +318,32 @@ async function runCognitionTick({
 
     // Defensive sync: a just-deployed chat hook or a non-chat writer may
     // have missed activity. Keep the persistent timestamp authoritative.
-    await recordUserMessage({ supabase, ...identity, messageAt: latestUser.created_at })
-    const previousState = await getRuntimeState({ supabase, ...identity })
+    await recordUserMessage({ supabase, ...identity,
+        messageAt: latestUser.created_at }).catch((error) => {
+        console.warn('[cognition] tick failed; stage=sync_activity')
+        throw error
+    })
+    const previousState = await getRuntimeState({ supabase,
+        ...identity }).catch((error) => {
+        console.warn('[cognition] tick failed; stage=read_state')
+        throw error
+    })
     const wake = await processWakeGate({
         supabase, ...identity, now: nowDate, triggerType,
         cooldownMinutes: COOLDOWN_MINUTES,
+    }).catch((error) => {
+        console.warn('[cognition] tick failed; stage=wake_gate')
+        throw error
     })
     if (!wake.shouldWake) {
         return { executed: false, reason: wake.inCooldown ? 'cooldown' : 'wake_gate_skipped',
+            gateStatus: wake.inCooldown ? 'cooldown' : 'no_wake_signal',
+            autonomousMinutesUntilDue: wake.autonomousMinutesUntilDue,
             pendingReasons: wake.pendingReasons || [] }
     }
 
     let durableEffectSaved = false
+    let phase = 'load_context'
     try {
         const [messages, settings, memory, milestones, previousThoughts, threadContext] = await Promise.all([
             getConversationExcerpt({ supabase, userId: identity.userId,
@@ -348,7 +368,8 @@ async function runCognitionTick({
             if (!threadContext.eligible.some((t) => isDueThread(t, nowDate))) {
                 await releaseWakeOnFailure({ supabase, identity,
                     previousState, claimedState: wake.state, now: nowDate })
-                return { executed: false, reason: 'wake_gate_skipped' }
+                return { executed: false, reason: 'wake_gate_skipped',
+                    gateStatus: 'stale_due_thread' }
             }
         }
 
@@ -356,6 +377,7 @@ async function runCognitionTick({
             previousThoughts, wake.state, wake.reasons
         )
 
+        phase = 'model_call'
         const response = await callModel({
             model: MODEL,
             input: buildCognitionInput({
@@ -366,6 +388,7 @@ async function runCognitionTick({
                 threadContext,
             }),
         })
+        phase = 'model_parse'
         const outcome = parseCognitionOutput(response?.output_text, nowDate)
         let invalidThreadAction = outcome.threadActionInvalid
         try {
@@ -380,6 +403,7 @@ async function runCognitionTick({
         }
 
         // Don't store a reflection about old context if the user just returned.
+        phase = 'freshness_check'
         const latestAfter = await getLatestUserMessage({ supabase,
             userId: identity.userId })
         if (String(latestAfter?.id) !== String(latestUser.id) ||
@@ -388,12 +412,14 @@ async function runCognitionTick({
                 await recordUserMessage({ supabase, ...identity,
                     messageAt: latestAfter.created_at })
             }
-            return { executed: false, reason: 'new_user_message_during_tick' }
+            return { executed: false, reason: 'new_user_message_during_tick',
+                gateStatus: 'cancelled_new_user_message' }
         }
 
         // Durable thread action goes before the short-lived reflection. If a
         // later write fails, we must not release a wake already used to write
         // a Thread, or a retry might double-apply a model decision.
+        phase = 'thread_write'
         const threadResult = await persistThreadAction({
             supabase, ...identity, now: nowDate,
             sourceMessageId: latestUser.id, wakeReasons: wake.reasons,
@@ -408,6 +434,7 @@ async function runCognitionTick({
         // A due review with no progress must not keep waking every heartbeat.
         // Versioned CAS only postpones the earliest unchanged due draft; it
         // never changes its content, status, or another worker's newer edit.
+        phase = 'defer_due_thread'
         const dueDisposition = await deferUnadvancedDueThread({
             supabase, ...identity, now: nowDate, wakeReasons: wake.reasons,
             action: invalidThreadAction ? { type: 'none' } : outcome.threadAction,
@@ -415,6 +442,7 @@ async function runCognitionTick({
         })
         durableEffectSaved ||= dueDisposition.persisted
 
+        phase = 'thought_write'
         let savedThought = null
         if (outcome.shouldStore) {
             const thoughtTriggerType = wake.reasons.includes('continued_absence')
@@ -438,6 +466,7 @@ async function runCognitionTick({
             durableEffectSaved = true
         }
 
+        phase = 'update_state'
         let stateUpdated = true
         try {
             await saveRuntimeStatePatch({ supabase, ...identity,
@@ -451,11 +480,16 @@ async function runCognitionTick({
             })
         } catch (error) {
             stateUpdated = false
-            console.warn('[cognition] state update failed after model:',
-                error?.message || error)
+            console.warn('[cognition] state update failed after model; stage=update_state')
         }
+        // Only outcome categories are logged, never messages, draft text, IDs,
+        // user identity, prompt fragments or credentials.
+        console.info('[cognition] result:',
+            `wake=${wake.reasons.join(',')}; thought=${savedThought ? 'saved' : 'skipped'}; ` +
+            `thread=${threadResult.status}; state=${stateUpdated ? 'updated' : 'failed'}`)
         return {
             executed: true, stored: !!savedThought,
+            gateStatus: 'executed',
             threadStatus: threadResult.status,
             threadWakeStatus: ['not_due', 'not_applicable'].includes(dueDisposition.status)
                 ? null : dueDisposition.status,
@@ -469,6 +503,9 @@ async function runCognitionTick({
             // Strictly no chat, push, reminder, Diary, or Memory writes.
         }
     } catch (error) {
+        // A fixed phase code identifies failure without logging database rows,
+        // the model response, private messages, IDs, API secrets or prompts.
+        console.warn(`[cognition] tick failed; stage=${phase}`)
         if (!durableEffectSaved) {
             await releaseWakeOnFailure({ supabase, identity,
                 previousState, claimedState: wake.state, now: nowDate })

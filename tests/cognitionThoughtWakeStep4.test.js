@@ -2,7 +2,7 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { evaluateWakeGate, hasDueThoughtThread, processWakeGate } =
+const { AUTONOMOUS_INTERVAL_HOURS, evaluateWakeGate, hasDueThoughtThread, processWakeGate } =
     require('../services/cognition/wakeGate')
 const { runCognitionTick } = require('../services/cognition/cognitionService')
 const { recordUserMessage } = require('../services/cognition/runtimeStateService')
@@ -449,4 +449,207 @@ test('Step 4: invalid model thread ID cannot update a foreign draft; only local 
         assert.equal(foreign.current_draft, '原始草稿')
         assert.equal(foreign.version, 0)
     } finally { console.warn = savedWarn }
+})
+
+// V2 Repair: six-hour independent opportunities must not depend on absence,
+// existing due drafts, or a model decision to persist anything.
+test('V2 repair: exactly six hours after a wake, active chat still permits cognition', () => {
+    assert.equal(AUTONOMOUS_INTERVAL_HOURS, 6)
+    const state = { last_user_message_at: '2026-10-15T11:59:00.000Z',
+        last_wake_at: '2026-10-15T06:00:00.000Z',
+        last_cognition_at: '2026-10-15T06:00:00.000Z',
+        absence_checkpoint: 0, metadata: {} }
+    const before = evaluateWakeGate({ state, now: DATE('2026-10-15T11:59:59.999Z') })
+    assert.equal(before.shouldWake, false)
+    assert.equal(before.autonomousMinutesUntilDue, 1)
+    const at = evaluateWakeGate({ state, now: DATE(NOW) })
+    assert.equal(at.shouldWake, true)
+    assert.deepEqual(at.reasons, ['periodic_autonomous'])
+    assert.equal(at.autonomousMinutesUntilDue, 0)
+    assert.equal(at.patch.last_wake_at, NOW)
+    assert.equal(at.absenceCheckpoint, 0)
+})
+
+test('V2 repair: independent heartbeat does not supersede due review, absence or manual', () => {
+    const s = { last_user_message_at: '2026-10-15T11:55:00Z',
+        last_wake_at: '2026-10-15T05:59:00Z',
+        last_cognition_at: '2026-10-15T05:59:00Z',
+        absence_checkpoint: 0, metadata: {} }
+    assert.deepEqual(evaluateWakeGate({ state: { ...s, next_review_at: NOW },
+        now: DATE(NOW) }).reasons, ['pending_review'])
+    assert.deepEqual(evaluateWakeGate({ state: s, now: DATE(NOW),
+        triggerType: 'manual' }).reasons, ['manual'])
+    assert.deepEqual(evaluateWakeGate({ state: {
+        ...s, last_user_message_at: '2026-10-15T05:30:00.000Z',
+    }, now: DATE(NOW) }).reasons, ['continued_absence'])
+    const db = fakeDb()
+    const t = addThread(db, { next_review_at: NOW })
+    db.rows.agent_runtime_state.push({ ...s, user_id: A, agent_id: 'star',
+        version: 0 })
+    return run(db, async () => model()).then((result) => {
+        assert.deepEqual(result.wakeReasons, ['thought_thread_due'])
+        assert.equal(t.version, 1)
+        assert.equal(db.dueProbes, 1)
+    })
+})
+
+test('V2 repair: a no-save independent thought still advances the six-hour window', async () => {
+    const db = fakeDb()
+    db.rows.agent_runtime_state.push({ user_id: A, agent_id: 'star',
+        version: 0, last_user_message_at: '2026-10-15T11:50:00.000Z',
+        last_wake_at: '2026-10-15T06:00:00.000Z',
+        last_cognition_at: '2026-10-15T06:00:00.000Z',
+        absence_started_at: null, absence_checkpoint: 0, next_review_at: null,
+        metadata: {} })
+    let calls = 0
+    const first = await run(db, async ({input}) => {
+        calls++
+        assert.match(input, /periodic_autonomous/)
+        assert.match(input, /即使用户近期持续聊天/)
+        assert.doesNotMatch(input, /这是一次在用户没有聊天时/)
+        return model()
+    })
+    assert.equal(first.executed, true)
+    assert.equal(first.stored, false)
+    assert.equal(first.threadStatus, 'none')
+    assert.deepEqual(first.wakeReasons, ['periodic_autonomous'])
+    assert.equal(first.stateUpdated, true)
+    assert.equal(db.rows.agent_thoughts.length, 0)
+    assert.equal(db.rows.agent_thought_threads.length, 0)
+    assert.equal(db.rows.agent_runtime_state[0].last_cognition_at, NOW)
+
+    const soon = await run(db, async () => { throw Error('premature call') },
+        '2026-10-15T15:00:00Z')
+    assert.equal(soon.executed, false)
+    assert.equal(soon.gateStatus, 'no_wake_signal')
+    assert.equal(soon.autonomousMinutesUntilDue, 180)
+    // Fresh user activity cannot reset six-hour cognition eligibility.
+    db.rows.messages.push({ id: 2, user_id: A, session_id: 2, visible: true,
+        role: 'user', content: '刚刚又聊了几句',
+        created_at: '2026-10-15T17:55:00.000Z' })
+    const second = await run(db, async () => { calls++; return model() }, LATER)
+    assert.equal(second.executed, true)
+    assert.deepEqual(second.wakeReasons, ['periodic_autonomous'])
+    assert.equal(calls, 2)
+})
+
+test('V2 repair: a new user is seeded independently of future chat messages', async () => {
+    const db = fakeDb()
+    let calls = 0
+    const first = await run(db, async () => { calls++; return model() })
+    assert.equal(first.executed, false)
+    assert.equal(first.autonomousMinutesUntilDue, 360)
+    assert.equal(db.rows.agent_runtime_state[0].metadata.cognition_autonomous_anchor_at, NOW)
+    db.rows.messages.push({ id: 2, user_id: A, session_id: 2, visible: true,
+        role: 'user', content: '我们还在聊天',
+        created_at: '2026-10-15T17:54:00.000Z' })
+    const justBefore = await run(db, async () => { throw Error('premature call') },
+        '2026-10-15T17:59:59.999Z')
+    assert.equal(justBefore.executed, false)
+    assert.equal(justBefore.autonomousMinutesUntilDue, 1)
+    const after = await run(db, async () => { calls++; return model() }, LATER)
+    assert.equal(after.executed, true)
+    assert.deepEqual(after.wakeReasons, ['periodic_autonomous'])
+    assert.equal(calls, 1)
+})
+
+test('V2 repair: cold-start does not inherit another user or agent clock', async () => {
+    const db = fakeDb()
+    db.rows.agent_runtime_state.push({ user_id: B, agent_id: 'star',
+        last_wake_at: '2026-10-01T00:00:00Z', version: 0, metadata: {} })
+    db.rows.agent_runtime_state.push({ user_id: A, agent_id: 'moon',
+        last_wake_at: '2026-10-01T00:00:00Z', version: 0, metadata: {} })
+    const result = await run(db, async () => { throw Error('foreign wake') })
+    assert.equal(result.executed, false)
+    assert.equal(db.rows.agent_runtime_state.find(r => r.user_id === A &&
+        r.agent_id === 'star').metadata.cognition_autonomous_anchor_at, NOW)
+})
+
+test('V2 repair: two simultaneous periodic heartbeats claim exactly one model call', async () => {
+    const db = fakeDb()
+    db.rows.agent_runtime_state.push({ user_id: A, agent_id: 'star',
+        last_user_message_at: '2026-10-15T11:50:00.000Z',
+        last_wake_at: '2026-10-15T05:59:00.000Z',
+        last_cognition_at: '2026-10-15T05:59:00.000Z',
+        absence_started_at: null, absence_checkpoint: 0, next_review_at: null,
+        metadata: {}, version: 0 })
+    let calls = 0
+    const call = async () => { calls++; return model() }
+    const results = await Promise.all([run(db, call), run(db, call)])
+    assert.equal(results.filter(r => r.executed).length, 1)
+    assert.equal(results.filter(r => !r.executed).length, 1)
+    assert.equal(calls, 1)
+    assert.equal(db.rows.agent_runtime_state[0].last_wake_at, NOW)
+})
+
+test('V2 repair: failing model releases the periodic claim for safe retry', async () => {
+    const db = fakeDb()
+    db.rows.agent_runtime_state.push({ user_id: A, agent_id: 'star',
+        last_user_message_at: '2026-10-15T11:50:00.000Z',
+        last_wake_at: '2026-10-15T05:00:00.000Z',
+        last_cognition_at: '2026-10-15T05:00:00.000Z',
+        absence_started_at: null, absence_checkpoint: 0, next_review_at: null,
+        metadata: {}, version: 0 })
+    await assert.rejects(() => run(db, async () => { throw Error('mock model failed') }),
+        /mock model failed/)
+    assert.equal(db.rows.agent_runtime_state[0].last_wake_at,
+        '2026-10-15T05:00:00.000Z')
+    const second = await run(db, async () => model())
+    assert.equal(second.executed, true)
+    assert.deepEqual(second.wakeReasons, ['periodic_autonomous'])
+})
+
+test('V2 repair: invalid optional anchor is reseeded rather than blocking other gates', () => {
+    const state = { last_user_message_at: '2026-10-15T11:55:00.000Z',
+        last_wake_at: null, last_cognition_at: null,
+        metadata: { cognition_autonomous_anchor_at: 'bad-date' } }
+    const decision = evaluateWakeGate({ state, now: DATE(NOW) })
+    assert.equal(decision.shouldWake, false)
+    assert.equal(decision.patch.metadata.cognition_autonomous_anchor_at, NOW)
+    const manual = evaluateWakeGate({ state, triggerType: 'manual', now: DATE(NOW) })
+    assert.deepEqual(manual.reasons, ['manual'])
+    assert.equal(manual.patch.metadata, undefined)
+})
+
+test('V2 repair: an optional due-thread DB probe failure cannot suppress autonomous wake', async () => {
+    const db = fakeDb()
+    db.failProbe = true
+    db.rows.agent_runtime_state.push({ user_id: A, agent_id: 'star',
+        last_user_message_at: '2026-10-15T11:50:00.000Z',
+        last_wake_at: '2026-10-15T05:00:00.000Z',
+        last_cognition_at: '2026-10-15T05:00:00.000Z',
+        absence_started_at: null, absence_checkpoint: 0, next_review_at: null,
+        metadata: {}, version: 0 })
+    const logs = []
+    const warn = console.warn
+    console.warn = (...parts) => logs.push(parts.join(' '))
+    try {
+        const out = await run(db, async () => model())
+        assert.equal(out.executed, true)
+        assert.deepEqual(out.wakeReasons, ['periodic_autonomous'])
+        assert.equal(db.dueProbes, 1)
+        assert.ok(logs.some((line) => line.includes('due-thread check unavailable')))
+        assert.equal(logs.join(' ').includes('probe failed'), false)
+    } finally { console.warn = warn }
+})
+
+test('V2 repair: model exceptions are logged by fixed stage, not private error text', async () => {
+    const db = fakeDb()
+    db.rows.agent_runtime_state.push({ user_id: A, agent_id: 'star',
+        last_user_message_at: '2026-10-15T11:50:00.000Z',
+        last_wake_at: '2026-10-15T05:00:00.000Z',
+        last_cognition_at: '2026-10-15T05:00:00.000Z',
+        absence_started_at: null, absence_checkpoint: 0, next_review_at: null,
+        metadata: {}, version: 0 })
+    const PRIVATE = 'MY_PRIVATE_MESSAGE_DO_NOT_PRINT'
+    const logs = []
+    const warn = console.warn
+    console.warn = (...parts) => logs.push(parts.join(' '))
+    try {
+        await assert.rejects(() => run(db, async () => {
+            throw Error(PRIVATE)
+        }), new RegExp(PRIVATE))
+        assert.ok(logs.some((line) => line.includes('stage=model_call')))
+        assert.equal(logs.join(' ').includes(PRIVATE), false)
+    } finally { console.warn = warn }
 })

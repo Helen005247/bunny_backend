@@ -4,7 +4,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { assertConfig, sendHeartbeat } = require('../scripts/cognition-heartbeat')
+const { assertConfig, sendHeartbeat, formatHeartbeatLog } = require('../scripts/cognition-heartbeat')
 
 const URL = 'https://bunny-backend-19g1.onrender.com/internal/cognition/tick'
 const UUID = '123e4567-e89b-42d3-a456-426614174000'
@@ -45,7 +45,8 @@ test('valid heartbeat sends exactly private POST with heartbeat gate enabled', a
             wakeReasons: ['continued_absence'] })
     } })
     assert.equal(called, 1)
-    assert.deepEqual(result, { executed: true, stored: true, reason: null })
+    assert.deepEqual(result, { executed: true, stored: true, reason: null,
+        wakeReasons: ['continued_absence'] })
     assert.equal(JSON.stringify(result).includes('Private thought'), false)
 })
 
@@ -105,4 +106,57 @@ test('network failure retries once; malformed or invalid JSON fails', async () =
     await assert.rejects(() => sendHeartbeat({ ...args,
         fetchImpl: async () => jsonResponse({ ok: true, executed: 'no' }),
     }), /返回格式错误/)
+})
+
+
+test('V2 repair: Action diagnostics show fixed reason codes and never model text or secrets', async () => {
+    const PRIVATE = 'DO_NOT_LOG_PRIVATE_MESSAGE_XXXX'
+    const result = await sendHeartbeat({ ...args, fetchImpl: async () => jsonResponse({
+        ok: true, executed: true, stored: false,
+        thought: PRIVATE, thoughtId: PRIVATE, userId: PRIVATE,
+        gateStatus: 'executed', stateUpdated: true,
+        wakeReasons: ['periodic_autonomous', PRIVATE],
+        threadStatus: 'none',
+    }) })
+    const log = formatHeartbeatLog(result)
+    assert.match(log, /executed=true; stored=false/)
+    assert.match(log, /wake=periodic_autonomous/)
+    assert.match(log, /thread=none/)
+    assert.match(log, /state=updated/)
+    assert.equal(log.includes(PRIVATE), false)
+    assert.equal(JSON.stringify(result).includes(PRIVATE), false)
+    assert.equal(log.includes(SECRET), false)
+    assert.equal(log.includes(UUID), false)
+})
+
+test('V2 repair: skipped gate prints bounded time until next independent opportunity', async () => {
+    const value = await sendHeartbeat({ ...args,
+        fetchImpl: async () => jsonResponse({
+            ok: true, executed: false, stored: false,
+            reason: 'wake_gate_skipped', gateStatus: 'no_wake_signal',
+            autonomousMinutesUntilDue: 172,
+        }),
+    })
+    const line = formatHeartbeatLog(value)
+    assert.match(line, /gate=no_wake_signal/)
+    assert.match(line, /autonomous_wait_minutes=172/)
+    assert.match(line, /wake=none/)
+})
+
+test('V2 repair: corrupted upstream diagnostics cannot inject sensitive text into log', async () => {
+    const BAD = 'secret-injected\nOTHER:should-never-render'
+    const value = await sendHeartbeat({ ...args, fetchImpl: async () => jsonResponse({
+        ok: true, executed: true, stored: true,
+        gateStatus: BAD, threadStatus: BAD, wakeReasons: [BAD, 'periodic_autonomous'],
+        autonomousMinutesUntilDue: -100,
+    }) })
+    const line = formatHeartbeatLog(value)
+    assert.equal(line.includes(BAD), false)
+    assert.match(line, /gate=unknown/)
+    assert.match(line, /thread=unknown/)
+    assert.match(line, /wake=periodic_autonomous/)
+    assert.match(line, /autonomous_wait_minutes=unknown/)
+    // Formatter independently sanitizes data even if bypassing the client.
+    assert.equal(formatHeartbeatLog({ executed: true, stored: true,
+        gateStatus: BAD, threadStatus: BAD, wakeReasons: [BAD] }).includes(BAD), false)
 })

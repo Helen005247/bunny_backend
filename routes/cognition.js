@@ -62,7 +62,9 @@ function createCognitionRouter({ supabase, callModel,
             })
             return res.json({ ok: true, ...result })
         } catch (error) {
-            console.error('[cognition] manual tick failed:', error?.message || error)
+            // Any provider/DB exception may contain sensitive data. The service
+            // logs only a fixed execution-stage code; never print raw errors.
+            console.error('[cognition] tick request failed; see sanitized stage logs')
             return res.status(500).json({ ok: false,
                 error: 'Cognition 执行失败，请查看后端日志（不会影响聊天）' })
         }

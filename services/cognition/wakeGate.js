@@ -24,6 +24,11 @@ async function hasDueThoughtThread({ supabase, userId, agentId, now }) {
 }
 
 const HOUR_MS = 60 * 60 * 1000
+// A low-frequency thinking opportunity independent of user absence or drafts.
+// The GitHub heartbeat cadence is unchanged; this is only a Wake Gate rule.
+const AUTONOMOUS_INTERVAL_HOURS = 6
+const AUTONOMOUS_INTERVAL_MS = AUTONOMOUS_INTERVAL_HOURS * HOUR_MS
+const AUTONOMOUS_ANCHOR_KEY = 'cognition_autonomous_anchor_at'
 const ABSENCE_HOUR_THRESHOLDS = Object.freeze([
     6, 12, 18, 24, 36, 48, 72,
 ])
@@ -61,6 +66,36 @@ function getAbsenceCheckpoint(elapsedMs) {
     }
     // Once past 72h, check once per 24h instead of every 6h.
     return checkpoints + Math.floor((hours - 72) / 24)
+}
+
+// Existing accounts use their last wake / cognition as the throttle anchor.
+// Brand-new accounts need a durable starting point that is NOT reset by chat.
+// The first heartbeat seeds it; a later heartbeat can wake after six hours.
+function autonomousOpportunity({ nowMs, lastUserMs, lastWakeMs, lastCognitionMs,
+    metadata }) {
+    if (lastUserMs === null || lastUserMs > nowMs) {
+        return { due: false, minutesUntilDue: null, needsAnchor: false }
+    }
+    const lastActivity = Math.max(
+        lastWakeMs === null ? -Infinity : lastWakeMs,
+        lastCognitionMs === null ? -Infinity : lastCognitionMs
+    )
+    if (lastActivity !== -Infinity) {
+        const remaining = AUTONOMOUS_INTERVAL_MS - (nowMs - lastActivity)
+        return { due: remaining <= 0,
+            minutesUntilDue: Math.max(0, Math.ceil(remaining / 60000)),
+            needsAnchor: false }
+    }
+    const raw = metadata[AUTONOMOUS_ANCHOR_KEY]
+    const anchor = typeof raw === 'string' ? Date.parse(raw) : NaN
+    if (!Number.isFinite(anchor) || anchor > nowMs) {
+        return { due: false, minutesUntilDue: AUTONOMOUS_INTERVAL_HOURS * 60,
+            needsAnchor: true }
+    }
+    const remaining = AUTONOMOUS_INTERVAL_MS - (nowMs - anchor)
+    return { due: remaining <= 0,
+        minutesUntilDue: Math.max(0, Math.ceil(remaining / 60000)),
+        needsAnchor: false }
 }
 
 function evaluateWakeGate({
@@ -159,6 +194,23 @@ function evaluateWakeGate({
         lastWakeMs === null ? -Infinity : lastWakeMs,
         lastCognitionMs === null ? -Infinity : lastCognitionMs
     )
+    const autonomous = triggerType === 'heartbeat'
+        ? autonomousOpportunity({ nowMs, lastUserMs, lastWakeMs,
+            lastCognitionMs, metadata })
+        : { due: false, minutesUntilDue: null, needsAnchor: false }
+    // This is an additional reason, never a substitute for an existing one.
+    // Active chatting does not reset the six-hour window.
+    if (triggerType === 'heartbeat' && reasons.length === 0) {
+        if (autonomous.due) {
+            reasons.push('periodic_autonomous')
+        } else if (autonomous.needsAnchor) {
+            // CAS-persist this once; never use last_user_message_at as an
+            // anchor, because active conversations would starve cognition.
+            patch.metadata = {
+                ...metadata, [AUTONOMOUS_ANCHOR_KEY]: new Date(nowMs).toISOString(),
+            }
+        }
+    }
     const inCooldown = lastActivityMs !== -Infinity &&
         nowMs - lastActivityMs < cooldownMinutes * 60 * 1000
     const shouldWake = reasons.length > 0 && !inCooldown
@@ -193,6 +245,7 @@ function evaluateWakeGate({
         absenceCheckpoint: checkpoint,
         previousCheckpoint,
         userReturned,
+        autonomousMinutesUntilDue: autonomous.minutesUntilDue,
         patch,
     }
 }
@@ -216,9 +269,12 @@ async function processWakeGate({
         let decision = evaluateWakeGate({
             state, now, triggerType, triggerKey, cooldownMinutes,
         })
-        if (triggerType === 'heartbeat' && !decision.shouldWake &&
-            !decision.inCooldown && decision.pendingReasons.length === 0) {
-            // Only read the due index when the old gate would otherwise skip.
+        if (triggerType === 'heartbeat' && !decision.inCooldown &&
+            decision.pendingReasons.length === 0 &&
+            (!decision.shouldWake ||
+                decision.reasons.every((reason) => reason === 'periodic_autonomous'))) {
+            // A due Thread has priority over the independent opportunity.
+            // Ordinary absence/review wakeups do not need this extra index read.
             // A database outage in this optional feature must not disable
             // ordinary chat, manual ticks or absence-based Cognition.
             let threadDue = false
@@ -227,8 +283,9 @@ async function processWakeGate({
                     supabase, ...identity, now,
                 })
             } catch (error) {
-                console.warn('[cognition] due-thread check unavailable:',
-                    error?.code || error?.message || 'database_error')
+                // The DB exception may contain private query details; do not
+                // forward its text into application logs.
+                console.warn('[cognition] due-thread check unavailable; optional probe skipped')
             }
             if (threadDue) {
                 decision = evaluateWakeGate({ state, now, triggerType,
@@ -259,6 +316,7 @@ async function processWakeGate({
 
 module.exports = {
     ABSENCE_HOUR_THRESHOLDS,
+    AUTONOMOUS_INTERVAL_HOURS,
     evaluateWakeGate,
     getAbsenceCheckpoint,
     hasDueThoughtThread,
