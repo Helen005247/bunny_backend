@@ -16,7 +16,7 @@ const ERROR_CODES = new Set([
     'model_invalid_request', 'model_auth_failed', 'model_access_forbidden',
     'model_route_not_found', 'model_request_too_large', 'model_rate_limited',
     'model_timeout', 'model_upstream_failure', 'model_connection_failure',
-    'model_empty_output', 'invalid_model_json', 'invalid_review_summary',
+    'model_empty_output', 'model_incomplete_output', 'invalid_model_json', 'invalid_review_summary',
     'invalid_review_chunks', 'invalid_diary_draft', 'invalid_diary_length',
     'oversized_review_piece', 'diary_lease_lost', 'diary_database_failure',
     'diary_job_busy', 'invalid_diary_timezone',
