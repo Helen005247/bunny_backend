@@ -10,6 +10,7 @@ const { DateTime } = require('luxon')
 const createGlanceRouter = require('./routes/glance')
 const createMilestonesRouter = require('./routes/milestones')
 const createCognitionRouter = require('./routes/cognition')
+const { createInternalDiaryRouter, createUserDiaryRouter } = require('./routes/diary')
 const createImagesRouter = require('./routes/images')
 const createVisualIdentityRouter = require('./routes/visualIdentity')
 const { detectVisualIdentityIntent, buildVisualIdentityChatContext } = require('./services/visualIdentity/visualIdentityContext')
@@ -24,6 +25,7 @@ const {
 } = require('./services/images/imageService')
 const { recordUserMessage } = require('./services/cognition/runtimeStateService')
 const { buildThoughtThreadChatContext } = require('./services/cognition/thoughtThreadChatContext')
+const { buildDiaryChatContext } = require('./services/diary/diaryRecall')
 const {
     buildTimeContext,
     findPreviousUserMessageAt,
@@ -269,6 +271,14 @@ app.use(
         }),
     })
 )
+
+// Diary v1: separate scheduler, not gated by Background Cognition.
+// Uses the existing server-only Cognition secret and model connection.
+app.use('/internal/diary', createInternalDiaryRouter({
+    supabase,
+    callModel: (request) => callModelWithRetry(request, 1),
+    getSettings: getGlobalSettings,
+}))
 
 // ======================================================
 // 基础工具
@@ -523,6 +533,9 @@ app.use(
     '/api/chat',
     requireAuth
 )
+
+// Authenticated diary read APIs; entry writing is private to the scheduler.
+app.use('/api/diary', requireAuth, createUserDiaryRouter({ supabase }))
 
 // All image endpoints inherit the same verified Supabase JWT as chat.
 // Shared gate keeps explicit reinspection and automatic chat reinspection
@@ -19007,6 +19020,27 @@ app.post(
                 }
             }
 
+            // Diary v1: select only relevant archived notes. The Star diary is
+            // never read by another voice persona and never blocks chat.
+            let diaryReplyContext = ''
+            if (messageChannel === 'text' || callAgentKey === 'xingxing') {
+                try {
+                    const diaryRecall = await buildDiaryChatContext({
+                        supabase,
+                        userId: req.userId,
+                        agentId: 'star',
+                        message: cleanMessage,
+                        channel: messageChannel,
+                    })
+                    diaryReplyContext = diaryRecall.context || ''
+                    if (diaryRecall.unavailable) {
+                        console.warn('[diary-recall] unavailable; chat continues')
+                    }
+                } catch (_) {
+                    console.warn('[diary-recall] unavailable; chat continues')
+                }
+            }
+
             const modelInputSections = [
                 baseModelInput,
             ]
@@ -19018,6 +19052,9 @@ app.post(
             }
             if (thoughtThreadReplyContext) {
                 modelInputSections.push(thoughtThreadReplyContext)
+            }
+            if (diaryReplyContext) {
+                modelInputSections.push(diaryReplyContext)
             }
 
             // Vision was performed by a dedicated model at upload time.
