@@ -19031,10 +19031,18 @@ app.post(
                         agentId: 'star',
                         message: cleanMessage,
                         channel: messageChannel,
+                        recentMessages: history,
                     })
                     diaryReplyContext = diaryRecall.context || ''
-                    if (diaryRecall.unavailable) {
-                        console.warn('[diary-recall] unavailable; chat continues')
+                    // Safe, content-free diagnostics. A green chat response is
+                    // not proof that a diary was actually read in full.
+                    if (diaryRecall.mode === 'full') {
+                        console.info('[diary-recall] mode=full; entries=' +
+                            diaryRecall.matched + '; chars=' + diaryRecall.fullChars)
+                    } else if (diaryRecall.mode === 'not_found') {
+                        console.info('[diary-recall] mode=not_found')
+                    } else if (diaryRecall.unavailable) {
+                        console.warn('[diary-recall] mode=unavailable; chat continues')
                     }
                 } catch (_) {
                     console.warn('[diary-recall] unavailable; chat continues')

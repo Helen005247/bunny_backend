@@ -349,7 +349,8 @@ test('diary recall fails softly during DB outage',async () => {
     db.errorTable='agent_diary'
     const result=await buildDiaryChatContext({supabase:db,userId:USER,message:'还记得生日吗'})
     assert.equal(result.unavailable,true)
-    assert.equal(result.context,'')
+    assert.equal(result.mode,'unavailable')
+    assert.match(result.context,/暂时无法打开正文/)
 })
 
 test('Actions must wait for completed status, never print diary or secret',async () => {
