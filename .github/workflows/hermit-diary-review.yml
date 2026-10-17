@@ -7,12 +7,21 @@ on:
     - cron: '17 11 * * *'
   workflow_dispatch:
     inputs:
+      acceptance_mode:
+        description: 'off=normal diary; preview=real-history V2 read/search without diary writes; probe=rollback-only DB tests'
+        required: false
+        default: off
+        type: choice
+        options:
+          - off
+          - preview
+          - probe
       start_date:
-        description: 'Optional backfill first day, YYYY-MM-DD (leave both blank for daily)'
+        description: 'Backfill date OR V2 preview first day, YYYY-MM-DD'
         required: false
         type: string
       end_date:
-        description: 'Optional backfill last day, YYYY-MM-DD (inclusive, max 4 days)'
+        description: 'Backfill date OR V2 preview last day, YYYY-MM-DD (inclusive, max 4 days)'
         required: false
         type: string
       topic_hint:
@@ -43,6 +52,7 @@ jobs:
           DIARY_ENDPOINT: https://bunny-backend-19g1.onrender.com/internal/diary/tick
           COGNITION_USER_ID: ${{ secrets.COGNITION_USER_ID }}
           COGNITION_TICK_SECRET: ${{ secrets.COGNITION_TICK_SECRET }}
+          DIARY_ACCEPTANCE_MODE: ${{ inputs.acceptance_mode }}
           DIARY_START_DATE: ${{ inputs.start_date }}
           DIARY_END_DATE: ${{ inputs.end_date }}
           DIARY_TOPIC_HINT: ${{ inputs.topic_hint }}

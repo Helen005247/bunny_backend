@@ -23,7 +23,8 @@ const ERROR_CODES = new Set([
     'invalid_diary_plan','diary_evidence_out_of_scope','diary_topic_not_found',
     'diary_topic_already_written','diary_revision_conflict',
     'source_context_limit_exceeded','source_context_mismatch',
-    'source_context_character_limit_exceeded',
+    'source_context_character_limit_exceeded','acceptance_preview_partial',
+    'acceptance_probe_failed',
 ])
 
 function safeErrorCode(error) {

@@ -4,14 +4,17 @@ const express = require('express')
 const crypto = require('crypto')
 const { secureEqual } = require('./cognition')
 const { runDiaryTick, safeErrorCode } = require('../services/diary/diaryService')
+const { runAcceptancePreview, runAcceptanceProbe } = require('../services/diary/diaryAcceptance')
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const VALID_STATUSES = new Set(['written','skipped','failed','completed','processing',
-    'covered','unavailable','conflict','revised','deferred','partial'])
+    'covered','unavailable','conflict','revised','deferred','partial',
+    'previewed','verified'])
 
 function createInternalDiaryRouter({ supabase, callModel, getSettings,
     expectedSecret = process.env.COGNITION_TICK_SECRET,
-    runTick = runDiaryTick } = {}) {
+    runTick = runDiaryTick, runPreview = runAcceptancePreview,
+    runProbe = runAcceptanceProbe } = {}) {
     const router = express.Router()
     // Model review can take several minutes across many chunks. The initiating
     // HTTP call returns immediately; GitHub polls until a terminal result.
@@ -62,9 +65,13 @@ function createInternalDiaryRouter({ supabase, callModel, getSettings,
         const input = req.body || {}
         if (!UUID_RE.test(input.userId || '') ||
             (input.agentId !== undefined && input.agentId !== 'star') ||
-            !['daily','backfill'].includes(input.triggerType) ||
+            !['daily','backfill','acceptance_preview','acceptance_probe'].includes(input.triggerType) ||
             (input.topicHint != null &&
-                (typeof input.topicHint !== 'string' || input.topicHint.length > 200))) {
+                (typeof input.topicHint !== 'string' || input.topicHint.length > 200)) ||
+            (input.triggerType==='acceptance_preview' &&
+                (typeof input.startDate!=='string' || typeof input.endDate!=='string')) ||
+            (input.triggerType==='acceptance_probe' &&
+                (input.startDate!=null || input.endDate!=null || input.topicHint))) {
             return res.status(400).json({ ok: false, code: 'invalid_diary_input' })
         }
         purgeRuns()
@@ -75,29 +82,42 @@ function createInternalDiaryRouter({ supabase, callModel, getSettings,
         // All errors become a terminal FAILED status. Never print private
         // user text/model output in HTTP responses or Render diagnostic logs.
         void Promise.resolve().then(async () => {
-            const result = await runTick({ supabase, callModel, getSettings,
-                userId: input.userId, agentId: 'star',
-                triggerType: input.triggerType,
-                startDate: input.startDate, endDate: input.endDate,
-                topicHint: input.topicHint || '' })
+            const common={supabase,callModel,getSettings,userId:input.userId,
+                agentId:'star',startDate:input.startDate,endDate:input.endDate,
+                topicHint:input.topicHint||''}
+            const result = input.triggerType==='acceptance_preview'
+                ? await runPreview(common)
+                : input.triggerType==='acceptance_probe'
+                    ? await runProbe(common)
+                    : await runTick({...common,triggerType:input.triggerType})
             const status = VALID_STATUSES.has(result?.status) ? result.status : 'failed'
             const safe = { ok: status !== 'failed', status,
+                ...(input.triggerType.startsWith('acceptance_')
+                    ? {mode:input.triggerType}:{}),
                 runId, processed: Number.isInteger(result?.processed) ? result.processed :
                     (result?.processed === true ? 1 : 0) }
-            for (const key of ['written','revised','deferred','created','skipped','reviewedCount','sourceCount','reviewedChunks','cacheHits','searchCount','reviewDone','reviewTotal','rollupDone','rollupTotal','reused','modelCalls']) {
+            for (const key of ['written','revised','deferred','created','skipped','reviewedCount','sourceCount','reviewedChunks','cacheHits','searchCount','reviewDone','reviewTotal','rollupDone','rollupTotal','reused','modelCalls','previewCreate','previewAppend',
+                'previewRewrite','previewDefer','previewSkipped','probeCreate',
+                'probeAppend','probeRewrite','probeDefer','probeDuplicate',
+                'probeConflict','probeAtomic','rolledBack','probeStage']) {
                 if (Number.isSafeInteger(result?.[key]) && result[key] >= 0) {
                     safe[key] = result[key]
                 }
             }
+            if (result?.probeSqlstate && /^[A-Z0-9]{5}$/.test(result.probeSqlstate))
+                safe.probeSqlstate=result.probeSqlstate
             if (result?.errorCode) safe.code = safeErrorCode({ code: result.errorCode })
-            if (status === 'partial') safe.code = 'review_partial'
+            if (status === 'partial') safe.code = input.triggerType==='acceptance_preview'
+                ? 'acceptance_preview_partial' : 'review_partial'
             item.status = safe.ok ? 'done' : 'failed'
             item.safe = safe
         }).catch((error) => {
             const code = safeErrorCode(error)
             console.warn(`[diary] tick failed; code=${code}`)
             item.status = 'failed'
-            item.safe = { ok: false, status: 'failed', runId, code }
+            item.safe = { ok: false, status: 'failed', runId, code,
+                ...(input.triggerType.startsWith('acceptance_')
+                    ? {mode:input.triggerType}:{}) }
         })
         return res.status(202).json({ ok: true, status: 'started', runId })
     })

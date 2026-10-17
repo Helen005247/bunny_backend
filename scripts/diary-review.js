@@ -5,7 +5,8 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 const SAFE_STATUSES = new Set(['written','skipped','completed','processing',
-    'running','covered','failed','conflict','unavailable','revised','deferred','partial'])
+    'running','covered','failed','conflict','unavailable','revised','deferred','partial',
+    'previewed','verified'])
 const SAFE_CODES = new Set([
     'settings_timezone_missing','source_row_limit_exceeded',
     'source_character_limit_exceeded','source_database_unavailable',
@@ -20,10 +21,12 @@ const SAFE_CODES = new Set([
     'diary_topic_already_written','diary_revision_conflict',
     'source_context_limit_exceeded','source_context_mismatch',
     'source_context_character_limit_exceeded','review_partial',
+    'acceptance_preview_partial','acceptance_probe_failed',
 ])
 const MAX_POLL_MS = 28 * 60 * 1000
 
-function assertConfig({ endpoint, userId, secret, startDate, endDate, topicHint = '' }) {
+function assertConfig({ endpoint, userId, secret, startDate, endDate, topicHint = '',
+    acceptanceMode='off' }) {
     if (!UUID.test(userId || '') || !secret || secret.length < 24) {
         throw new Error('Diary GitHub secrets not configured')
     }
@@ -33,13 +36,28 @@ function assertConfig({ endpoint, userId, secret, startDate, endDate, topicHint 
         url.pathname !== '/internal/diary/tick' || url.search || url.hash) {
         throw new Error('Diary endpoint must be HTTPS /internal/diary/tick')
     }
-    if (Boolean(startDate) !== Boolean(endDate) ||
-        (startDate && (!DATE.test(startDate) || !DATE.test(endDate)))) {
-        throw new Error('Manual backfill requires both YYYY-MM-DD dates')
+    if (!['off','preview','probe'].includes(acceptanceMode)) {
+        throw new Error('Invalid diary acceptance mode')
     }
-    if (typeof topicHint !== 'string' || topicHint.length > 200 ||
-        (topicHint.trim() && !startDate)) {
-        throw new Error('Manual topic requires a backfill date range')
+    if(typeof topicHint !== 'string' || topicHint.length>200) {
+        throw new Error('Invalid diary topic')
+    }
+    if (acceptanceMode==='probe') {
+        if(startDate || endDate || topicHint?.trim()) {
+            throw new Error('Diary DB probe requires empty date and topic inputs')
+        }
+    } else {
+        if (Boolean(startDate) !== Boolean(endDate) ||
+            (startDate && (!DATE.test(startDate) || !DATE.test(endDate)))) {
+            throw new Error('Manual backfill requires both YYYY-MM-DD dates')
+        }
+        if (acceptanceMode==='preview' && !startDate) {
+            throw new Error('Diary preview requires both date inputs')
+        }
+        if (typeof topicHint !== 'string' || topicHint.length > 200 ||
+            (topicHint.trim() && !startDate)) {
+            throw new Error('Manual topic requires a date range')
+        }
     }
     return url.toString()
 }
@@ -49,6 +67,27 @@ function safeLog(result) {
     const code = SAFE_CODES.has(result.code) ? result.code : 'none'
     const num = (value) => Number.isSafeInteger(value) && value >= 0 && value < 1000000
         ? value : 'unknown'
+    if(result.mode==='acceptance_preview') {
+        return `[diary-acceptance] preview status=${status}; ` +
+            `create=${num(result.previewCreate)}; append=${num(result.previewAppend)}; ` +
+            `rewrite=${num(result.previewRewrite)}; defer=${num(result.previewDefer)}; ` +
+            `skip=${num(result.previewSkipped)}; read=${num(result.sourceCount)}; ` +
+            `search_hits=${num(result.searchCount)}; ` +
+            `review=${num(result.reviewDone)}/${num(result.reviewTotal)}; ` +
+            `rollup=${num(result.rollupDone)}/${num(result.rollupTotal)}; ` +
+            `cache_hits=${num(result.cacheHits)}; model_calls=${num(result.modelCalls)}; ` +
+            `code=${code}`
+    }
+    if(result.mode==='acceptance_probe') {
+        const sqlstate = typeof result.probeSqlstate==='string' && /^[A-Z0-9]{5}$/.test(result.probeSqlstate)
+            ? result.probeSqlstate:'unknown'
+        return `[diary-acceptance] probe status=${status}; ` +
+            `create=${num(result.probeCreate)}; append=${num(result.probeAppend)}; ` +
+            `rewrite=${num(result.probeRewrite)}; defer=${num(result.probeDefer)}; ` +
+            `duplicate=${num(result.probeDuplicate)}; conflict=${num(result.probeConflict)}; ` +
+            `atomic=${num(result.probeAtomic)}; rolled_back=${num(result.rolledBack)}; ` +
+            `stage=${num(result.probeStage)}; sqlstate=${sqlstate}; code=${code}`
+    }
     return `[diary] review status=${status}; processed=${num(result.processed)}; ` +
         `written=${num(result.written ?? result.created)}; revised=${num(result.revised)}; ` +
         `deferred=${num(result.deferred)}; skipped=${num(result.skipped)}; ` +
@@ -60,13 +99,14 @@ function safeLog(result) {
 }
 
 async function dispatchAndPoll({ endpoint, userId, secret, startDate = '', endDate = '',
-    topicHint = '',
+    topicHint = '', acceptanceMode='off',
     fetchImpl = globalThis.fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
     maxPollMs = MAX_POLL_MS, nowMs = () => Date.now() } = {}) {
-    const url = assertConfig({ endpoint, userId, secret, startDate, endDate, topicHint })
+    const url = assertConfig({ endpoint, userId, secret, startDate, endDate, topicHint, acceptanceMode })
     if (typeof fetchImpl !== 'function') throw new Error('Fetch unavailable')
     const headers = { 'content-type': 'application/json', 'x-cognition-secret': secret }
-    const triggerType = startDate ? 'backfill' : 'daily'
+    const triggerType = acceptanceMode==='preview' ? 'acceptance_preview' :
+        acceptanceMode==='probe' ? 'acceptance_probe' : (startDate ? 'backfill' : 'daily')
     const body = JSON.stringify({ userId, agentId: 'star', triggerType,
         ...(startDate ? { startDate, endDate, topicHint: topicHint.trim() } : {}) })
     const response = await fetchImpl(url, { method: 'POST', headers, body,
@@ -111,6 +151,7 @@ async function main() {
         startDate: process.env.DIARY_START_DATE || '',
         endDate: process.env.DIARY_END_DATE || '',
         topicHint: process.env.DIARY_TOPIC_HINT || '',
+        acceptanceMode:process.env.DIARY_ACCEPTANCE_MODE || 'off',
     })
     console.log(safeLog(result))
 }
@@ -118,7 +159,7 @@ if (require.main === module) {
     main().catch((error) => {
         const message = String(error?.message || '')
         // Only known safe internal messages/status codes are passed through.
-        const safe = /^(\[diary\] review status=|Diary |Invalid |Manual |Fetch )/.test(message)
+        const safe = /^(\[(?:diary|diary-acceptance)\] |Diary |Invalid |Manual |Fetch )/.test(message)
             ? message : 'Diary review failed'
         console.error('[diary] failed:', safe)
         process.exitCode = 1
