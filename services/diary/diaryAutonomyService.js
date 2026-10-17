@@ -52,6 +52,20 @@ async function runAutonomousWindow({supabase,userId,agentId='star',callModel,set
         return {status:'failed',processed:false,errorCode:'diary_job_busy'}
     }
     const jobId=claim.jobId, token=claim.leaseToken
+    // Checkpoints are scoped to the claimed job and owner. A cached chunk is
+    // reused only when its content fingerprint matches the current source.
+    const loadCached=async()=>dbRows(await supabase.from('diary_review_chunk_cache')
+        .select('chunk_index,chunk_hash,observations')
+        .eq('job_id',jobId).eq('user_id',userId).eq('agent_id',agentId)
+        .order('chunk_index',{ascending:true}).limit(320))
+    const storeReviewedChunk=async({index,hash,observations})=>{
+        const ok=dbRpc(await supabase.rpc('diary_store_review_chunk',{
+            p_user_id:userId,p_agent_id:agentId,p_job_id:jobId,
+            p_lease_token:token,p_chunk_index:index,p_chunk_hash:hash,
+            p_observations:observations,
+        }))
+        if (ok!==true) throw new Error('diary_lease_lost')
+    }
     const renew=async()=>{
         const renewed=dbRpc(await supabase.rpc('diary_renew_review_job',{
             p_user_id:userId,p_agent_id:agentId,p_job_id:jobId,p_lease_token:token,
@@ -62,8 +76,9 @@ async function runAutonomousWindow({supabase,userId,agentId='star',callModel,set
         const source=await reader({supabase,userId,agentId,
             periodStart:window.periodStart,periodEnd:window.periodEnd})
         const {entries,topics}=await loadDiaryCandidates({supabase,userId,agentId})
+        const cachedChunks=await loadCached()
         const planned=await writer({supabase,userId,agentId,callModel,settings,
-            source,entries,topics,window,onChunkDone:renew})
+            source,entries,topics,window,onChunkDone:renew,cachedChunks,storeReviewedChunk})
         const finalized=dbRpc(await supabase.rpc('diary_finish_autonomy_job',{
             p_user_id:userId,p_agent_id:agentId,p_job_id:jobId,p_lease_token:token,
             p_actions:planned.actions,p_source_count:planned.evidence.includedCount,
@@ -76,7 +91,7 @@ async function runAutonomousWindow({supabase,userId,agentId='star',callModel,set
             created:Number(finalized.created||0),revised:Number(finalized.revised||0),
             deferred:Number(finalized.deferred||0),
             reviewedCount:source.includedCount,reviewedChunks:planned.chunks,
-            searchCount:planned.searchCount}
+            searchCount:planned.searchCount,cacheHits:planned.cacheHits}
     } catch(error) {
         const {safeErrorCode}=require('./diaryService')
         const code=safeErrorCode(error)
@@ -112,7 +127,9 @@ async function runAutonomousDailyTick({supabase,userId,agentId='star',callModel,
         revised:results.reduce((n,r)=>n+r.revised,0),
         deferred:results.reduce((n,r)=>n+r.deferred,0),
         skipped:results.filter(r=>r.status==='skipped').length,
-        reviewedCount:results.reduce((n,r)=>n+(r.reviewedCount||0),0)}
+        reviewedCount:results.reduce((n,r)=>n+(r.reviewedCount||0),0),
+        reviewedChunks:results.reduce((n,r)=>n+(r.reviewedChunks||0),0),
+        cacheHits:results.reduce((n,r)=>n+(r.cacheHits||0),0)}
 }
 module.exports={runAutonomousDailyTick,runAutonomousWindow,rollingWindow,
     loadDiaryCandidates,CATCHUP_DAYS,MAX_DAILY_JOBS_PER_TICK}

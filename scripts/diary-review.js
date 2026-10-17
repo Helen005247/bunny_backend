@@ -52,7 +52,8 @@ function safeLog(result) {
     return `[diary] review status=${status}; processed=${num(result.processed)}; ` +
         `written=${num(result.written ?? result.created)}; revised=${num(result.revised)}; ` +
         `deferred=${num(result.deferred)}; skipped=${num(result.skipped)}; ` +
-        `reviewed=${num(result.reviewedCount ?? result.sourceCount)}; code=${code}`
+        `reviewed=${num(result.reviewedCount ?? result.sourceCount)}; ` +
+        `cache_hits=${num(result.cacheHits)}; code=${code}`
 }
 
 async function dispatchAndPoll({ endpoint, userId, secret, startDate = '', endDate = '',

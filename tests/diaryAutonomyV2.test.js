@@ -48,7 +48,7 @@ class Query {
  maybeSingle(){return Promise.resolve(this.finish(true))}
 }
 function makeDb(messages=createRows()){
- const db={tables:{messages,call_sessions:[],diary_topics:[],agent_diary:[],diary_review_jobs:[],diary_revisions:[]},calls:[],errorTable:null,
+ const db={tables:{messages,call_sessions:[],diary_topics:[],agent_diary:[],diary_review_jobs:[],diary_revisions:[],diary_review_chunk_cache:[]},calls:[],errorTable:null,
   from(t){return new Query(this,t)},
   async rpc(name,a){this.calls.push(name)
    const jobs=this.tables.diary_review_jobs
@@ -62,6 +62,15 @@ function makeDb(messages=createRows()){
    }
    const job=jobs.find(j=>j.id===a.p_job_id&&j.user_id===a.p_user_id&&j.agent_id===a.p_agent_id&&j.status==='processing'&&j.lease===a.p_lease_token)
    if(name==='diary_renew_review_job')return {data:!!job,error:null}
+   if(name==='diary_store_review_chunk'){
+    if(!job || !/^[a-f0-9]{64}$/.test(a.p_chunk_hash) ||
+        !Array.isArray(a.p_observations))return {data:false,error:null}
+    let row=this.tables.diary_review_chunk_cache.find(r=>r.job_id===a.p_job_id&&r.chunk_index===a.p_chunk_index)
+    if(!row){row={job_id:a.p_job_id,user_id:a.p_user_id,agent_id:a.p_agent_id,
+        chunk_index:a.p_chunk_index};this.tables.diary_review_chunk_cache.push(row)}
+    row.chunk_hash=a.p_chunk_hash;row.observations=a.p_observations
+    return {data:true,error:null}
+   }
    if(name==='diary_fail_review_job'){if(job)job.status='failed';return {data:!!job,error:null}}
    if(name==='diary_finish_autonomy_job'){
     if(!job)return {data:null,error:{message:'lease lost'}}
@@ -89,6 +98,7 @@ function makeDb(messages=createRows()){
      }
     }
     job.status=created?'written':revised?'revised':deferred?'deferred':'skipped'
+    this.tables.diary_review_chunk_cache=this.tables.diary_review_chunk_cache.filter(c=>c.job_id!==job.id)
     return {data:{ok:true,status:job.status,created,revised,deferred},error:null}
    }
    return {data:null,error:{message:'unsupported fake rpc'}}
@@ -307,4 +317,116 @@ test('topic/diary search rescues an older diary beyond recent-index limit for cr
  assert.ok(!relevant.entries.some(d=>d.id===OTHER))
  assert.ok(relevant.topics.some(t=>t.id===T1))
  assert.equal(relevant.entries[0].id,D1)
+})
+
+
+test('a late upstream timeout keeps completed review chunks for safe retry',async()=>{
+ const history=[message('m1','甲'.repeat(6500)),message('m2','乙'.repeat(6500))]
+ const db=makeDb(history)
+ const source=sourceFor(history)
+ let calls=0
+ const failing=async ({input})=>{
+  if(input.includes('日记回顾助手')){
+   calls++
+   if(calls===2)throw new Error('Request timed out.')
+   return {output_text:JSON.stringify({observations:['生日']})}
+  }
+  if(input.includes('日记选题助手'))return {output_text:JSON.stringify({queries:[]})}
+  return {output_text:JSON.stringify({actions:[]})}
+ }
+ const args={supabase:db,userId:U,settings:SETTINGS,window:rollingWindow('2026-10-16',ZONE,NOW),
+  reader:async()=>source}
+ const first=await runAutonomousWindow({...args,callModel:failing})
+ assert.equal(first.status,'failed')
+ assert.equal(first.errorCode,'model_timeout')
+ assert.equal(db.tables.diary_review_chunk_cache.length,1)
+ assert.equal(db.tables.agent_diary.length,0)
+ let resumedCalls=0
+ const resumed=async (req)=>{
+  if(req.input.includes('日记回顾助手'))resumedCalls++
+  return failing({...req,input:req.input})
+ }
+ const finish=await runAutonomousWindow({...args,callModel:resumed})
+ assert.equal(finish.status,'skipped')
+ assert.ok(finish.cacheHits>=1)
+ assert.equal(db.tables.diary_review_chunk_cache.length,0)
+ assert.equal(db.tables.agent_diary.length,0)
+})
+
+test('review checkpoint hash rejects stale source; owner-scoped reader ignores foreign cache',async()=>{
+ const db=makeDb()
+ const source=sourceFor([message('m1','生日'.repeat(3000))])
+ const args={supabase:db,userId:U,settings:SETTINGS,window:rollingWindow('2026-10-16',ZONE,NOW),
+  reader:async()=>source}
+ const fail=await runAutonomousWindow({...args,callModel:async({input})=>{
+  if(input.includes('日记回顾助手'))throw new Error('Request timed out.')
+  return {output_text:'{}'}
+ }})
+ assert.equal(fail.status,'failed')
+ // A foreign owner's fabricated cache row is invisible to the user-scoped query.
+ db.tables.diary_review_chunk_cache.push({job_id:db.tables.diary_review_jobs[0].id,
+   user_id:OTHER,agent_id:'star',chunk_index:1,chunk_hash:'a'.repeat(64),observations:['secret']})
+ let reviewCalls=0
+ const done=await runAutonomousWindow({...args,callModel:async({input})=>{
+  if(input.includes('日记回顾助手')){reviewCalls++;return {output_text:'{"observations":[]}'}}
+  if(input.includes('日记选题助手'))return {output_text:'{"queries":[]}'}
+  return {output_text:'{"actions":[]}'}
+ }})
+ assert.equal(done.status,'skipped')
+ assert.ok(reviewCalls>0)
+})
+
+test('changed source invalidates a previously saved chunk fingerprint',async()=>{
+ const history=[message('m1','甲'.repeat(6200)),message('m2','乙'.repeat(6200))]
+ const db=makeDb(history)
+ const args={supabase:db,userId:U,settings:SETTINGS,
+  window:rollingWindow('2026-10-16',ZONE,NOW)}
+ let n=0
+ const first=await runAutonomousWindow({...args,reader:async()=>sourceFor(history),
+  callModel:async ({input})=>{
+   if(input.includes('日记回顾助手')){
+    n++
+    if(n===2)throw new Error('Request timed out.')
+    return {output_text:'{"observations":["原始消息"]}'}
+   }
+   return {output_text:'{"actions":[]}'}
+  }})
+ assert.equal(first.status,'failed')
+ assert.equal(db.tables.diary_review_chunk_cache.length,1)
+ // Same message ID but revised content is not safe to reuse as an observation.
+ const changed=[message('m1','丙'.repeat(6200)),history[1]]
+ let modelReviewCount=0
+ const second=await runAutonomousWindow({...args,reader:async()=>sourceFor(changed),
+  callModel:async ({input})=>{
+   if(input.includes('日记回顾助手')){
+    modelReviewCount++
+    return {output_text:'{"observations":["新消息"]}'}
+   }
+   if(input.includes('日记选题助手'))return {output_text:'{"queries":[]}'}
+   return {output_text:'{"actions":[]}'}
+  }})
+ assert.equal(second.status,'skipped')
+ assert.ok(modelReviewCount>0)
+ assert.ok(second.cacheHits < second.reviewedChunks)
+})
+
+test('model timeout codes remain specific without exposing upstream exception text',()=>{
+ const {classifyModelError,buildReviewChunks}=require('../services/diary/diaryWriter')
+ assert.equal(classifyModelError(new Error('Request timed out.')),'model_timeout')
+ assert.equal(classifyModelError(new Error('模型请求超时，已等待45004ms')),'model_timeout')
+ assert.equal(classifyModelError({status:504,message:'private'}),'model_timeout')
+ const parts=buildReviewChunks([{id:'m1',content:'甲'.repeat(12000),sessionId:'s',
+  role:'user',channel:'text',createdAt:NOW}],{maxChunkChars:5000,maxChunks:320})
+ assert.ok(parts.length>=2)
+ assert.equal(parts.flat().map(p=>p.text).join(''),'甲'.repeat(12000))
+})
+
+test('checkpoint SQL requires a current lease and protects observations from browser roles',()=>{
+ const sql=fs.readFileSync(path.join(__dirname,'../sql/hermit_diary_v2_review_checkpoint_fix.sql'),'utf8')
+ for (const keyword of ['ENABLE ROW LEVEL SECURITY','lease_token=p_lease_token',
+   'lease_expires_at>now()','GRANT EXECUTE','FROM PUBLIC,anon,authenticated',
+   'ON CONFLICT(job_id,chunk_index)','diary_clear_review_cache_on_finish']) {
+   assert.ok(sql.includes(keyword),keyword)
+ }
+ assert.ok(!/UPDATE\s+public\.agent_diary/i.test(sql))
 })

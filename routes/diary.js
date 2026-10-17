@@ -84,7 +84,7 @@ function createInternalDiaryRouter({ supabase, callModel, getSettings,
             const safe = { ok: status !== 'failed', status,
                 runId, processed: Number.isInteger(result?.processed) ? result.processed :
                     (result?.processed === true ? 1 : 0) }
-            for (const key of ['written','revised','deferred','created','skipped','reviewedCount','sourceCount','reviewedChunks','searchCount']) {
+            for (const key of ['written','revised','deferred','created','skipped','reviewedCount','sourceCount','reviewedChunks','cacheHits','searchCount']) {
                 if (Number.isSafeInteger(result?.[key]) && result[key] >= 0) {
                     safe[key] = result[key]
                 }

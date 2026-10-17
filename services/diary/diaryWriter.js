@@ -97,7 +97,11 @@ function parseJsonResponse(response, shape = 'any') {
     throw new DiaryModelError('invalid_model_json')
 }
 
-function buildReviewChunks(rows) {
+function buildReviewChunks(rows, { maxChunkChars = CHUNK_CHARS, maxChunks = MAX_CHUNKS } = {}) {
+    if (!Number.isInteger(maxChunkChars) || maxChunkChars < 2400 || maxChunkChars > CHUNK_CHARS ||
+        !Number.isInteger(maxChunks) || maxChunks < 1 || maxChunks > 320) {
+        throw new DiaryModelError('invalid_review_chunk_options')
+    }
     if (!Array.isArray(rows)) throw new DiaryModelError('invalid_review_rows')
     const pieces = []
     for (const row of rows) {
@@ -115,8 +119,8 @@ function buildReviewChunks(rows) {
     let size = 2
     for (const piece of pieces) {
         const length = JSON.stringify(piece).length + 1
-        if (length > CHUNK_CHARS) throw new DiaryModelError('oversized_review_piece')
-        if (size + length > CHUNK_CHARS && chunk.length) {
+        if (length > maxChunkChars) throw new DiaryModelError('oversized_review_piece')
+        if (size + length > maxChunkChars && chunk.length) {
             chunks.push(chunk)
             chunk = []
             size = 2
@@ -127,7 +131,7 @@ function buildReviewChunks(rows) {
     if (chunk.length) chunks.push(chunk)
     // Fail before calling the model: silently dropping older pages or tail
     // segments would produce a confidently incomplete diary.
-    if (chunks.length > MAX_CHUNKS) {
+    if (chunks.length > maxChunks) {
         throw new DiaryModelError('review_chunk_limit_exceeded')
     }
     return chunks
@@ -158,6 +162,12 @@ function classifyModelError(error) {
         return 'model_timeout'
     }
     if (name === 'AbortError' || code === 'ABORT_ERR') return 'model_timeout'
+    // The OpenAI-compatible upstream may throw a plain Error without transport
+    // status/code. Match only known timeout markers; never log the error body.
+    const detail = String(error?.message || '').slice(0, 350)
+    if (/Request timed out|模型请求超时|timed out after|timeout of [0-9]+ms/i.test(detail)) {
+        return 'model_timeout'
+    }
     if (/^(ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|UND_ERR_SOCKET)$/.test(code) ||
         name === 'APIConnectionError') return 'model_connection_failure'
     if (error?.message === '模型返回了空文本' || error?.message === '模型正文为空') {
