@@ -13,6 +13,10 @@ const REVIEW_GROUP_SIZE=8
 const MAX_FOCUS_MESSAGES=28
 const MAX_FOCUS_MESSAGE_CHARS=900
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const REPAIRABLE_PLAN_CODES=new Set([
+    'invalid_diary_plan','diary_evidence_out_of_scope','diary_topic_not_found',
+    'diary_topic_already_written','diary_revision_conflict','invalid_diary_length',
+])
 
 function invalid(code='invalid_diary_plan') { throw new DiaryModelError(code) }
 function guide(settings) {
@@ -329,13 +333,25 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
             id:d.id,title:d.title,topics:d.topics,topicId:d.diary_topic_id}))),
     ].join('\n')
     let searchPlan
-    try { searchPlan=await modelText(invokeModel,plannerPrompt) }
-    catch(e){
-        if(e?.code==='review_budget_exhausted')return diagnosticPartial({phase:'selection',
+    for(let attempt=1;attempt<=2;attempt++) {
+        const prompt=attempt===1 ? plannerPrompt : plannerPrompt +
+            '\n\nVALIDATION RETRY: Previous JSON did not satisfy the search schema. ' +
+            'Return only {"queries":[]} or {"queries":["short keyword"]}. ' +
+            'Use at most 3 strings of at most 48 characters each. Do not invent facts.'
+        try { searchPlan=await modelText(invokeModel,prompt) }
+        catch(e){
+            if(e?.code==='review_budget_exhausted')return diagnosticPartial({phase:'selection',
+                chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
+            console.warn(`[diary-v2] stage=search-plan; code=${e?.code||'unknown'}`)
+            throw e
+        }
+        if(Array.isArray(searchPlan?.queries) && searchPlan.queries.length<=3 &&
+            searchPlan.queries.every(t=>typeof t==='string' && t.length<=48)) break
+        console.warn(`[diary-v2] stage=search-plan-validation; code=invalid_diary_plan; attempt=${attempt}`)
+        if(attempt===2) invalid()
+        if(budget && !budget.canStart(1)) return diagnosticPartial({phase:'selection',
             chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
-        console.warn(`[diary-v2] stage=search-plan; code=${e?.code||'unknown'}`);throw e }
-    if (!Array.isArray(searchPlan.queries) || searchPlan.queries.length>3 ||
-        searchPlan.queries.some(t=>typeof t!=='string'||t.length>48)) invalid()
+    }
     await onChunkDone()
     const relevant=await enrichCandidates({supabase,userId,agentId,
         terms:searchPlan.queries,entries,topics})
@@ -388,13 +404,37 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
         }))),
         '可引用的证据ID：',JSON.stringify(evidence.rows.map(r=>r.id)),
     ].join('\n')
-    let answer
-    try { answer=await modelText(invokeModel,finalPrompt) }
-    catch(e){
-        if(e?.code==='review_budget_exhausted')return diagnosticPartial({phase:'selection',
-            chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
-        console.warn(`[diary-v2] stage=write; code=${e?.code||'unknown'}`);throw e }
-    const actions=normalizePlan({raw:answer,source,evidence,entries:relevant.entries.slice(0,4),topics:relevant.topics})
+    let actions
+    for(let attempt=1;attempt<=2;attempt++) {
+        const prompt=attempt===1 ? finalPrompt : finalPrompt +
+            '\n\nVALIDATION RETRY: Your previous action plan did not satisfy the schema. ' +
+            'Make a NEW JSON plan using ONLY evidence IDs in the supplied list. ' +
+            'At most 2 actions. For create/defer with no known topic_id, use anchor_id ' +
+            'equal to a referenced evidence ID plus topic_label. For append/rewrite, ' +
+            'use the EXACT diary_id, topic_id and expected_version shown in the data. ' +
+            'Each action needs 1-30 UNIQUE evidence_ids. Never duplicate a topic or ' +
+            'change a diary unless its ID was supplied. Empty {"actions":[]} is valid ' +
+            'ONLY if you genuinely prefer not to write. Do not invent source messages.'
+        let answer
+        try { answer=await modelText(invokeModel,prompt) }
+        catch(e){
+            if(e?.code==='review_budget_exhausted')return diagnosticPartial({phase:'selection',
+                chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
+            console.warn(`[diary-v2] stage=write; code=${e?.code||'unknown'}`)
+            throw e
+        }
+        try {
+            actions=normalizePlan({raw:answer,source,evidence,
+                entries:relevant.entries.slice(0,4),topics:relevant.topics})
+            break
+        } catch(e) {
+            if(!REPAIRABLE_PLAN_CODES.has(e?.code)) throw e
+            console.warn(`[diary-v2] stage=write-validation; code=${e.code}; attempt=${attempt}`)
+            if(attempt===2) throw e
+            if(budget && !budget.canStart(1))return diagnosticPartial({phase:'selection',
+                chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
+        }
+    }
     await onChunkDone()
     return {actions,evidence,chunks:chunks.length,reviewDone:completed,
         reviewTotal:chunks.length,rollupDone,rollupTotal,cacheHits,
