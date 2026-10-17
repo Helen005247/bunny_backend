@@ -29,8 +29,23 @@ const SAFE_CODES = new Set([
 ])
 const MAX_POLL_MS = 28 * 60 * 1000
 
+// GitHub workflow_dispatch text inputs can carry accidental surrounding whitespace.
+// Normalize the same fields for BOTH validation and the POST payload.
+function normalizeManualInputs(values) {
+    const result={...values}
+    for (const name of ['startDate','endDate','topicHint','acceptanceMode',
+        'planId','planDigest','confirmWrite']) {
+        if (typeof result[name] === 'string') result[name]=result[name].trim()
+    }
+    if (typeof result.planDigest === 'string') result.planDigest=result.planDigest.toLowerCase()
+    return result
+}
+
 function assertConfig({ endpoint, userId, secret, startDate='', endDate='', topicHint='',
     acceptanceMode='off', planId='', planDigest='', confirmWrite='' }) {
+    ({startDate,endDate,topicHint,acceptanceMode,planId,planDigest,confirmWrite} =
+        normalizeManualInputs({startDate,endDate,topicHint,acceptanceMode,
+            planId,planDigest,confirmWrite}))
     if (!UUID.test(userId || '') || !secret || secret.length < 24)
         throw new Error('Diary GitHub secrets not configured')
     let url
@@ -43,9 +58,18 @@ function assertConfig({ endpoint, userId, secret, startDate='', endDate='', topi
     if(typeof topicHint!=='string'||topicHint.length>200)
         throw new Error('Invalid diary topic')
     if(acceptanceMode==='commit') {
-        if(startDate||endDate||topicHint||!UUID.test(planId||'')||
-            !/^[0-9a-f]{64}$/.test(planDigest||'')||confirmWrite!=='WRITE')
-            throw new Error('Diary commit requires plan_id, digest and WRITE confirmation')
+        // Only log field names / lengths; never expose digest, token, plan or diary text.
+        const invalid=[]
+        if(startDate) invalid.push('start_date_not_empty')
+        if(endDate) invalid.push('end_date_not_empty')
+        if(topicHint) invalid.push('topic_hint_not_empty')
+        if(!UUID.test(planId||'')) invalid.push('plan_id_invalid')
+        if(!/^[0-9a-f]{64}$/.test(planDigest||'')) {
+            const length=typeof planDigest==='string'?planDigest.length:'not_text'
+            invalid.push(`plan_digest_invalid(length=${length})`)
+        }
+        if(confirmWrite!=='WRITE') invalid.push('confirm_write_not_WRITE')
+        if(invalid.length) throw new Error('Diary commit plan_id/digest/WRITE inputs invalid: '+invalid.join(', '))
     } else {
         if(planId||planDigest||confirmWrite)
             throw new Error('Invalid plan confirmation fields for non-commit mode')
@@ -124,6 +148,9 @@ async function dispatchAndPoll({ endpoint, userId, secret, startDate = '', endDa
     topicHint = '', acceptanceMode='off', planId='', planDigest='', confirmWrite='',
     fetchImpl = globalThis.fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
     maxPollMs = MAX_POLL_MS, nowMs = () => Date.now() } = {}) {
+    ({startDate,endDate,topicHint,acceptanceMode,planId,planDigest,confirmWrite} =
+        normalizeManualInputs({startDate,endDate,topicHint,acceptanceMode,
+            planId,planDigest,confirmWrite}))
     const url = assertConfig({ endpoint, userId, secret, startDate, endDate, topicHint, acceptanceMode,planId,planDigest,confirmWrite })
     if (typeof fetchImpl !== 'function') throw new Error('Fetch unavailable')
     const headers = { 'content-type': 'application/json', 'x-cognition-secret': secret }
