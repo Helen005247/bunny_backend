@@ -35,6 +35,7 @@ class Query {
  lt(field,value){this.filters.push(r=>String(r[field])<String(value));return this}
  lte(field,value){this.filters.push(r=>String(r[field])<=String(value));return this}
  gte(field,value){this.filters.push(r=>String(r[field])>=String(value));return this}
+ like(field,value){const needle=value.replaceAll('%','');this.filters.push(r=>String(r[field]||'').startsWith(needle));return this}
  ilike(field,value){const needle=value.replace(/\\([%_\\])/g,'$1').replaceAll('%','').toLowerCase();this.filters.push(r=>String(r[field]||'').toLowerCase().includes(needle));return this}
  contains(field,value){this.filters.push(r=>value.every(item=>Array.isArray(r[field])&&r[field].includes(item)));return this}
  order(field,{ascending=true}={}){this.orders.push([field,ascending]);return this}
@@ -48,7 +49,7 @@ class Query {
  maybeSingle(){return Promise.resolve(this.finish(true))}
 }
 function makeDb(messages=createRows()){
- const db={tables:{messages,call_sessions:[],diary_topics:[],agent_diary:[],diary_review_jobs:[],diary_revisions:[],diary_review_chunk_cache:[]},calls:[],errorTable:null,
+ const db={tables:{messages,call_sessions:[],diary_topics:[],agent_diary:[],diary_review_jobs:[],diary_revisions:[],diary_review_chunk_cache:[],diary_review_material_cache:[],diary_review_rollup_cache:[]},calls:[],errorTable:null,
   from(t){return new Query(this,t)},
   async rpc(name,a){this.calls.push(name)
    const jobs=this.tables.diary_review_jobs
@@ -56,7 +57,8 @@ function makeDb(messages=createRows()){
     let j=jobs.find(j=>j.scope_key===a.p_scope_key&&j.user_id===a.p_user_id)
     if(j&&j.status!=='pending'&&j.status!=='failed')return {data:{claimed:false,status:j.status},error:null}
     if(!j){j={id:crypto.randomUUID(),user_id:a.p_user_id,agent_id:a.p_agent_id,
-        scope_key:a.p_scope_key,status:'pending',timezone:a.p_timezone};jobs.push(j)}
+        scope_key:a.p_scope_key,status:'pending',timezone:a.p_timezone,
+        period_start:a.p_period_start,period_end:a.p_period_end,retry_after:null};jobs.push(j)}
     j.status='processing';j.lease=crypto.randomUUID()
     return {data:{claimed:true,jobId:j.id,leaseToken:j.lease},error:null}
    }
@@ -69,6 +71,24 @@ function makeDb(messages=createRows()){
     if(!row){row={job_id:a.p_job_id,user_id:a.p_user_id,agent_id:a.p_agent_id,
         chunk_index:a.p_chunk_index};this.tables.diary_review_chunk_cache.push(row)}
     row.chunk_hash=a.p_chunk_hash;row.observations=a.p_observations
+    if(!this.tables.diary_review_material_cache.some(r=>r.user_id===a.p_user_id&&
+        r.agent_id===a.p_agent_id&&r.chunk_hash===a.p_chunk_hash))
+      this.tables.diary_review_material_cache.push({user_id:a.p_user_id,agent_id:a.p_agent_id,
+          chunk_hash:a.p_chunk_hash,observations:a.p_observations})
+    return {data:true,error:null}
+   }
+   if(name==='diary_store_review_rollup'){
+    if(!job)return {data:false,error:null}
+    let row=this.tables.diary_review_rollup_cache.find(r=>r.job_id===job.id&&r.group_index===a.p_group_index)
+    if(!row){row={job_id:job.id,user_id:a.p_user_id,agent_id:a.p_agent_id,
+      group_index:a.p_group_index};this.tables.diary_review_rollup_cache.push(row)}
+    row.group_hash=a.p_group_hash;row.observations=a.p_observations
+    return {data:true,error:null}
+   }
+   if(name==='diary_pause_review_job'){
+    if(!job)return {data:false,error:null}
+    job.status='pending';job.result_code='review_partial';job.lease=null
+    job.review_done=a.p_review_done;job.review_total=a.p_review_total
     return {data:true,error:null}
    }
    if(name==='diary_fail_review_job'){if(job)job.status='failed';return {data:!!job,error:null}}
@@ -99,6 +119,7 @@ function makeDb(messages=createRows()){
     }
     job.status=created?'written':revised?'revised':deferred?'deferred':'skipped'
     this.tables.diary_review_chunk_cache=this.tables.diary_review_chunk_cache.filter(c=>c.job_id!==job.id)
+    this.tables.diary_review_rollup_cache=this.tables.diary_review_rollup_cache.filter(c=>c.job_id!==job.id)
     return {data:{ok:true,status:job.status,created,revised,deferred},error:null}
    }
    return {data:null,error:{message:'unsupported fake rpc'}}
@@ -225,9 +246,9 @@ test('daily scheduled v2 review is independent of Cognition and returns safe cou
   triggerType:'daily',now:new Date(NOW),getSettings:async()=>SETTINGS,
   callModel:model.callModel})
  assert.equal(result.status,'completed')
- assert.equal(result.processed,2)
+ assert.equal(result.processed,1)
  assert.equal(result.written,0)
- assert.equal(result.skipped,2)
+ assert.equal(result.skipped,1)
  assert.ok(db.tables.diary_review_jobs.every(j=>j.status==='skipped'))
  assert.ok(db.tables.diary_review_jobs.some(j=>j.scope_key==='autonomy:2026-10-16'))
 })

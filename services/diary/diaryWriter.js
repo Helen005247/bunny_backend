@@ -194,6 +194,7 @@ async function modelText(callModel, input, {
             response = await callModel({ model: MODEL, input })
             break
         } catch (error) {
+            if (error?.code === 'review_budget_exhausted') throw error
             const code = classifyModelError(error)
             const quick = nowMs() - start < 8000
             if (attempt === 0 && quick && QUICK_RETRYABLE_ERRORS.has(code)) {
@@ -233,6 +234,7 @@ async function modelText(callModel, input, {
         repaired = await callModel({ model: MODEL, input: repairInput,
             text: { format: { type: 'json_object' } } })
     } catch (error) {
+        if (error?.code === 'review_budget_exhausted') throw error
         const status = Number(error?.status ?? error?.response?.status ?? error?.cause?.status)
         if (status !== 400 && status !== 422) {
             throw new DiaryModelError(classifyModelError(error))
@@ -241,6 +243,7 @@ async function modelText(callModel, input, {
         try {
             repaired = await callModel({ model: MODEL, input: repairInput })
         } catch (fallbackError) {
+            if (fallbackError?.code === 'review_budget_exhausted') throw fallbackError
             throw new DiaryModelError(classifyModelError(fallbackError))
         }
     }

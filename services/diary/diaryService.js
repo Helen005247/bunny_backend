@@ -19,7 +19,7 @@ const ERROR_CODES = new Set([
     'model_empty_output', 'model_incomplete_output', 'invalid_model_json', 'invalid_review_summary',
     'invalid_review_chunks', 'invalid_review_chunk_options', 'invalid_diary_draft', 'invalid_diary_length',
     'oversized_review_piece', 'diary_lease_lost', 'diary_database_failure',
-    'diary_job_busy', 'invalid_diary_timezone',
+    'diary_job_busy', 'invalid_diary_timezone','review_partial',
     'invalid_diary_plan','diary_evidence_out_of_scope','diary_topic_not_found',
     'diary_topic_already_written','diary_revision_conflict',
     'source_context_limit_exceeded','source_context_mismatch',

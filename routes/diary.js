@@ -7,7 +7,7 @@ const { runDiaryTick, safeErrorCode } = require('../services/diary/diaryService'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const VALID_STATUSES = new Set(['written','skipped','failed','completed','processing',
-    'covered','unavailable','conflict','revised','deferred'])
+    'covered','unavailable','conflict','revised','deferred','partial'])
 
 function createInternalDiaryRouter({ supabase, callModel, getSettings,
     expectedSecret = process.env.COGNITION_TICK_SECRET,
@@ -84,12 +84,13 @@ function createInternalDiaryRouter({ supabase, callModel, getSettings,
             const safe = { ok: status !== 'failed', status,
                 runId, processed: Number.isInteger(result?.processed) ? result.processed :
                     (result?.processed === true ? 1 : 0) }
-            for (const key of ['written','revised','deferred','created','skipped','reviewedCount','sourceCount','reviewedChunks','cacheHits','searchCount']) {
+            for (const key of ['written','revised','deferred','created','skipped','reviewedCount','sourceCount','reviewedChunks','cacheHits','searchCount','reviewDone','reviewTotal','rollupDone','rollupTotal','reused','modelCalls']) {
                 if (Number.isSafeInteger(result?.[key]) && result[key] >= 0) {
                     safe[key] = result[key]
                 }
             }
             if (result?.errorCode) safe.code = safeErrorCode({ code: result.errorCode })
+            if (status === 'partial') safe.code = 'review_partial'
             item.status = safe.ok ? 'done' : 'failed'
             item.safe = safe
         }).catch((error) => {

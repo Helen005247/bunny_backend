@@ -5,7 +5,7 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 const SAFE_STATUSES = new Set(['written','skipped','completed','processing',
-    'running','covered','failed','conflict','unavailable','revised','deferred'])
+    'running','covered','failed','conflict','unavailable','revised','deferred','partial'])
 const SAFE_CODES = new Set([
     'settings_timezone_missing','source_row_limit_exceeded',
     'source_character_limit_exceeded','source_database_unavailable',
@@ -19,7 +19,7 @@ const SAFE_CODES = new Set([
     'invalid_diary_plan','diary_evidence_out_of_scope','diary_topic_not_found',
     'diary_topic_already_written','diary_revision_conflict',
     'source_context_limit_exceeded','source_context_mismatch',
-    'source_context_character_limit_exceeded',
+    'source_context_character_limit_exceeded','review_partial',
 ])
 const MAX_POLL_MS = 28 * 60 * 1000
 
@@ -53,7 +53,10 @@ function safeLog(result) {
         `written=${num(result.written ?? result.created)}; revised=${num(result.revised)}; ` +
         `deferred=${num(result.deferred)}; skipped=${num(result.skipped)}; ` +
         `reviewed=${num(result.reviewedCount ?? result.sourceCount)}; ` +
-        `cache_hits=${num(result.cacheHits)}; code=${code}`
+        `cache_hits=${num(result.cacheHits)}; shared_hits=${num(result.reused)}; ` +
+        `review=${num(result.reviewDone)}/${num(result.reviewTotal)}; ` +
+        `rollup=${num(result.rollupDone)}/${num(result.rollupTotal)}; ` +
+        `model_calls=${num(result.modelCalls)}; code=${code}`
 }
 
 async function dispatchAndPoll({ endpoint, userId, secret, startDate = '', endDate = '',
