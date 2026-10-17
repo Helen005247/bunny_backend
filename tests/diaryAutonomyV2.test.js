@@ -37,7 +37,7 @@ class Query {
  gte(field,value){this.filters.push(r=>String(r[field])>=String(value));return this}
  like(field,value){const needle=value.replaceAll('%','');this.filters.push(r=>String(r[field]||'').startsWith(needle));return this}
  ilike(field,value){const needle=value.replace(/\\([%_\\])/g,'$1').replaceAll('%','').toLowerCase();this.filters.push(r=>String(r[field]||'').toLowerCase().includes(needle));return this}
- contains(field,value){this.filters.push(r=>value.every(item=>Array.isArray(r[field])&&r[field].includes(item)));return this}
+ contains(field,value){assert.equal(field,'topics');assert.equal(typeof value,'string');const tags=JSON.parse(value);this.filters.push(r=>tags.every(item=>Array.isArray(r[field])&&r[field].includes(item)));return this}
  order(field,{ascending=true}={}){this.orders.push([field,ascending]);return this}
  limit(n){this.end=Math.min(this.end,n);return this}
  range(a,b){this.offset=a;this.end=Math.min(this.end,b-a+1);return this}

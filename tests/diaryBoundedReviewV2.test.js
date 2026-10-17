@@ -39,7 +39,7 @@ function makeDB(){
   in(k,values){this.filters.push(r=>values.map(String).includes(String(r[k])));return this}
   like(k,v){this.filters.push(r=>String(r[k]||'').startsWith(v.replaceAll('%','')));return this}
   ilike(k,v){this.filters.push(r=>String(r[k]||'').toLowerCase().includes(v.replaceAll('%','').toLowerCase()));return this}
-  contains(k,v){this.filters.push(r=>v.every(x=>Array.isArray(r[k])&&r[k].includes(x)));return this}
+  contains(k,v){assert.equal(k,'topics');assert.equal(typeof v,'string');const tags=JSON.parse(v);this.filters.push(r=>tags.every(x=>Array.isArray(r[k])&&r[k].includes(x)));return this}
   order(k,{ascending=true}={}){this.orders.push({k,ascending});return this}
   limit(n){this.max=Math.min(this.max,n);return this}
   finish(){let rows=tables[this.name].filter(r=>this.filters.every(f=>f(r)))

@@ -16,8 +16,9 @@ class Query {
     eq(k,v) {this.predicates.push((r)=>String(r[k])===String(v));return this}
     ilike(k,q) {const sub=q.replaceAll('%','').toLowerCase();
         this.predicates.push((r)=>String(r[k]||'').toLowerCase().includes(sub));return this}
-    contains(k,values) {this.predicates.push((r)=>Array.isArray(r[k])&&
-        values.every((x)=>r[k].includes(x)));return this}
+    contains(k,values) {assert.equal(k,'topics');assert.equal(typeof values,'string');
+        const tags=JSON.parse(values);this.predicates.push((r)=>Array.isArray(r[k])&&
+        tags.every((x)=>r[k].includes(x)));return this}
     lt(k,v) {this.predicates.push((r)=>r[k]<v);return this}
     gt(k,v) {this.predicates.push((r)=>r[k]>v);return this}
     gte(k,v) {this.predicates.push((r)=>r[k]>=v);return this}

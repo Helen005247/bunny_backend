@@ -74,7 +74,10 @@ class Query {
     gt(key, value) { this.filters.push((v) => String(v[key]) > String(value)); return this }
     in(key, values) { this.filters.push((v) => values.map(String).includes(String(v[key]))); return this }
     contains(key, values) {
-        this.filters.push((v) => values.every((item) =>
+        assert.equal(key, 'topics')
+        assert.equal(typeof values, 'string', 'JSONB containment must use JSON text')
+        const tags = JSON.parse(values)
+        this.filters.push((v) => tags.every((item) =>
             Array.isArray(v[key]) && v[key].includes(item)))
         return this
     }

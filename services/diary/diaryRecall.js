@@ -210,7 +210,7 @@ async function buildDiaryChatContext({ supabase, userId, agentId = 'star',
                     .order('created_at',{ascending:false}).limit(30)
                 if (byTitle.error) throw new Error('diary_read_unavailable')
                 for (const e of byTitle.data || []) candidates.set(e.id,e)
-                const byTopic = await base().contains('topics',[term])
+                const byTopic = await base().contains('topics',JSON.stringify([term]))
                     .order('created_at',{ascending:false}).limit(30)
                 if (byTopic.error) throw new Error('diary_read_unavailable')
                 for (const e of byTopic.data || []) candidates.set(e.id,e)
