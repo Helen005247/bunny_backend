@@ -5,7 +5,7 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 const SAFE_STATUSES = new Set(['written','skipped','completed','processing',
-    'running','covered','failed','conflict','unavailable'])
+    'running','covered','failed','conflict','unavailable','revised','deferred'])
 const SAFE_CODES = new Set([
     'settings_timezone_missing','source_row_limit_exceeded',
     'source_character_limit_exceeded','source_database_unavailable',
@@ -16,6 +16,10 @@ const SAFE_CODES = new Set([
     'model_empty_output','model_incomplete_output','invalid_review_summary','invalid_diary_draft',
     'invalid_diary_length','diary_lease_lost','diary_internal_failure',
     'diary_database_failure','diary_job_busy',
+    'invalid_diary_plan','diary_evidence_out_of_scope','diary_topic_not_found',
+    'diary_topic_already_written','diary_revision_conflict',
+    'source_context_limit_exceeded','source_context_mismatch',
+    'source_context_character_limit_exceeded',
 ])
 const MAX_POLL_MS = 28 * 60 * 1000
 
@@ -46,7 +50,8 @@ function safeLog(result) {
     const num = (value) => Number.isSafeInteger(value) && value >= 0 && value < 1000000
         ? value : 'unknown'
     return `[diary] review status=${status}; processed=${num(result.processed)}; ` +
-        `written=${num(result.written)}; skipped=${num(result.skipped)}; ` +
+        `written=${num(result.written ?? result.created)}; revised=${num(result.revised)}; ` +
+        `deferred=${num(result.deferred)}; skipped=${num(result.skipped)}; ` +
         `reviewed=${num(result.reviewedCount ?? result.sourceCount)}; code=${code}`
 }
 

@@ -12,7 +12,7 @@ const TOPICS = ['生日','纪念日','朋友圈','约定','礼物','旅行','游
     '画画','图片','音乐','电影','假期','庆祝','写作','日记']
 const MAX_DIARY_BODY_CHARS = 10000 // The existing SQL table enforces this bound.
 const MAX_PROMPT_CHARS = 27000 // Two full entries plus trusted framing.
-const META_FIELDS = 'id, title, topics, period_start, period_end, timezone, created_at'
+const META_FIELDS = 'id, title, topics, period_start, period_end, timezone, created_at, updated_at, current_version'
 const BODY_FIELDS = `${META_FIELDS}, body`
 
 function exactDateCue(message) {
@@ -156,7 +156,7 @@ async function buildDiaryChatContext({ supabase, userId, agentId = 'star',
         .select(fields).eq('user_id',userId).eq('agent_id',agentId)
 
     try {
-        const recent = await base().order('created_at', {ascending:false})
+        const recent = await base().order('updated_at', {ascending:false}).order('created_at', {ascending:false})
             .limit(needsSearch ? 80 : 1)
         if (recent.error) throw new Error('diary_read_unavailable')
         const items = recent.data || []

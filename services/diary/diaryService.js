@@ -1,12 +1,12 @@
 'use strict'
 
 const crypto = require('crypto')
-const { getWindow, localDateAt, addDays, validTimeZone } = require('./diaryWindows')
+const { getWindow, validTimeZone } = require('./diaryWindows')
 const { readDiaryMessages } = require('./diaryReader')
 const { reviewAndWriteDiary } = require('./diaryWriter')
 
-const CATCHUP_DAYS = 14
-const MAX_DAILY_JOBS_PER_TICK = 2
+const { runAutonomousDailyTick, CATCHUP_DAYS, MAX_DAILY_JOBS_PER_TICK } =
+    require('./diaryAutonomyService')
 const ERROR_CODES = new Set([
     'invalid_diary_input', 'settings_timezone_missing', 'invalid_diary_range',
     'invalid_diary_date', 'invalid_local_day_boundary', 'diary_period_not_ended',
@@ -20,6 +20,10 @@ const ERROR_CODES = new Set([
     'invalid_review_chunks', 'invalid_diary_draft', 'invalid_diary_length',
     'oversized_review_piece', 'diary_lease_lost', 'diary_database_failure',
     'diary_job_busy', 'invalid_diary_timezone',
+    'invalid_diary_plan','diary_evidence_out_of_scope','diary_topic_not_found',
+    'diary_topic_already_written','diary_revision_conflict',
+    'source_context_limit_exceeded','source_context_mismatch',
+    'source_context_character_limit_exceeded',
 ])
 
 function safeErrorCode(error) {
@@ -167,26 +171,9 @@ async function runDiaryTick({ supabase, userId, agentId = 'star',
     if (startDate != null || endDate != null || topicHint) {
         throw new Error('invalid_diary_input')
     }
-    const today = localDateAt(now, timeZone)
-    const results = []
-    for (let i = 1; i <= CATCHUP_DAYS; i += 1) {
-        const date = addDays(today, -i)
-        const window = getWindow({ startDate: date, endDate: date,
-            timeZone, now, allowPartialToday: false })
-        const result = await runWindow({ ...common, window, triggerType })
-        if (result.status === 'failed' || result.status === 'unavailable' ||
-            result.status === 'conflict') {
-            return { status: 'failed', processed: results.length,
-                errorCode: result.errorCode || 'diary_database_failure' }
-        }
-        if (result.processed) results.push(result)
-        if (results.length >= MAX_DAILY_JOBS_PER_TICK) break
-    }
-    return { status: 'completed', processed: results.length,
-        written: results.filter((v) => v.status === 'written').length,
-        skipped: results.filter((v) => v.status === 'skipped').length,
-        // Cannot log private rows, topics or diary bodies.
-        reviewedCount: results.reduce((sum, v) => sum + (v.sourceCount || 0), 0) }
+    // Diary v2: the daily schedule selects topics and evidence, not a diary date.
+    // Legacy manual backfills above retain their previous date-based behavior.
+    return runAutonomousDailyTick({ ...common, now })
 }
 
 module.exports = { runWindow, runDiaryTick, getScopeKey, safeErrorCode,

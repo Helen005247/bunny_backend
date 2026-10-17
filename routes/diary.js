@@ -7,7 +7,7 @@ const { runDiaryTick, safeErrorCode } = require('../services/diary/diaryService'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const VALID_STATUSES = new Set(['written','skipped','failed','completed','processing',
-    'covered','unavailable','conflict'])
+    'covered','unavailable','conflict','revised','deferred'])
 
 function createInternalDiaryRouter({ supabase, callModel, getSettings,
     expectedSecret = process.env.COGNITION_TICK_SECRET,
@@ -84,7 +84,7 @@ function createInternalDiaryRouter({ supabase, callModel, getSettings,
             const safe = { ok: status !== 'failed', status,
                 runId, processed: Number.isInteger(result?.processed) ? result.processed :
                     (result?.processed === true ? 1 : 0) }
-            for (const key of ['written','skipped','reviewedCount','sourceCount','reviewedChunks']) {
+            for (const key of ['written','revised','deferred','created','skipped','reviewedCount','sourceCount','reviewedChunks','searchCount']) {
                 if (Number.isSafeInteger(result?.[key]) && result[key] >= 0) {
                     safe[key] = result[key]
                 }
@@ -121,6 +121,35 @@ function createUserDiaryRouter({ supabase } = {}) {
         } catch (_) {
             return res.status(503).json({ ok: false, code: 'diary_read_unavailable' })
         }
+    })
+    // Immutable snapshots; authenticated owner only. The browser cannot
+    // query diary_revisions directly because its table is service-only.
+    router.get('/:id/revisions', async (req, res) => {
+        if (!supabase || !req.userId) return res.status(503).json({ ok:false })
+        if (!UUID_RE.test(req.params.id || '')) return res.status(400).json({ok:false,code:'invalid_id'})
+        try {
+            const result = await supabase.from('diary_revisions')
+                .select('version,kind,created_at')
+                .eq('diary_id',req.params.id).eq('user_id',req.userId).eq('agent_id','star')
+                .order('version',{ascending:false}).limit(100)
+            if (result.error) throw new Error()
+            return res.set('Cache-Control','no-store').json({ok:true,revisions:result.data||[]})
+        } catch (_) { return res.status(503).json({ok:false,code:'diary_read_unavailable'}) }
+    })
+    router.get('/:id/revisions/:version', async (req, res) => {
+        if (!supabase || !req.userId) return res.status(503).json({ok:false})
+        const version = Number(req.params.version)
+        if (!UUID_RE.test(req.params.id||'') || !Number.isSafeInteger(version) ||
+            version<1 || version>10000) return res.status(400).json({ok:false,code:'invalid_revision'})
+        try {
+            const result = await supabase.from('diary_revisions')
+                .select('version,kind,title,body,topics,created_at')
+                .eq('diary_id',req.params.id).eq('user_id',req.userId).eq('agent_id','star')
+                .eq('version',version).maybeSingle()
+            if (result.error) throw new Error()
+            if (!result.data) return res.status(404).json({ok:false,code:'not_found'})
+            return res.set('Cache-Control','no-store').json({ok:true,revision:result.data})
+        } catch (_) { return res.status(503).json({ok:false,code:'diary_read_unavailable'}) }
     })
     router.get('/:id', async (req, res) => {
         if (!supabase || !req.userId) return res.status(503).json({ ok: false })

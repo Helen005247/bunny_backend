@@ -307,16 +307,15 @@ test('two concurrent calls cannot both write the same scope', async () => {
     assert.ok([a,b].some(r=>r.status==='failed' || r.processed===false))
 })
 
-test('daily review catchup runs independent from Cognition; honors prior coverage', async () => {
+test('legacy explicit date backfill remains independent from Cognition after v2 upgrade', async () => {
     const db=makeDb([row(1),row(2)])
     const model=mockWriter({shouldWrite:false})
     const result=await runDiaryTick({supabase:db,userId:USER,
-        triggerType:'daily',now:NOW,getSettings,callModel:model.callModel})
-    assert.equal(result.status,'completed')
-    assert.equal(result.processed,2)
-    assert.equal(result.written,0)
-    assert.equal(result.skipped,2)
-    assert.ok(db.tables.diary_review_jobs.every((j)=>j.status==='skipped'))
+        triggerType:'backfill',startDate:'2026-10-16',endDate:'2026-10-16',
+        now:NOW,getSettings,callModel:model.callModel})
+    assert.equal(result.status,'skipped')
+    assert.equal(result.processed,true)
+    assert.equal(db.tables.diary_review_jobs[0].status,'skipped')
 })
 
 test('diary recall searches old birthday entries and isolates user / agent',async () => {
