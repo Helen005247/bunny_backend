@@ -22,7 +22,7 @@ function makeDb() {
   const tables={agent_diary:[],diary_topics:[],messages:[],call_sessions:[],
     diary_acceptance_chunk_cache:[],diary_acceptance_rollup_cache:[],
     diary_review_material_cache:[],diary_review_jobs:[],
-    diary_revisions:[],diary_review_actions:[]}
+    diary_revisions:[],diary_review_actions:[],diary_acceptance_plans:[]}
   class Query {
     constructor(name){this.name=name;this.filters=[];this.limitNum=Infinity;this.orders=[];this.fields='*'}
     select(fields){this.fields=fields||'*';return this}
@@ -36,6 +36,15 @@ function makeDb() {
     gte(k,v){this.filters.push(row=>row[k]>=v);return this}
     lt(k,v){this.filters.push(row=>row[k]<v);return this}
     lte(k,v){this.filters.push(row=>row[k]<=v);return this}
+    insert(record){this.toInsert=record;return this}
+    async single(){
+      if(!this.toInsert)throw new Error('single_no_insert')
+      if(this.name!=='diary_acceptance_plans')throw new Error('production_write_violation')
+      const row={...this.toInsert,id:crypto.randomUUID()}
+      tables[this.name].push(row)
+      calls.push({kind:'insert',table:this.name,record:row})
+      return {data:{id:row.id},error:null}
+    }
     async upsert(record,opts){
       calls.push({kind:'upsert',table:this.name,record})
       if(!['diary_acceptance_chunk_cache','diary_acceptance_rollup_cache'].includes(this.name))
@@ -77,7 +86,7 @@ test('mode input validation protects ordinary scheduled daily and manually selec
   const common={endpoint:URL,userId:USER,secret:SECRET,startDate:'',endDate:'',topicHint:''}
   assert.equal(assertConfig({...common,acceptanceMode:'off'}),URL)
   assert.equal(assertConfig({...common,startDate:'2026-10-15',endDate:'2026-10-15'}),URL)
-  assert.throws(()=>assertConfig({...common,acceptanceMode:'preview'}),/preview requires/)
+  assert.throws(()=>assertConfig({...common,acceptanceMode:'preview'}),/V2 manual mode requires/)
   assert.equal(assertConfig({...common,acceptanceMode:'preview',startDate:'2026-10-15',endDate:'2026-10-15'}),URL)
   assert.equal(assertConfig({...common,acceptanceMode:'probe'}),URL)
   assert.throws(()=>assertConfig({...common,acceptanceMode:'probe',startDate:'2026-10-15'}),/probe requires/)
@@ -90,7 +99,11 @@ test('real-history preview only writes acceptance checkpoints, never diary/topic
     assert.equal(opts.window.topicHint,'生日')
     await opts.storeReviewedChunk({index:1,hash:'a'.repeat(64),observations:['真实聊天观察']})
     await opts.storeReviewedRollup({index:1,hash:'b'.repeat(64),observations:['一件事']})
-    return {actions:[{kind:'create'},{kind:'defer'}],evidence:{},
+    return {actions:[
+      {kind:'create',anchor_id:'m1',topic_label:'礼物',evidence_ids:['m1'],
+        title:'记录',body:'这是一段测试日记正文，有足够的长度，仅用于预演和确认测试。',topics:['生日']},
+      {kind:'defer',anchor_id:'m2',topic_label:'后续',evidence_ids:['m2'],note:''}
+    ],evidence:assembleEvidence(source().rows,[]),
       reviewDone:1,reviewTotal:1,rollupDone:1,rollupTotal:1,
       cacheHits:0,modelCalls:2,searchCount:2}
   }
@@ -102,6 +115,8 @@ test('real-history preview only writes acceptance checkpoints, never diary/topic
   assert.equal(result.sourceCount,2)
   assert.equal(db.tables.diary_acceptance_chunk_cache.length,1)
   assert.equal(db.tables.diary_acceptance_rollup_cache.length,1)
+  assert.equal(db.tables.diary_acceptance_plans.length,1)
+  assert.ok(result.planId && result.planDigest)
   assert.equal(db.calls.filter(c=>c.kind==='upsert').length,2)
   assert.deepEqual(db.calls.filter(c=>c.kind==='upsert').map(c=>c.table),
     ['diary_acceptance_chunk_cache','diary_acceptance_rollup_cache'])
@@ -122,7 +137,7 @@ test('preview partial checkpoints resume for same owner and time range; other us
     writer:async opts=>{
       assert.equal(opts.cachedChunks.length,1)
       assert.equal(opts.cachedChunks[0].observations[0],'memo')
-      return {actions:[],reviewDone:2,reviewTotal:2,rollupDone:0,
+      return {actions:[],evidence:assembleEvidence([],[]),reviewDone:2,reviewTotal:2,rollupDone:0,
         rollupTotal:0,cacheHits:1,modelCalls:1}
     }})
   assert.equal(two.status,'previewed')
@@ -131,7 +146,7 @@ test('preview partial checkpoints resume for same owner and time range; other us
   const three=await runAcceptancePreview({...BASE,userId:OTHER,supabase:db,
     reader:async()=>source(),writer:async opts=>{
       assert.equal(opts.cachedChunks.length,0)
-      return {actions:[],reviewDone:0,reviewTotal:0}
+      return {actions:[],evidence:assembleEvidence([],[]),reviewDone:0,reviewTotal:0}
     }})
   assert.equal(three.status,'previewed')
 })

@@ -25,6 +25,10 @@ const ERROR_CODES = new Set([
     'source_context_limit_exceeded','source_context_mismatch',
     'source_context_character_limit_exceeded','acceptance_preview_partial',
     'acceptance_probe_failed',
+    'verify_search_no_hits','verify_context_missing','verify_revision_mismatch',
+    'verify_recall_unavailable','diary_plan_missing','diary_readback_failed',
+    'diary_plan_expired','diary_plan_not_found_or_mismatch',
+    'diary_manual_scope_already_processed','diary_evidence_changed',
 ])
 
 function safeErrorCode(error) {

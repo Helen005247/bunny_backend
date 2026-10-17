@@ -9,6 +9,7 @@ const { getWindow, validTimeZone } = require('./diaryWindows')
 const { readDiaryMessages } = require('./diaryReader')
 const { loadDiaryCandidates } = require('./diaryAutonomyService')
 const { planAutonomousDiary, newReviewBudget } = require('./diaryAutonomyWriter')
+const {saveDiaryPreviewPlan,commitDiaryPreviewPlan} = require('./diaryPlanStore')
 
 const MAX_ACCEPTANCE_CHUNKS = 320
 const MAX_ACCEPTANCE_ROLLUPS = 64
@@ -42,7 +43,7 @@ function countKinds(actions) {
 async function runAcceptancePreview({supabase,getSettings,callModel,userId,
     agentId='star',startDate,endDate,topicHint='',now=new Date(),
     reader=readDiaryMessages,writer=planAutonomousDiary,
-    budgetFactory=()=>newReviewBudget()}={}) {
+    budgetFactory=()=>newReviewBudget(),savePlan=saveDiaryPreviewPlan}={}) {
     if(!supabase?.from || typeof getSettings!=='function' ||
         typeof callModel!=='function' || !userId || agentId!=='star' ||
         typeof startDate!=='string' || typeof endDate!=='string' ||
@@ -107,7 +108,11 @@ async function runAcceptancePreview({supabase,getSettings,callModel,userId,
         rollupTotal:plan.rollupTotal||0}
     if(plan.partial) return {...progress,status:'partial',processed:0,
         errorCode:'acceptance_preview_partial'}
-    return {...progress,status:'previewed',processed:1,
+    const saved=await savePlan({supabase,userId,agentId,window:{...window,topicHint:topicHint.trim()},
+        scopeHash,actions:plan.actions||[],evidence:plan.evidence,
+        sourceMessages:source.includedCount,searchHits:plan.searchCount||0})
+    return {...progress,status:'previewed',processed:1,modelVerified:1,
+        planId:saved.planId,planDigest:saved.planDigest,
         searchCount:plan.searchCount||0,...countKinds(plan.actions||[])}
 }
 
@@ -138,4 +143,19 @@ async function runAcceptanceProbe({supabase,userId,agentId='star'}={}) {
         ...Object.fromEntries(keys.map(k=>[k,1])),rolledBack:1}
 }
 
-module.exports={runAcceptancePreview,runAcceptanceProbe,acceptanceHash,countKinds}
+async function runManualV2Live(options={}) {
+    // Explicit workflow opt-in: the *same* autonomous writer / source search is
+    // used as preview, then its immutable plan is committed with the real RPC.
+    const preview=await runAcceptancePreview(options)
+    if(preview.status==='partial') return {...preview,mode:'manual_v2_live'}
+    if(preview.status!=='previewed' || !preview.planId || !preview.planDigest)
+        throw new Error('diary_plan_missing')
+    const committed=await commitDiaryPreviewPlan({supabase:options.supabase,
+        userId:options.userId,agentId:options.agentId||'star',
+        planId:preview.planId,planDigest:preview.planDigest})
+    return {...preview,...committed,mode:'manual_v2_live',modelVerified:1,
+        status:committed.status}
+}
+
+module.exports={runAcceptancePreview,runAcceptanceProbe,runManualV2Live,
+    acceptanceHash,countKinds}

@@ -3,29 +3,44 @@ run-name: Diary review (${{ github.event_name }})
 
 on:
   schedule:
-    # Once daily, UTC. User-local previous day is derived by the backend.
+    # Original daily schedule unchanged. No acceptance modes in scheduled runs.
     - cron: '17 11 * * *'
   workflow_dispatch:
     inputs:
       acceptance_mode:
-        description: 'off=normal diary; preview=real-history V2 read/search without diary writes; probe=rollback-only DB tests'
+        description: 'off=normal | preview=save V2 plan | verify=read/search/probes | live=write V2 | commit=confirm saved plan | probe=old rollback probe'
         required: false
         default: off
         type: choice
         options:
           - off
           - preview
+          - verify
+          - live
+          - commit
           - probe
       start_date:
-        description: 'Backfill date OR V2 preview first day, YYYY-MM-DD'
+        description: 'Historical start date for preview/live, YYYY-MM-DD; off uses legacy backfill'
         required: false
         type: string
       end_date:
-        description: 'Backfill date OR V2 preview last day, YYYY-MM-DD (inclusive, max 4 days)'
+        description: 'Historical end date for preview/live, YYYY-MM-DD (max 4 days)'
         required: false
         type: string
       topic_hint:
-        description: 'Optional diary theme, e.g. birthday; never a substitute for messages'
+        description: 'Optional historical clue in preview/live; REQUIRED search keyword in verify'
+        required: false
+        type: string
+      plan_id:
+        description: 'Only for commit: UUID from saved preview result'
+        required: false
+        type: string
+      plan_digest:
+        description: 'Only for commit: full 64-character plan fingerprint from preview result'
+        required: false
+        type: string
+      confirm_write:
+        description: 'Only for commit: type WRITE to confirm permanent diary change'
         required: false
         type: string
 
@@ -47,7 +62,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Review diary or backfill chosen days
+      - name: Review diary or verify V2
         env:
           DIARY_ENDPOINT: https://bunny-backend-19g1.onrender.com/internal/diary/tick
           COGNITION_USER_ID: ${{ secrets.COGNITION_USER_ID }}
@@ -56,4 +71,7 @@ jobs:
           DIARY_START_DATE: ${{ inputs.start_date }}
           DIARY_END_DATE: ${{ inputs.end_date }}
           DIARY_TOPIC_HINT: ${{ inputs.topic_hint }}
+          DIARY_PLAN_ID: ${{ inputs.plan_id }}
+          DIARY_PLAN_DIGEST: ${{ inputs.plan_digest }}
+          DIARY_CONFIRM_WRITE: ${{ inputs.confirm_write }}
         run: node scripts/diary-review.js

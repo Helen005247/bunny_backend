@@ -4,17 +4,20 @@ const express = require('express')
 const crypto = require('crypto')
 const { secureEqual } = require('./cognition')
 const { runDiaryTick, safeErrorCode } = require('../services/diary/diaryService')
-const { runAcceptancePreview, runAcceptanceProbe } = require('../services/diary/diaryAcceptance')
+const { runAcceptancePreview, runAcceptanceProbe, runManualV2Live } = require('../services/diary/diaryAcceptance')
+const {commitDiaryPreviewPlan} = require('../services/diary/diaryPlanStore')
+const {runDiaryV2Verification} = require('../services/diary/diaryVerification')
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const VALID_STATUSES = new Set(['written','skipped','failed','completed','processing',
     'covered','unavailable','conflict','revised','deferred','partial',
-    'previewed','verified'])
+    'previewed','verified','committed','already_committed'])
 
 function createInternalDiaryRouter({ supabase, callModel, getSettings,
     expectedSecret = process.env.COGNITION_TICK_SECRET,
     runTick = runDiaryTick, runPreview = runAcceptancePreview,
-    runProbe = runAcceptanceProbe } = {}) {
+    runProbe = runAcceptanceProbe, runLive = runManualV2Live,
+    runCommit = commitDiaryPreviewPlan, runVerify = runDiaryV2Verification } = {}) {
     const router = express.Router()
     // Model review can take several minutes across many chunks. The initiating
     // HTTP call returns immediately; GitHub polls until a terminal result.
@@ -63,15 +66,29 @@ function createInternalDiaryRouter({ supabase, callModel, getSettings,
             return res.status(503).json({ ok: false, code: 'diary_unavailable' })
         }
         const input = req.body || {}
+        const type=input.triggerType
+        const withDates=type==='acceptance_preview'||type==='manual_v2_live'
+        const noDates=type==='acceptance_probe'||type==='acceptance_commit'||
+            type==='acceptance_verify'||type==='daily'
         if (!UUID_RE.test(input.userId || '') ||
             (input.agentId !== undefined && input.agentId !== 'star') ||
-            !['daily','backfill','acceptance_preview','acceptance_probe'].includes(input.triggerType) ||
+            !['daily','backfill','acceptance_preview','acceptance_probe',
+              'manual_v2_live','acceptance_commit','acceptance_verify'].includes(type) ||
             (input.topicHint != null &&
-                (typeof input.topicHint !== 'string' || input.topicHint.length > 200)) ||
-            (input.triggerType==='acceptance_preview' &&
-                (typeof input.startDate!=='string' || typeof input.endDate!=='string')) ||
-            (input.triggerType==='acceptance_probe' &&
-                (input.startDate!=null || input.endDate!=null || input.topicHint))) {
+                (typeof input.topicHint !== 'string' || input.topicHint.length>200)) ||
+            (withDates && (typeof input.startDate!=='string' ||
+                typeof input.endDate!=='string' || !input.startDate || !input.endDate)) ||
+            (noDates && (input.startDate!=null || input.endDate!=null)) ||
+            (type==='acceptance_probe' && input.topicHint) ||
+            (type==='acceptance_verify' &&
+                (typeof input.topicHint!=='string' || input.topicHint.trim().length<2 ||
+                 input.topicHint.length>48)) ||
+            (type==='acceptance_commit' && (input.topicHint ||
+                !UUID_RE.test(input.planId||'') ||
+                !/^[0-9a-f]{64}$/.test(input.planDigest||'') ||
+                input.confirmWrite!==true)) ||
+            (type!=='acceptance_commit' && (input.planId!=null ||
+                input.planDigest!=null || input.confirmWrite!=null))) {
             return res.status(400).json({ ok: false, code: 'invalid_diary_input' })
         }
         purgeRuns()
@@ -87,28 +104,43 @@ function createInternalDiaryRouter({ supabase, callModel, getSettings,
                 topicHint:input.topicHint||''}
             const result = input.triggerType==='acceptance_preview'
                 ? await runPreview(common)
-                : input.triggerType==='acceptance_probe'
-                    ? await runProbe(common)
-                    : await runTick({...common,triggerType:input.triggerType})
+                : input.triggerType==='manual_v2_live'
+                    ? await runLive(common)
+                    : input.triggerType==='acceptance_probe'
+                        ? await runProbe(common)
+                        : input.triggerType==='acceptance_verify'
+                            ? await runVerify({...common,keyword:input.topicHint})
+                            : input.triggerType==='acceptance_commit'
+                                ? await runCommit({...common,planId:input.planId,
+                                    planDigest:input.planDigest})
+                                : await runTick({...common,triggerType:input.triggerType})
             const status = VALID_STATUSES.has(result?.status) ? result.status : 'failed'
             const safe = { ok: status !== 'failed', status,
-                ...(input.triggerType.startsWith('acceptance_')
-                    ? {mode:input.triggerType}:{}),
+                ...(['acceptance_preview','acceptance_probe','acceptance_verify',
+                    'acceptance_commit','manual_v2_live'].includes(type)
+                    ? {mode:type}:{}),
                 runId, processed: Number.isInteger(result?.processed) ? result.processed :
                     (result?.processed === true ? 1 : 0) }
             for (const key of ['written','revised','deferred','created','skipped','reviewedCount','sourceCount','reviewedChunks','cacheHits','searchCount','reviewDone','reviewTotal','rollupDone','rollupTotal','reused','modelCalls','previewCreate','previewAppend',
                 'previewRewrite','previewDefer','previewSkipped','probeCreate',
                 'probeAppend','probeRewrite','probeDefer','probeDuplicate',
-                'probeConflict','probeAtomic','rolledBack','probeStage']) {
+                'probeConflict','probeAtomic','rolledBack','probeStage',
+                'committedActions','dbVerified','modelVerified','liveWriteVerified',
+                'readbackVerified','twoCreateVerified','searchVerified',
+                'contextVerified','versionVerified','recallVerified','contextCount',
+                'revisionsChecked']) {
                 if (Number.isSafeInteger(result?.[key]) && result[key] >= 0) {
                     safe[key] = result[key]
                 }
             }
+            if(UUID_RE.test(result?.planId||'')) safe.planId=result.planId
+            if(/^[0-9a-f]{64}$/.test(result?.planDigest||'')) safe.planDigest=result.planDigest
             if (result?.probeSqlstate && /^[A-Z0-9]{5}$/.test(result.probeSqlstate))
                 safe.probeSqlstate=result.probeSqlstate
             if (result?.errorCode) safe.code = safeErrorCode({ code: result.errorCode })
-            if (status === 'partial') safe.code = input.triggerType==='acceptance_preview'
-                ? 'acceptance_preview_partial' : 'review_partial'
+            if (status === 'partial') safe.code =
+                ['acceptance_preview','manual_v2_live'].includes(type)
+                    ? 'acceptance_preview_partial' : 'review_partial'
             item.status = safe.ok ? 'done' : 'failed'
             item.safe = safe
         }).catch((error) => {
@@ -116,8 +148,9 @@ function createInternalDiaryRouter({ supabase, callModel, getSettings,
             console.warn(`[diary] tick failed; code=${code}`)
             item.status = 'failed'
             item.safe = { ok: false, status: 'failed', runId, code,
-                ...(input.triggerType.startsWith('acceptance_')
-                    ? {mode:input.triggerType}:{}) }
+                ...(['acceptance_preview','acceptance_probe','acceptance_verify',
+                    'acceptance_commit','manual_v2_live'].includes(type)
+                    ? {mode:type}:{}) }
         })
         return res.status(202).json({ ok: true, status: 'started', runId })
     })
@@ -126,6 +159,36 @@ function createInternalDiaryRouter({ supabase, callModel, getSettings,
 
 function createUserDiaryRouter({ supabase } = {}) {
     const router = express.Router()
+    // Authenticated owner-only preview plan APIs. Planned private prose is
+    // NEVER emitted into GitHub or Render logs; it is available here only
+    // after the normal requireAuth middleware sets req.userId.
+    router.get('/acceptance/plans', async (req,res) => {
+        if(!supabase || !req.userId) return res.status(503).json({ok:false})
+        try {
+            const result=await supabase.from('diary_acceptance_plans')
+                .select('id,status,scope_hash,plan_digest,start_date,end_date,created_at,expires_at,committed_at,actions')
+                .eq('user_id',req.userId).eq('agent_id','star')
+                .order('created_at',{ascending:false}).limit(12)
+            if(result.error) throw new Error()
+            const plans=(result.data||[]).map(({actions,...row})=>({...row,
+                actionKinds:Array.isArray(actions)?actions.map(a=>a.kind):[]}))
+            return res.set('Cache-Control','no-store').json({ok:true,plans})
+        } catch(_) {return res.status(503).json({ok:false,code:'diary_read_unavailable'})}
+    })
+    router.get('/acceptance/plans/:id', async (req,res) => {
+        if(!supabase || !req.userId) return res.status(503).json({ok:false})
+        if(!UUID_RE.test(req.params.id||''))
+            return res.status(400).json({ok:false,code:'invalid_id'})
+        try {
+            const result=await supabase.from('diary_acceptance_plans')
+                .select('id,status,plan_digest,start_date,end_date,topic_hint,actions,evidence_refs,source_messages,search_hits,created_at,expires_at,committed_at')
+                .eq('user_id',req.userId).eq('agent_id','star').eq('id',req.params.id)
+                .maybeSingle()
+            if(result.error) throw new Error()
+            if(!result.data)return res.status(404).json({ok:false,code:'not_found'})
+            return res.set('Cache-Control','no-store').json({ok:true,plan:result.data})
+        } catch(_) {return res.status(503).json({ok:false,code:'diary_read_unavailable'})}
+    })
     router.get('/', async (req, res) => {
         if (!supabase || !req.userId) return res.status(503).json({ ok: false })
         const limit = req.query?.limit == null ? 20 : Number(req.query.limit)
