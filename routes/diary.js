@@ -242,26 +242,61 @@ function createUserDiaryRouter({ supabase } = {}) {
         }
     })
 
-    // Immutable snapshots; authenticated owner only. The browser cannot
-    // query diary_revisions directly because its table is service-only.
+    // A revision's copied user_id is not sufficient authorization: verify
+    // ownership against the parent diary before returning ANY history.
+    async function ownsDiary(diaryId, userId) {
+        const result = await supabase.from('agent_diary')
+            .select('id').eq('id',diaryId).eq('user_id',userId)
+            .eq('agent_id','star').maybeSingle()
+        if (result.error) throw new Error('diary_owner_lookup_failed')
+        return Boolean(result.data)
+    }
+
+    // V3-3: revision metadata only, owner + Star filtered, ordered by the
+    // immutable (diary_id, version) key. Fetch one extra row for pagination:
+    // old revisions must not silently disappear when an entry has >100 edits.
+    // Version bodies remain on the separate, individually requested endpoint.
     router.get('/:id/revisions', async (req, res) => {
         if (!supabase || !req.userId) return res.status(503).json({ ok:false })
         if (!UUID_RE.test(req.params.id || '')) return res.status(400).json({ok:false,code:'invalid_id'})
+        const rawLimit = req.query?.limit === undefined ? '40' : req.query.limit
+        const rawOffset = req.query?.offset === undefined ? '0' : req.query.offset
+        if (typeof rawLimit !== 'string' || typeof rawOffset !== 'string' ||
+            !/^\d{1,6}$/.test(rawLimit) || !/^\d{1,6}$/.test(rawOffset)) {
+            return res.status(400).json({ok:false,code:'invalid_revision_page'})
+        }
+        const limit = Number(rawLimit)
+        const offset = Number(rawOffset)
+        if (limit < 1 || limit > 100 || offset < 0 || offset > 100000) {
+            return res.status(400).json({ok:false,code:'invalid_revision_page'})
+        }
         try {
+            if (!await ownsDiary(req.params.id, req.userId)) {
+                return res.status(404).json({ok:false,code:'not_found'})
+            }
             const result = await supabase.from('diary_revisions')
                 .select('version,kind,created_at')
                 .eq('diary_id',req.params.id).eq('user_id',req.userId).eq('agent_id','star')
-                .order('version',{ascending:false}).limit(100)
-            if (result.error) throw new Error()
-            return res.set('Cache-Control','no-store').json({ok:true,revisions:result.data||[]})
+                .order('version',{ascending:false}).range(offset,offset+limit)
+            if (result.error || !Array.isArray(result.data)) throw new Error()
+            const hasMore = result.data.length > limit
+            const revisions = result.data.slice(0,limit)
+            return res.set('Cache-Control','private, no-store').json({
+                ok:true,revisions,hasMore,nextOffset:offset+revisions.length,
+            })
         } catch (_) { return res.status(503).json({ok:false,code:'diary_read_unavailable'}) }
     })
     router.get('/:id/revisions/:version', async (req, res) => {
         if (!supabase || !req.userId) return res.status(503).json({ok:false})
-        const version = Number(req.params.version)
-        if (!UUID_RE.test(req.params.id||'') || !Number.isSafeInteger(version) ||
-            version<1 || version>10000) return res.status(400).json({ok:false,code:'invalid_revision'})
+        const versionText = req.params.version
+        const version = Number(versionText)
+        if (!UUID_RE.test(req.params.id||'') || !/^\d{1,10}$/.test(versionText || '') ||
+            !Number.isSafeInteger(version) ||
+            version<1 || version>2147483647) return res.status(400).json({ok:false,code:'invalid_revision'})
         try {
+            if (!await ownsDiary(req.params.id, req.userId)) {
+                return res.status(404).json({ok:false,code:'not_found'})
+            }
             const result = await supabase.from('diary_revisions')
                 .select('version,kind,title,body,topics,created_at')
                 .eq('diary_id',req.params.id).eq('user_id',req.userId).eq('agent_id','star')
@@ -278,7 +313,7 @@ function createUserDiaryRouter({ supabase } = {}) {
         }
         try {
             const { data, error } = await supabase.from('agent_diary')
-                .select('id, title, body, topics, period_start, period_end, timezone, created_at, source_message_count')
+                .select('id, title, body, topics, period_start, period_end, timezone, created_at, updated_at, current_version, source_message_count')
                 .eq('id', req.params.id).eq('user_id', req.userId).eq('agent_id', 'star')
                 .maybeSingle()
             if (error) throw new Error()
