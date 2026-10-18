@@ -4,6 +4,7 @@ const crypto = require('crypto')
 const { getWindow, validTimeZone } = require('./diaryWindows')
 const { readDiaryMessages } = require('./diaryReader')
 const { reviewAndWriteDiary } = require('./diaryWriter')
+const { reviewStarDiaryPrivacy } = require('./diaryPrivacy')
 
 const { runAutonomousDailyTick, CATCHUP_DAYS, MAX_DAILY_JOBS_PER_TICK } =
     require('./diaryAutonomyService')
@@ -178,7 +179,21 @@ async function runDiaryTick({ supabase, userId, agentId = 'star',
     }
     // Diary v2: the daily schedule selects topics and evidence, not a diary date.
     // Legacy manual backfills above retain their previous date-based behavior.
-    return runAutonomousDailyTick({ ...common, now })
+    const outcome = await runAutonomousDailyTick({ ...common, now })
+    // Privacy choices are Star's own, made during the trusted daily background
+    // diary task. An outage here must not roll back or falsify diary writes.
+    // Never run the private model pass on partial/failed review jobs.
+    if (outcome?.status === 'completed') {
+        try {
+            await reviewStarDiaryPrivacy({ supabase, userId, agentId,
+                callModel, settings, now })
+        } catch (_) {
+            // No personal text, model decisions, identifiers or raw DB errors
+            // in scheduler/Render logs. The next daily tick can retry.
+            console.warn('[diary] private visibility review unavailable')
+        }
+    }
+    return outcome
 }
 
 module.exports = { runWindow, runDiaryTick, getScopeKey, safeErrorCode,
