@@ -7,6 +7,7 @@ const { runDiaryTick, safeErrorCode } = require('../services/diary/diaryService'
 const { runAcceptancePreview, runAcceptanceProbe, runManualV2Live } = require('../services/diary/diaryAcceptance')
 const {commitDiaryPreviewPlan} = require('../services/diary/diaryPlanStore')
 const {runDiaryV2Verification} = require('../services/diary/diaryVerification')
+const { parseMonthQuery, monthUtcSearchBounds, monthCalendarEntries } = require('../services/diary/diaryCalendar')
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const VALID_STATUSES = new Set(['written','skipped','failed','completed','processing',
@@ -206,6 +207,41 @@ function createUserDiaryRouter({ supabase } = {}) {
             return res.status(503).json({ ok: false, code: 'diary_read_unavailable' })
         }
     })
+    // V3-2: read-only month index. The ordinary /api/diary and /:id routes
+    // remain unchanged. Authentication is inherited from server.js requireAuth.
+    // All queries constrain BOTH the verified owner and the Star persona.
+    router.get('/month', async (req, res) => {
+        if (!supabase || !req.userId) {
+            return res.status(503).json({ ok: false, code: 'diary_unavailable' })
+        }
+        const input = parseMonthQuery(req.query)
+        if (!input) {
+            return res.status(400).json({ ok: false, code: 'invalid_month_query' })
+        }
+        const { year, month, limit, offset } = input
+        const { start, end } = monthUtcSearchBounds(year, month)
+        try {
+            const result = await supabase.from('agent_diary')
+                .select('id,title,created_at,updated_at,timezone')
+                .eq('user_id', req.userId).eq('agent_id', 'star')
+                .gte('created_at', start).lt('created_at', end)
+                .order('created_at', { ascending: false })
+                .order('id', { ascending: false })
+                .range(offset, offset + limit - 1)
+            if (result.error || !Array.isArray(result.data)) throw new Error()
+            const entries = monthCalendarEntries(result.data, year, month)
+            // nextOffset counts database rows BEFORE local-month filtering.
+            // This prevents skipped pages near timezone boundaries.
+            return res.set('Cache-Control', 'private, no-store').json({
+                ok: true, entries,
+                nextOffset: offset + result.data.length,
+                hasMore: result.data.length === limit,
+            })
+        } catch (_) {
+            return res.status(503).json({ ok: false, code: 'diary_read_unavailable' })
+        }
+    })
+
     // Immutable snapshots; authenticated owner only. The browser cannot
     // query diary_revisions directly because its table is service-only.
     router.get('/:id/revisions', async (req, res) => {
