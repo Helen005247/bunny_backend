@@ -1,5 +1,7 @@
 'use strict'
 
+const { buildSharedUserDiaryChatContext, sharedDiaryIntent } = require('./personalDiaryRecall')
+
 // Star's Diary: lightweight awareness on every Star chat, full DB-backed
 // reading only when the conversation calls for it. Never silently truncate a
 // diary and never treat its prose as executable instructions.
@@ -137,7 +139,7 @@ function validateEntryBody(entry) {
 // mode=awareness: Star knows that a diary exists, but no body was read.
 // mode=full: complete, untruncated stored diary body was provided to the model.
 // mode=not_found/unavailable: the model receives an honest retrieval status.
-async function buildDiaryChatContext({ supabase, userId, agentId = 'star',
+async function buildStarOnlyDiaryChatContext({ supabase, userId, agentId = 'star',
     message, channel = 'text', recentMessages = [], maxEntries = 1 } = {}) {
     const empty = { context:'', matched:0, mode:'none', fullChars:0 }
     if (!supabase || !userId || agentId !== 'star' ||
@@ -271,6 +273,32 @@ async function buildDiaryChatContext({ supabase, userId, agentId = 'star',
     } catch (_) {
         return {context: wantsFull ? diaryStatusContext('unavailable') : '',
             matched:0, mode:'unavailable',fullChars:0, unavailable:true}
+    }
+}
+
+// The existing server.js already invokes buildDiaryChatContext for Star's
+// authenticated chat. Extend that hook WITHOUT replacing the large server
+// file or changing any autonomous diary-writing workflow.
+async function buildDiaryChatContext(input = {}) {
+    const { message, recentMessages = [], agentId = 'star', channel = 'text' } = input
+    const intent = sharedDiaryIntent(message, recentMessages)
+    const canReadShared = agentId === 'star' && ['text', 'voice'].includes(channel)
+    // An explicit question about the owner's diary must not accidentally
+    // retrieve Star's own similarly named diary and misattribute authorship.
+    const own = intent.mineOnly && canReadShared
+        ? { context: '', matched: 0, mode: 'none', fullChars: 0 }
+        : await buildStarOnlyDiaryChatContext(input)
+    const personal = intent.wantsMine && canReadShared
+        ? await buildSharedUserDiaryChatContext(input)
+        : { context: '', matched: 0, mode: 'none', fullChars: 0 }
+    const contexts = [own.context, personal.context].filter(Boolean)
+    return {
+        context: contexts.join('\n\n'),
+        matched: (own.matched || 0) + (personal.matched || 0),
+        fullChars: (own.fullChars || 0) + (personal.fullChars || 0),
+        mode: [own, personal].some(result => result.mode === 'full') ? 'full'
+            : personal.mode !== 'none' ? personal.mode : own.mode,
+        unavailable: Boolean(own.unavailable || personal.unavailable),
     }
 }
 
