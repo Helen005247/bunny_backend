@@ -156,6 +156,9 @@ async function buildStarOnlyDiaryChatContext({ supabase, userId, agentId = 'star
     const needsSearch = listing || wantsFull
     const base = (fields = META_FIELDS) => supabase.from('agent_diary')
         .select(fields).eq('user_id',userId).eq('agent_id',agentId)
+        // This context is sent to user-visible chat. Star's private/locked
+        // diaries must not enter the model input, not even as titles.
+        .eq('visibility','shared')
 
     try {
         const recent = await base().order('updated_at', {ascending:false}).order('created_at', {ascending:false})

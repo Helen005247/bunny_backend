@@ -20,7 +20,7 @@ function row(p = {}) {
 function starRow(p = {}) {
     return {
         id: 'e92f63d6-f55e-495b-9494-6377c0fb5d9f', user_id: OWNER,
-        agent_id: 'star', title: '星星自己的日记', body: '这篇只属于星星。',
+        agent_id: 'star', visibility: 'shared', title: '星星自己的日记', body: '这篇只属于星星。',
         period_start: '2026-10-17T00:00:00.000Z',
         period_end: '2026-10-18T00:00:00.000Z',
         created_at: '2026-10-18T00:01:00Z', updated_at: '2026-10-18T00:01:00Z',

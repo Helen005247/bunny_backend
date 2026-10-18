@@ -203,6 +203,7 @@ function createUserDiaryRouter({ supabase } = {}) {
             const { data, error } = await supabase.from('agent_diary')
                 .select('id, title, topics, period_start, period_end, timezone, created_at')
                 .eq('user_id', req.userId).eq('agent_id', 'star')
+                .eq('visibility', 'shared')
                 .order('created_at', { ascending: false }).limit(limit)
             if (error) throw new Error()
             return res.set('Cache-Control','no-store').json({ ok: true, entries: data || [] })
@@ -227,6 +228,7 @@ function createUserDiaryRouter({ supabase } = {}) {
             const result = await supabase.from('agent_diary')
                 .select('id,title,created_at,updated_at,timezone')
                 .eq('user_id', req.userId).eq('agent_id', 'star')
+                .eq('visibility', 'shared')
                 .gte('created_at', start).lt('created_at', end)
                 .order('created_at', { ascending: false })
                 .order('id', { ascending: false })
@@ -250,7 +252,7 @@ function createUserDiaryRouter({ supabase } = {}) {
     async function ownsDiary(diaryId, userId) {
         const result = await supabase.from('agent_diary')
             .select('id').eq('id',diaryId).eq('user_id',userId)
-            .eq('agent_id','star').maybeSingle()
+            .eq('agent_id','star').eq('visibility','shared').maybeSingle()
         if (result.error) throw new Error('diary_owner_lookup_failed')
         return Boolean(result.data)
     }
@@ -282,6 +284,10 @@ function createUserDiaryRouter({ supabase } = {}) {
                 .eq('diary_id',req.params.id).eq('user_id',req.userId).eq('agent_id','star')
                 .order('version',{ascending:false}).range(offset,offset+limit)
             if (result.error || !Array.isArray(result.data)) throw new Error()
+            // Parent can have become locked while the revision query was running.
+            if (!await ownsDiary(req.params.id, req.userId)) {
+                return res.status(404).json({ok:false,code:'not_found'})
+            }
             const hasMore = result.data.length > limit
             const revisions = result.data.slice(0,limit)
             return res.set('Cache-Control','private, no-store').json({
@@ -305,7 +311,9 @@ function createUserDiaryRouter({ supabase } = {}) {
                 .eq('diary_id',req.params.id).eq('user_id',req.userId).eq('agent_id','star')
                 .eq('version',version).maybeSingle()
             if (result.error) throw new Error()
-            if (!result.data) return res.status(404).json({ok:false,code:'not_found'})
+            if (!result.data || !await ownsDiary(req.params.id, req.userId)) {
+                return res.status(404).json({ok:false,code:'not_found'})
+            }
             return res.set('Cache-Control','no-store').json({ok:true,revision:result.data})
         } catch (_) { return res.status(503).json({ok:false,code:'diary_read_unavailable'}) }
     })
@@ -318,7 +326,7 @@ function createUserDiaryRouter({ supabase } = {}) {
             const { data, error } = await supabase.from('agent_diary')
                 .select('id, title, body, topics, period_start, period_end, timezone, created_at, updated_at, current_version, source_message_count')
                 .eq('id', req.params.id).eq('user_id', req.userId).eq('agent_id', 'star')
-                .maybeSingle()
+                .eq('visibility', 'shared').maybeSingle()
             if (error) throw new Error()
             if (!data) return res.status(404).json({ ok: false, code: 'not_found' })
             return res.set('Cache-Control','no-store').json({ ok: true, entry: data })

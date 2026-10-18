@@ -134,6 +134,42 @@ function createPersonalDiaryRouter({ supabase } = {}) {
             return res.status(503).json({ ok: false, code: 'diary_write_unavailable' })
         }
     })
+    // V3-5 Step 1: only the human author can lock/unlock their own diary.
+    // Star's private diary is NOT controllable through this endpoint.
+    // POST is consistent with Hermit's existing CORS configuration.
+    router.post('/:date/visibility', async (req, res) => {
+        const date = localDiaryDate(req.params.date)
+        if (!date) return res.status(400).json({ ok: false, code: 'invalid_date' })
+        const input = req.body
+        if (!input || typeof input !== 'object' || Array.isArray(input) ||
+            Object.keys(input).length !== 2 ||
+            !Object.hasOwn(input, 'visibility') ||
+            !Object.hasOwn(input, 'expected_version') ||
+            !['shared', 'locked'].includes(input.visibility) ||
+            !Number.isSafeInteger(input.expected_version) ||
+            input.expected_version < 1 || input.expected_version > 2147483646) {
+            return res.status(400).json({ ok: false, code: 'invalid_visibility_input' })
+        }
+        try {
+            const result = await supabase.from('user_diary')
+                .update({ visibility: input.visibility })
+                .eq('user_id', req.userId).eq('diary_date', date)
+                .eq('edit_version', input.expected_version)
+                .select(OUTPUT_FIELDS).maybeSingle()
+            if (result.error) throw new Error('visibility_update_failed')
+            if (result.data) return res.json({ ok: true, entry: result.data })
+
+            // Same semantics as editing: a missing day is different from
+            // stale expected_version, and neither should overwrite anything.
+            const check = await supabase.from('user_diary').select('id')
+                .eq('user_id', req.userId).eq('diary_date', date).maybeSingle()
+            if (check.error) throw new Error('visibility_check_failed')
+            if (!check.data) return res.status(404).json({ ok: false, code: 'not_found' })
+            return res.status(409).json({ ok: false, code: 'diary_edit_conflict' })
+        } catch (_) {
+            return res.status(503).json({ ok: false, code: 'diary_write_unavailable' })
+        }
+    })
     return router
 }
 
