@@ -7,7 +7,7 @@ const crypto = require('node:crypto')
 
 function loadTickService({ tickResult, privacyResult } = {}) {
   const code=fs.readFileSync(path.resolve(__dirname,'../services/diary/diaryService.js'),'utf8')
-  const calls={tick:0,privacy:0}
+  const calls={tick:0,privacy:0,annotation:0}
   const day = {
     runAutonomousDailyTick: async ()=>{calls.tick++; return tickResult},
     CATCHUP_DAYS:14,MAX_DAILY_JOBS_PER_TICK:1,
@@ -19,6 +19,7 @@ function loadTickService({ tickResult, privacyResult } = {}) {
     './diaryWriter':{ reviewAndWriteDiary:async()=>({}) },
     './diaryAutonomyService':day,
     './diaryPrivacy':{ reviewStarDiaryPrivacy:async()=>{calls.privacy++; if(privacyResult instanceof Error)throw privacyResult; return privacyResult} },
+    './diaryAnnotationsAutonomy':{reviewStarDiaryAnnotations:async()=>{calls.annotation++}},
   }
   const entry={exports:{}}
   new Function('module','exports','require',code)(entry,entry.exports,(name)=>{
@@ -38,14 +39,14 @@ test('daily success triggers exactly one separate Star privacy review',async()=>
   const svc=loadTickService({tickResult:{status:'completed',processed:1,written:2},privacyResult:{status:'reviewed'}})
   const result=await svc.runDiaryTick(COMMON)
   assert.deepEqual(result,{status:'completed',processed:1,written:2})
-  assert.deepEqual(svc.calls,{tick:1,privacy:1})
+  assert.deepEqual(svc.calls,{tick:1,privacy:1,annotation:1})
 })
 test('partial, busy and failed diary jobs never run privacy review',async()=>{
   for(const status of ['partial','failed']){
     const svc=loadTickService({tickResult:{status,processed:0}})
     const result=await svc.runDiaryTick(COMMON)
     assert.equal(result.status,status)
-    assert.deepEqual(svc.calls,{tick:1,privacy:0})
+    assert.deepEqual(svc.calls,{tick:1,privacy:0,annotation:0})
   }
 })
 test('private review errors never falsely change the outcome of existing diary commits',async()=>{
@@ -55,6 +56,6 @@ test('private review errors never falsely change the outcome of existing diary c
     const svc=loadTickService({tickResult:{status:'completed',processed:1,written:1},privacyResult:new Error('private data!')})
     const result=await svc.runDiaryTick(COMMON)
     assert.deepEqual(result,{status:'completed',processed:1,written:1})
-    assert.deepEqual(svc.calls,{tick:1,privacy:1})
+    assert.deepEqual(svc.calls,{tick:1,privacy:1,annotation:1})
   } finally { console.warn=warn }
 })

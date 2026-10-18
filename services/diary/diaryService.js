@@ -5,6 +5,7 @@ const { getWindow, validTimeZone } = require('./diaryWindows')
 const { readDiaryMessages } = require('./diaryReader')
 const { reviewAndWriteDiary } = require('./diaryWriter')
 const { reviewStarDiaryPrivacy } = require('./diaryPrivacy')
+const { reviewStarDiaryAnnotations } = require('./diaryAnnotationsAutonomy')
 
 const { runAutonomousDailyTick, CATCHUP_DAYS, MAX_DAILY_JOBS_PER_TICK } =
     require('./diaryAutonomyService')
@@ -191,6 +192,13 @@ async function runDiaryTick({ supabase, userId, agentId = 'star',
             // No personal text, model decisions, identifiers or raw DB errors
             // in scheduler/Render logs. The next daily tick can retry.
             console.warn('[diary] private visibility review unavailable')
+        }
+        // V3-5 Step 3: an independent, optional Star annotation on a human
+        // SHARED diary. It never changes or falsifies the Diary Tick result.
+        try {
+            await reviewStarDiaryAnnotations({supabase,userId,agentId,callModel,settings,now})
+        } catch (_) {
+            console.warn('[diary] shared diary annotation review unavailable')
         }
     }
     return outcome
