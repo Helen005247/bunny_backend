@@ -10,6 +10,7 @@ const {runDiaryV2Verification} = require('../services/diary/diaryVerification')
 const { parseMonthQuery, monthUtcSearchBounds, monthCalendarEntries } = require('../services/diary/diaryCalendar')
 const { createPersonalDiaryRouter } = require('./personalDiary')
 const { createDiaryAnnotationsRouter } = require('./diaryAnnotations')
+const { createDiaryUnreadRouter } = require('./diaryUnread')
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const VALID_STATUSES = new Set(['written','skipped','failed','completed','processing',
@@ -166,6 +167,8 @@ function createUserDiaryRouter({ supabase } = {}) {
     router.use('/mine', createPersonalDiaryRouter({ supabase }))
     // V3-5 Step 3: counterpart annotations; before the dynamic /:id route.
     router.use('/annotations', createDiaryAnnotationsRouter({ supabase }))
+    // V3-6 Step 2: read-only unread snapshot and explicit seen receipts.
+    router.use('/unread', createDiaryUnreadRouter({ supabase }))
     // Authenticated owner-only preview plan APIs. Planned private prose is
     // NEVER emitted into GitHub or Render logs; it is available here only
     // after the normal requireAuth middleware sets req.userId.
