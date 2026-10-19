@@ -12,10 +12,11 @@ on:
       acceptance_mode:
         description: 'off=normal | preview=save V2 plan | verify=read/search/probes | live=write V2 | commit=confirm saved plan | probe=old rollback probe'
         required: false
-        default: off
+        # Keep this quoted: unquoted YAML 'off' may be parsed as boolean false.
+        default: 'off'
         type: choice
         options:
-          - off
+          - 'off'
           - preview
           - verify
           - live
