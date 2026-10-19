@@ -3,7 +3,9 @@ run-name: Diary review (${{ github.event_name }})
 
 on:
   schedule:
-    # Original daily schedule unchanged. No acceptance modes in scheduled runs.
+    # One daily wake-up; scripts/diary-review.js checkpoint-resumes partial
+    # Review/Rollup within strict model-call, round and elapsed-time budgets.
+    # Incomplete work exits nonzero and resumes at the next scheduled wake-up.
     - cron: '17 11 * * *'
   workflow_dispatch:
     inputs:
@@ -62,7 +64,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Review diary or verify V2
+      - name: Review diary (bounded auto-resume) or verify V2
         env:
           DIARY_ENDPOINT: https://bunny-backend-19g1.onrender.com/internal/diary/tick
           COGNITION_USER_ID: ${{ secrets.COGNITION_USER_ID }}

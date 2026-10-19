@@ -195,8 +195,122 @@ async function dispatchAndPoll({ endpoint, userId, secret, startDate = '', endDa
     throw new Error('Diary review timed out; verify database job status')
 }
 
+// V3-6 Step 1: a single scheduled wake-up may need several checkpointed
+// Review/Rollup passes. The database RPCs own leases, checkpoints, and the
+// at-most-two autonomous actions of a single final decision. Never retry a
+// finalized job merely because it wrote zero diaries.
+const DAILY_TERMINAL_STATUSES = new Set([
+    'completed','written','skipped','revised','deferred','covered',
+])
+const DAILY_AUTO_LIMITS = Object.freeze({
+    maxRounds: 10,
+    maxTotalModelCalls: 60,
+    // The Action itself has a 35-minute timeout. Leave time for job cleanup.
+    maxElapsedMs: 28 * 60 * 1000,
+    maxPollPerRoundMs: 7 * 60 * 1000,
+    assumedMaxCallsPerRound: 6, // Matches newReviewBudget's deployed default.
+    minimumRemainingMs: 2 * 60 * 1000,
+    delayBetweenRoundsMs: 5000,
+    maxStalledRounds: 2,
+})
+
+function dailyModeOnly(input) {
+    const v=normalizeManualInputs(input)
+    return (v.acceptanceMode||'off')==='off' && !v.startDate && !v.endDate &&
+        !v.topicHint && !v.planId && !v.planDigest && !v.confirmWrite
+}
+
+function progressOfPartial(result) {
+    const num=(v)=>Number.isSafeInteger(v)&&v>=0&&v<=1000000
+    if (!num(result?.reviewDone)||!num(result?.reviewTotal)||
+        !num(result?.rollupDone)||!num(result?.rollupTotal)||
+        !num(result?.modelCalls)||result.reviewDone>result.reviewTotal||
+        result.rollupDone>result.rollupTotal) return null
+    return {
+        reviewDone:result.reviewDone,reviewTotal:result.reviewTotal,
+        rollupDone:result.rollupDone,rollupTotal:result.rollupTotal,
+        modelCalls:result.modelCalls,
+    }
+}
+
+function summaryProgress(progress) {
+    // No user data or diarized text; counters only.
+    return `review=${progress.reviewDone}/${progress.reviewTotal}; `+
+        `rollup=${progress.rollupDone}/${progress.rollupTotal}`
+}
+
+function incomplete(reason) {
+    // The checkpoint is durable. Deliberately fail the Action instead of
+    // reporting a green success for work that has not finished.
+    throw new Error(`Diary incomplete (${reason}); checkpoint retained for the next run`)
+}
+
+async function continueDailyDiary({
+    dispatch = dispatchAndPoll,
+    dispatchOptions,
+    sleep = ms => new Promise(resolve => setTimeout(resolve,ms)),
+    nowMs = () => Date.now(),
+    limits = DAILY_AUTO_LIMITS,
+    log = message => console.log(message),
+}={}) {
+    if(typeof dispatch!=='function'||!dispatchOptions||typeof sleep!=='function'||
+        typeof nowMs!=='function'||typeof log!=='function')
+        throw new Error('Invalid diary auto-resume configuration')
+    const started=nowMs()
+    let totalCalls=0,previousProgress=null,stalledRounds=0
+    for(let round=1;round<=limits.maxRounds;round++) {
+        const remaining=limits.maxElapsedMs-(nowMs()-started)
+        if(remaining<limits.minimumRemainingMs) incomplete('time budget')
+        // Refuse to start another backend pass unless the full per-pass model
+        // budget still fits. Cost caps apply across all resumptions.
+        if(totalCalls+limits.assumedMaxCallsPerRound>limits.maxTotalModelCalls)
+            incomplete('model-call budget')
+        log(`[diary] auto-resume round=${round}/${limits.maxRounds}; `+
+            `model_calls_total=${totalCalls}/${limits.maxTotalModelCalls}`)
+        const result=await dispatch({...dispatchOptions,
+            maxPollMs:Math.min(limits.maxPollPerRoundMs,remaining-30000)})
+        if(result?.status!=='partial') {
+            // A safe exit must represent a genuinely finished daily job. The
+            // original poller also validates status.ok before returning.
+            if(!result?.ok || !DAILY_TERMINAL_STATUSES.has(result?.status))
+                throw new Error('Diary unexpected daily terminal status')
+            // 'completed' can include a deliberate skip or zero new entries.
+            // Never dispatch again after a finalized daily decision.
+            log(`[diary] auto-resume completed in ${round} round(s); `+
+                `model_calls_partial=${totalCalls}`)
+            return result
+        }
+        const progress=progressOfPartial(result)
+        if(!progress) incomplete('invalid partial progress')
+        if(progress.modelCalls>limits.assumedMaxCallsPerRound)
+            incomplete('unexpected model-call budget')
+        totalCalls+=progress.modelCalls
+        log(`[diary] auto-resume partial; ${summaryProgress(progress)}; `+
+            `model_calls_total=${totalCalls}/${limits.maxTotalModelCalls}`)
+        // A blocked lease or retry cooldown is not a reason to burn model calls
+        // by immediately sending another tick. Resume at the next schedule.
+        if(progress.reviewTotal===0&&progress.rollupTotal===0&&progress.modelCalls===0)
+            incomplete('busy or retry cooldown')
+        // Selection retries can leave review/rollup counters unchanged for one
+        // pass; two consecutive passes with no measurable progress are a stall.
+        const current=[progress.reviewDone,progress.reviewTotal,
+            progress.rollupDone,progress.rollupTotal].join(':')
+        stalledRounds=current===previousProgress?stalledRounds+1:0
+        previousProgress=current
+        if(stalledRounds>=limits.maxStalledRounds || progress.modelCalls===0)
+            incomplete('no progress')
+        if(round===limits.maxRounds) incomplete('round budget')
+        if(limits.maxElapsedMs-(nowMs()-started)<limits.minimumRemainingMs)
+            incomplete('time budget')
+        if(totalCalls+limits.assumedMaxCallsPerRound>limits.maxTotalModelCalls)
+            incomplete('model-call budget')
+        await sleep(limits.delayBetweenRoundsMs)
+    }
+    incomplete('round budget')
+}
+
 async function main() {
-    const result = await dispatchAndPoll({
+    const options = {
         endpoint: process.env.DIARY_ENDPOINT,
         userId: process.env.COGNITION_USER_ID,
         secret: process.env.COGNITION_TICK_SECRET,
@@ -207,7 +321,10 @@ async function main() {
         planId:process.env.DIARY_PLAN_ID || '',
         planDigest:process.env.DIARY_PLAN_DIGEST || '',
         confirmWrite:process.env.DIARY_CONFIRM_WRITE || '',
-    })
+    }
+    const result=dailyModeOnly(options)
+        ? await continueDailyDiary({dispatchOptions:options})
+        : await dispatchAndPoll(options)
     console.log(safeLog(result))
 }
 if (require.main === module) {
@@ -220,4 +337,5 @@ if (require.main === module) {
         process.exitCode = 1
     })
 }
-module.exports = { assertConfig, safeLog, dispatchAndPoll }
+module.exports = { assertConfig, safeLog, dispatchAndPoll,
+    continueDailyDiary, dailyModeOnly, progressOfPartial, DAILY_AUTO_LIMITS }
