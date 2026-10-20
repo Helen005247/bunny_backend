@@ -1,14 +1,15 @@
 name: Hermit Diary Review
-run-name: Diary review (${{ github.event_name }})
+# Mark external daily runs with a date so the scheduler can safely detect them.
+# Manual preview/live/commit runs retain their own mode in the display title.
+run-name: ${{ inputs.dispatch_date != '' && format('Diary daily {0}', inputs.dispatch_date) || format('Diary review ({0}:{1})', github.event_name, inputs.acceptance_mode || 'off') }}
 
 on:
-  schedule:
-    # One daily wake-up; scripts/diary-review.js checkpoint-resumes partial
-    # Review/Rollup within strict model-call, round and elapsed-time budgets.
-    # Incomplete work exits nonzero and resumes at the next scheduled wake-up.
-    - cron: '17 11 * * *'
   workflow_dispatch:
     inputs:
+      dispatch_date:
+        description: 'For external daily scheduler only; leave blank for manual runs'
+        required: false
+        type: string
       acceptance_mode:
         description: 'off=normal | preview=save V2 plan | verify=read/search/probes | live=write V2 | commit=confirm saved plan | probe=old rollback probe'
         required: false
