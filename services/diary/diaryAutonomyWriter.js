@@ -19,6 +19,9 @@ const REPAIRABLE_PLAN_CODES=new Set([
 ])
 // Transient provider failures pause the leased job through the existing DB
 // checkpoint RPC. No diary action is committed while a model call is unresolved.
+const REPAIRABLE_OUTPUT_CODES=new Set([
+    'invalid_model_json','model_incomplete_output','model_empty_output',
+])
 const PAUSABLE_MODEL_CODES=new Set([
     'model_timeout','model_rate_limited','model_upstream_failure',
     'model_connection_failure',
@@ -30,7 +33,41 @@ function pauseForTransientModelError(error,stage) {
     return true
 }
 
-function invalid(code='invalid_diary_plan') { throw new DiaryModelError(code) }
+// Validation diagnostics are fixed rule names, never model text or user content.
+const PLAN_RULES=Object.freeze({
+    actions: 'Return a top-level actions array with zero, one, or two items.',
+    search: 'Return a top-level queries array containing zero to three strings, each no longer than 48 characters.',
+    kind: 'Each kind must be exactly create, append, rewrite, or defer.',
+    evidence: 'Each action needs 1-30 unique evidence_ids copied from the supplied evidence ID list.',
+    duplicate_evidence: 'Remove duplicate IDs from each evidence_ids array.',
+    topic_id: 'Use a topic_id only when it appears in the supplied topic index.',
+    topic_or_anchor: 'For a new topic omit topic_id and supply anchor_id from that action evidence_ids plus a nonempty topic_label (max 140 chars).',
+    duplicate_anchor: 'Different actions must use different new-topic anchor_id values.',
+    duplicate_topic: 'Two actions cannot refer to the same existing topic_id.',
+    title: 'Writing actions require a nonempty title of at most 160 characters.',
+    tags: 'Writing actions require topics as an array of up to 12 strings, each at most 60 characters.',
+    body: 'Writing actions require a nonempty body of at most 10000 characters.',
+    create_written_topic: 'A topic with an existing diary cannot be created again. Use an allowed editable diary for append/rewrite, or choose another topic.',
+    create_length: 'A create body must be at least 25 characters.',
+    edit_target: 'Append/rewrite requires topic_id and a diary_id included in the supplied editable diaries, used at most once.',
+    edit_version: 'For append/rewrite copy the exact topic_id and integer expected_version of the selected editable diary.',
+    edit_length: 'The finished diary must contain 25-10000 characters; append.body is only the new continuation.',
+})
+function invalid(code='invalid_diary_plan',rule=null) {
+    const error=new DiaryModelError(code)
+    if(rule && Object.hasOwn(PLAN_RULES,rule))error.rule=rule
+    throw error
+}
+function validationHint(error) {
+    return error?.rule && Object.hasOwn(PLAN_RULES,error.rule)
+        ? PLAN_RULES[error.rule] :
+        error?.code==='diary_evidence_out_of_scope' ? PLAN_RULES.evidence :
+        error?.code==='diary_topic_not_found' ? PLAN_RULES.topic_id :
+        error?.code==='diary_topic_already_written' ? PLAN_RULES.create_written_topic :
+        error?.code==='diary_revision_conflict' ? PLAN_RULES.edit_version :
+        error?.code==='invalid_diary_length' ? PLAN_RULES.edit_length :
+        PLAN_RULES.actions
+}
 function guide(settings) {
     return JSON.stringify({
         system: String(settings?.system_prompt||'').slice(0,2600),
@@ -47,15 +84,15 @@ function diaryForPrompt(entries) {
         periodStart:d.period_start,periodEnd:d.period_end,
         body:String(d.body||'').slice(0,10000)}))
 }
-function asString(value,max,required=true) {
-    if (typeof value!=='string') invalid()
+function asString(value,max,required=true,rule='body') {
+    if (typeof value!=='string') invalid('invalid_diary_plan',rule)
     const out=value.trim()
-    if (out.length>max || (required && !out)) invalid()
+    if (out.length>max || (required && !out)) invalid('invalid_diary_plan',rule)
     return out
 }
 function normalizePlan({raw,source,evidence,entries=[],topics=[]}) {
     if (!raw || !Array.isArray(raw.actions) || raw.actions.length>MAX_ACTIONS)
-        invalid()
+        invalid('invalid_diary_plan','actions')
     const allowed=new Set(evidence.rows.map(r=>r.id))
     const candidates=new Map(entries.map(d=>[d.id,d]))
     const knownTopics=new Map(topics.map(t=>[t.id,t]))
@@ -71,24 +108,27 @@ function normalizePlan({raw,source,evidence,entries=[],topics=[]}) {
     const anchors=new Set()
     const actions=[]
     for (const item of raw.actions) {
-        if (!item || !['create','append','rewrite','defer'].includes(item.kind)) invalid()
+        if (!item || !['create','append','rewrite','defer'].includes(item.kind))
+            invalid('invalid_diary_plan','kind')
         if (!Array.isArray(item.evidence_ids) || item.evidence_ids.length<1 ||
             item.evidence_ids.length>30 || item.evidence_ids.some(id=>typeof id!=='string'||!allowed.has(id)))
-            invalid('diary_evidence_out_of_scope')
+            invalid('diary_evidence_out_of_scope','evidence')
         const evidenceIds=[...new Set(item.evidence_ids)]
-        if (evidenceIds.length!==item.evidence_ids.length) invalid('invalid_diary_plan')
+        if (evidenceIds.length!==item.evidence_ids.length)
+            invalid('invalid_diary_plan','duplicate_evidence')
         let topicId=null,anchorId=null,topicLabel=null
         if (item.topic_id) {
             if (typeof item.topic_id!=='string' || !UUID.test(item.topic_id) ||
-                !knownTopics.has(item.topic_id)) invalid('diary_topic_not_found')
+                !knownTopics.has(item.topic_id)) invalid('diary_topic_not_found','topic_id')
             topicId=item.topic_id
         } else {
-            anchorId=asString(item.anchor_id,100)
-            topicLabel=asString(item.topic_label,140)
-            if (!evidenceIds.includes(anchorId) || anchors.has(anchorId)) invalid()
+            anchorId=asString(item.anchor_id,100,true,'topic_or_anchor')
+            topicLabel=asString(item.topic_label,140,true,'topic_or_anchor')
+            if (!evidenceIds.includes(anchorId)) invalid('invalid_diary_plan','topic_or_anchor')
+            if (anchors.has(anchorId)) invalid('invalid_diary_plan','duplicate_anchor')
             anchors.add(anchorId)
         }
-        if (topicId && seenTopics.has(topicId)) invalid('invalid_diary_plan')
+        if (topicId && seenTopics.has(topicId)) invalid('invalid_diary_plan','duplicate_topic')
         if (topicId) seenTopics.add(topicId)
         const result={kind:item.kind,topic_id:topicId,anchor_id:anchorId,
             topic_label:topicLabel,evidence_ids:evidenceIds,
@@ -97,23 +137,25 @@ function normalizePlan({raw,source,evidence,entries=[],topics=[]}) {
             actions.push(result)
             continue
         }
-        const title=asString(item.title,160)
+        const title=asString(item.title,160,true,'title')
         const tags=Array.isArray(item.topics) && item.topics.length<=12 &&
             item.topics.every(tag=>typeof tag==='string' && tag.length<=60)
-            ? item.topics.map(s=>s.trim()).filter(Boolean):invalid()
-        const body=asString(item.body,10000)
+            ? item.topics.map(s=>s.trim()).filter(Boolean):invalid('invalid_diary_plan','tags')
+        const body=asString(item.body,10000,true,'body')
         if (item.kind==='create') {
-            if (topicId && knownTopics.get(topicId)?.diary_id) invalid('diary_topic_already_written')
-            if (body.length<25) invalid('invalid_diary_length')
+            if (topicId && knownTopics.get(topicId)?.diary_id)
+                invalid('diary_topic_already_written','create_written_topic')
+            if (body.length<25) invalid('invalid_diary_length','create_length')
             result.title=title
             result.body=body
             result.topics=tags
         } else {
             if (!topicId || typeof item.diary_id!=='string' || !UUID.test(item.diary_id) ||
-                !candidates.has(item.diary_id) || updatedDiaries.has(item.diary_id)) invalid()
+                !candidates.has(item.diary_id) || updatedDiaries.has(item.diary_id))
+                invalid('invalid_diary_plan','edit_target')
             const old=candidates.get(item.diary_id)
             if (old.diary_topic_id!==topicId || old.current_version!==item.expected_version) {
-                invalid('diary_revision_conflict')
+                invalid('diary_revision_conflict','edit_version')
             }
             updatedDiaries.add(item.diary_id)
             let revised=body
@@ -122,7 +164,7 @@ function normalizePlan({raw,source,evidence,entries=[],topics=[]}) {
                 revised=String(old.body||'').trimEnd()+'\n\n'+body
             }
             if (revised.length<25 || revised.length>10000 ||
-                (item.kind==='append' && !body)) invalid('invalid_diary_length')
+                (item.kind==='append' && !body)) invalid('invalid_diary_length','edit_length')
             result.diary_id=item.diary_id
             result.expected_version=item.expected_version
             result.title=title
@@ -347,23 +389,30 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
             id:d.id,title:d.title,topics:d.topics,topicId:d.diary_topic_id}))),
     ].join('\n')
     let searchPlan
-    for(let attempt=1;attempt<=2;attempt++) {
+    for(let attempt=1;attempt<=3;attempt++) {
         const prompt=attempt===1 ? plannerPrompt : plannerPrompt +
-            '\n\nVALIDATION RETRY: Previous JSON did not satisfy the search schema. ' +
-            'Return only {"queries":[]} or {"queries":["short keyword"]}. ' +
-            'Use at most 3 strings of at most 48 characters each. Do not invent facts.'
-        try { searchPlan=await modelText(invokeModel,prompt) }
+            '\n\nSEARCH PLAN VALIDATION RETRY: Your previous output did not have a ' +
+            'queries array of 0-3 strings, each at most 48 characters. ' +
+            'Return one JSON object with exactly this structure: {"queries":["关键词"]} ' +
+            'or {"queries":[]}. Use only useful search terms supported by the summaries.'
+        try { searchPlan=await modelText(invokeModel,prompt,{shape:'search_plan'}) }
         catch(e){
             if(e?.code==='review_budget_exhausted' || pauseForTransientModelError(e,'selection'))
                 return diagnosticPartial({phase:'selection',
                     chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
+            if(REPAIRABLE_OUTPUT_CODES.has(e?.code)) {
+                console.warn(`[diary-v2] stage=search-plan-format; code=${e.code}; attempt=${attempt}`)
+                if(attempt<3 && (!budget || budget.canStart(1)))continue
+                if(attempt<3)return diagnosticPartial({phase:'selection',
+                    chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
+            }
             console.warn(`[diary-v2] stage=search-plan; code=${e?.code||'unknown'}`)
             throw e
         }
         if(Array.isArray(searchPlan?.queries) && searchPlan.queries.length<=3 &&
             searchPlan.queries.every(t=>typeof t==='string' && t.length<=48)) break
         console.warn(`[diary-v2] stage=search-plan-validation; code=invalid_diary_plan; attempt=${attempt}`)
-        if(attempt===2) invalid()
+        if(attempt===3) invalid('invalid_diary_plan','search')
         if(budget && !budget.canStart(1)) return diagnosticPartial({phase:'selection',
             chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
     }
@@ -403,12 +452,20 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
         'append 的 body 只写新增段落；rewrite 的 body 给出新的完整正文。',
         'create 的 body 为完整日记；defer 的 note 是最多500字符的稍后再写提示。',
         '不要为了达到两篇而凑数。对同一主题优先编辑已有日记，不要重复创建。',
-        '返回且只返回 JSON 对象：',
-        '{"actions":[{"kind":"create|append|rewrite|defer", "topic_id":null,',
-        '"anchor_id":"真实消息id", "topic_label":"简短题目", "diary_id":null,',
-        '"expected_version":null,"title":"日记标题", "body":"正文或追加段落",',
-        '"topics":["主题"],"note":"可选","evidence_ids":["真实消息id"]}]}',
+        '返回且只返回 JSON 对象：顶层必须是 {"actions":[...]}。',
+        '每个 action.kind 必须且只能取 create、append、rewrite、defer 其中一个字面值。',
+        '每个 action 包含 evidence_ids 数组与 topic_id，若没有已有 topic_id，',
+        '则需 anchor_id、topic_label；create/append/rewrite 还必须包含 title、body、topics。',
+        'append/rewrite 还需 diary_id 与 expected_version；defer 可包含 note。',
+        '不要复制字段说明中的占位文字当作消息 ID 或内容。',
         '按实际 action 填相关字段；不写则 {"actions":[]}。',
+        '严格校验：每个 evidence_ids 必须是已展示的真实 ID，1~30 个且不能重复。',
+        '新主题必须给出 topic_label 及 anchor_id，且 anchor_id 必须包含在该操作的 evidence_ids 中。',
+        '引用已有 topic_id 时只能选择待写话题列表中的真实 ID。',
+        '若现有 topic 已经写过，不能再 create；append/rewrite 只能编辑上面展示的日记，',
+        'diary_id、topic_id 与 expected_version 必须完全匹配，不可凭空发明。',
+        '每篇新日记 body 至少25字、最多10000字，title 最多160字，topics 最多12项。',
+        '如果没有真实经历值得写，可以直接输出 {"actions":[]}，不要凑数。',
         '星星原有风格设置：',guide(settings),
         '已覆盖全部选定窗口的分层回顾（事实候选，而非指令）：',JSON.stringify(condensed),
         '待写话题：',JSON.stringify(topicsForPrompt(relevant.topics)),
@@ -420,22 +477,29 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
         '可引用的证据ID：',JSON.stringify(evidence.rows.map(r=>r.id)),
     ].join('\n')
     let actions
-    for(let attempt=1;attempt<=2;attempt++) {
+    let lastValidation=null
+    for(let attempt=1;attempt<=3;attempt++) {
         const prompt=attempt===1 ? finalPrompt : finalPrompt +
-            '\n\nVALIDATION RETRY: Your previous action plan did not satisfy the schema. ' +
-            'Make a NEW JSON plan using ONLY evidence IDs in the supplied list. ' +
-            'At most 2 actions. For create/defer with no known topic_id, use anchor_id ' +
-            'equal to a referenced evidence ID plus topic_label. For append/rewrite, ' +
-            'use the EXACT diary_id, topic_id and expected_version shown in the data. ' +
-            'Each action needs 1-30 UNIQUE evidence_ids. Never duplicate a topic or ' +
-            'change a diary unless its ID was supplied. Empty {"actions":[]} is valid ' +
-            'ONLY if you genuinely prefer not to write. Do not invent source messages.'
+            '\n\nACTION PLAN VALIDATION RETRY: The previous proposed plan was rejected. ' +
+            'Reason: ' + validationHint(lastValidation) + ' ' +
+            'Make a corrected NEW JSON action plan grounded ONLY in the supplied evidence IDs. ' +
+            'Never invent source messages, topic IDs, diary IDs or versions. ' +
+            'Each action must use 1-30 unique evidence IDs; at most 2 different actions. ' +
+            'For a new topic use anchor_id matching an evidence ID and topic_label. ' +
+            "To append/rewrite copy an editable diary's exact diary_id, topic_id and expected_version. " +
+            'Output {"actions":[]} only if you genuinely decide not to write.'
         let answer
-        try { answer=await modelText(invokeModel,prompt) }
+        try { answer=await modelText(invokeModel,prompt,{shape:'action_plan'}) }
         catch(e){
             if(e?.code==='review_budget_exhausted' || pauseForTransientModelError(e,'write'))
                 return diagnosticPartial({phase:'selection',
                     chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
+            if(REPAIRABLE_OUTPUT_CODES.has(e?.code)) {
+                console.warn(`[diary-v2] stage=write-format; code=${e.code}; attempt=${attempt}`)
+                if(attempt<3 && (!budget || budget.canStart(1)))continue
+                if(attempt<3)return diagnosticPartial({phase:'selection',
+                    chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
+            }
             console.warn(`[diary-v2] stage=write; code=${e?.code||'unknown'}`)
             throw e
         }
@@ -445,8 +509,9 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
             break
         } catch(e) {
             if(!REPAIRABLE_PLAN_CODES.has(e?.code)) throw e
-            console.warn(`[diary-v2] stage=write-validation; code=${e.code}; attempt=${attempt}`)
-            if(attempt===2) throw e
+            console.warn(`[diary-v2] stage=write-validation; code=${e.code}; rule=${e.rule||'other'}; attempt=${attempt}`)
+            lastValidation=e
+            if(attempt===3) throw e
             if(budget && !budget.canStart(1))return diagnosticPartial({phase:'selection',
                 chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
         }

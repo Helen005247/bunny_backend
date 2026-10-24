@@ -30,6 +30,8 @@ function validPayload(value, shape = 'any') {
         return Array.isArray(value.observations) &&
             value.observations.every((item) => typeof item === 'string')
     }
+    if (shape === 'search_plan') return Array.isArray(value.queries)
+    if (shape === 'action_plan') return Array.isArray(value.actions)
     if (shape === 'draft') {
         return value.write === false ||
             (value.write === true && typeof value.title === 'string' &&
@@ -225,7 +227,11 @@ async function modelText(callModel, input, {
         ? '{"observations":["one supported observation"]}'
         : shape === 'draft'
             ? '{"write":false,"reason":"nothing_meaningful"} OR {"write":true,"title":"...","body":"...","topics":["..."]}'
-            : '{"key":"value"}'
+            : shape === 'search_plan'
+            ? '{"queries":["keyword supported by the supplied evidence"]} OR {"queries":[]}'
+        : shape === 'action_plan'
+            ? '{"actions":[{"kind":"create","evidence_ids":["a genuine listed message id"],"anchor_id":"that same genuine listed message id","topic_label":"topic","title":"title","body":"diary body of at least 25 characters","topics":["topic"]}]} OR {"actions":[]} if there is genuinely nothing to write'
+        : '{"key":"value"}'
     const repairInput = input + '\n\nFORMAT CORRECTION: Return exactly one complete, valid JSON object. ' +
         'No Markdown, code fences, introductions, trailing explanations, or multiple objects. ' +
         'Do not invent, omit, or change source facts. Required form: ' + shapeHint
