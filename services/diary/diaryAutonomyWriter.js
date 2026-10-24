@@ -17,6 +17,18 @@ const REPAIRABLE_PLAN_CODES=new Set([
     'invalid_diary_plan','diary_evidence_out_of_scope','diary_topic_not_found',
     'diary_topic_already_written','diary_revision_conflict','invalid_diary_length',
 ])
+// Transient provider failures pause the leased job through the existing DB
+// checkpoint RPC. No diary action is committed while a model call is unresolved.
+const PAUSABLE_MODEL_CODES=new Set([
+    'model_timeout','model_rate_limited','model_upstream_failure',
+    'model_connection_failure',
+])
+function pauseForTransientModelError(error,stage) {
+    if(!PAUSABLE_MODEL_CODES.has(error?.code))return false
+    // Stage and allowlisted code only. Never log the prompt or provider body.
+    console.warn(`[diary-v2] stage=${stage}; code=${error.code}; checkpoint=paused`)
+    return true
+}
 
 function invalid(code='invalid_diary_plan') { throw new DiaryModelError(code) }
 function guide(settings) {
@@ -254,8 +266,9 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
         let answer
         try { answer=await modelText(invokeModel,prompt,{shape:'review'}) }
         catch(e){
-            if(e?.code==='review_budget_exhausted')return diagnosticPartial({phase:'review',
-                chunks,done:completed,cacheHits,reused:sharedHits,budget})
+            if(e?.code==='review_budget_exhausted' || pauseForTransientModelError(e,'review'))
+                return diagnosticPartial({phase:'review',
+                    chunks,done:completed,cacheHits,reused:sharedHits,budget})
             console.warn(`[diary-v2] stage=review; chunk=${i+1}/${chunks.length}; code=${e?.code||'unknown'}`)
             throw e
         }
@@ -303,8 +316,9 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
                         observations:x.observations.slice(0,6).map(v=>v.slice(0,180))}))),
                 ].join('\n'),{shape:'review'})
             } catch(e) {
-                if(e?.code==='review_budget_exhausted')return diagnosticPartial({phase:'rollup',
-                    chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
+                if(e?.code==='review_budget_exhausted' || pauseForTransientModelError(e,'rollup'))
+                    return diagnosticPartial({phase:'rollup',
+                        chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
                 console.warn(`[diary-v2] stage=rollup; group=${i+1}/${groups.length}; code=${e?.code||'unknown'}`)
                 throw e
             }
@@ -340,8 +354,9 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
             'Use at most 3 strings of at most 48 characters each. Do not invent facts.'
         try { searchPlan=await modelText(invokeModel,prompt) }
         catch(e){
-            if(e?.code==='review_budget_exhausted')return diagnosticPartial({phase:'selection',
-                chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
+            if(e?.code==='review_budget_exhausted' || pauseForTransientModelError(e,'selection'))
+                return diagnosticPartial({phase:'selection',
+                    chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
             console.warn(`[diary-v2] stage=search-plan; code=${e?.code||'unknown'}`)
             throw e
         }
@@ -418,8 +433,9 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
         let answer
         try { answer=await modelText(invokeModel,prompt) }
         catch(e){
-            if(e?.code==='review_budget_exhausted')return diagnosticPartial({phase:'selection',
-                chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
+            if(e?.code==='review_budget_exhausted' || pauseForTransientModelError(e,'write'))
+                return diagnosticPartial({phase:'selection',
+                    chunks,done:completed,cacheHits,reused:sharedHits,rollupDone,rollupTotal,budget})
             console.warn(`[diary-v2] stage=write; code=${e?.code||'unknown'}`)
             throw e
         }

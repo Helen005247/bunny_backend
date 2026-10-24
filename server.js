@@ -276,7 +276,12 @@ app.use(
 // Uses the existing server-only Cognition secret and model connection.
 app.use('/internal/diary', createInternalDiaryRouter({
     supabase,
-    callModel: (request) => callModelWithRetry(request, 1),
+    // Diary review is a background task (not an interactive chat). Give its
+    // model calls more room than the 45s chat default; keep one SDK attempt
+    // and let durable diary checkpoints handle recoverable upstream failures.
+    callModel: (request) => callModelWithRetry(request, 1, {
+        timeout: Math.max(AI_REQUEST_TIMEOUT_MS, 90000),
+    }),
     getSettings: getGlobalSettings,
 }))
 
@@ -882,7 +887,8 @@ function stripHermitIntegrityMarkers(
 
 async function callModelWithRetry(
     request,
-    maxAttempts = 2
+    maxAttempts = 2,
+    requestOptions = undefined
 ) {
 
     let lastError =
@@ -915,7 +921,8 @@ async function callModelWithRetry(
                 await client
                     .responses
                     .create(
-                        guardedRequest
+                        guardedRequest,
+                        requestOptions
                     )
 
             const outputText =
