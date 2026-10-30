@@ -24,6 +24,7 @@ const {
     bindImageToMessage, getSessionImageMap,
 } = require('./services/images/imageService')
 const { recordUserMessage } = require('./services/cognition/runtimeStateService')
+const { createCognitionModelCaller } = require('./services/cognition/modelCallPolicy')
 const { buildThoughtThreadChatContext } = require('./services/cognition/thoughtThreadChatContext')
 const { buildDiaryChatContext } = require('./services/diary/diaryRecall')
 const {
@@ -258,7 +259,7 @@ app.use(
     '/internal/cognition',
     createCognitionRouter({
         supabase,
-        callModel: (request) => callModelWithRetry(request, 1),
+        callModel: createCognitionModelCaller({ callModelWithRetry }),
         getSettings: getGlobalSettings,
         getLatestMemory,
         getMilestoneContext: ({ userId, agentId }) => getMilestoneContext({
