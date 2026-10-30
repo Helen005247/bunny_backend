@@ -231,6 +231,9 @@ function parseCognitionOutput(value, now) {
 
     // Optional v2 action must not make a valid legacy Thought fail when the
     // model produces malformed thread-only fields.
+    // Keep legacy no-action behavior, but distinguish omission from explicit none.
+    const threadActionProvided = Object.hasOwn(data, 'thread_action') &&
+        data.thread_action != null
     let threadAction = { type: 'none' }
     let threadActionInvalid = false
     try {
@@ -243,6 +246,7 @@ function parseCognitionOutput(value, now) {
         thought,
         threadAction,
         threadActionInvalid,
+        threadActionProvided,
         emotion,
         significance,
         pendingTopic,
@@ -401,6 +405,13 @@ async function runCognitionTick({
         if (invalidThreadAction) {
             console.warn('[cognition] skipped invalid thread action')
         }
+        // Fixed diagnostic labels only, never raw model output or thread text.
+        const threadDecision = invalidThreadAction ? 'invalid' :
+            !outcome.threadActionProvided ? 'omitted' :
+                outcome.threadAction.type === 'none' ? 'explicit_none' :
+                    outcome.threadAction.type
+        const threadContextStatus = !threadContext.available ? 'unavailable' :
+            threadContext.eligible.length > 0 ? 'eligible' : 'empty'
 
         // Don't store a reflection about old context if the user just returned.
         phase = 'freshness_check'
@@ -486,11 +497,14 @@ async function runCognitionTick({
         // user identity, prompt fragments or credentials.
         console.info('[cognition] result:',
             `wake=${wake.reasons.join(',')}; thought=${savedThought ? 'saved' : 'skipped'}; ` +
-            `thread=${threadResult.status}; state=${stateUpdated ? 'updated' : 'failed'}`)
+            `thread=${threadResult.status}; state=${stateUpdated ? 'updated' : 'failed'}; ` +
+            `decision=${threadDecision}; thread_context=${threadContextStatus}`)
         return {
             executed: true, stored: !!savedThought,
             gateStatus: 'executed',
             threadStatus: threadResult.status,
+            threadDecision,
+            threadContextStatus,
             threadWakeStatus: ['not_due', 'not_applicable'].includes(dueDisposition.status)
                 ? null : dueDisposition.status,
             threadId: threadResult.threadId || null,

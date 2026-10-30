@@ -21,6 +21,11 @@ const SAFE_THREAD_STATUSES = new Set([
     'unchanged', 'already_tracked', 'invalid_action',
     'unavailable', 'conflict',
 ])
+const SAFE_THREAD_DECISIONS = new Set([
+    'explicit_none', 'omitted', 'invalid', 'create', 'update',
+    'complete', 'abandon',
+])
+const SAFE_THREAD_CONTEXT_STATUSES = new Set(['empty', 'eligible', 'unavailable'])
 
 function safeDiagnostic(value, allowed) {
     return typeof value === 'string' && allowed.has(value) ? value : 'unknown'
@@ -110,6 +115,13 @@ async function sendHeartbeat({ endpoint, userId, secret,
         if (Object.hasOwn(result, 'threadStatus')) {
             safe.threadStatus = safeDiagnostic(result.threadStatus, SAFE_THREAD_STATUSES)
         }
+        if (Object.hasOwn(result, 'threadDecision')) {
+            safe.threadDecision = safeDiagnostic(result.threadDecision, SAFE_THREAD_DECISIONS)
+        }
+        if (Object.hasOwn(result, 'threadContextStatus')) {
+            safe.threadContextStatus = safeDiagnostic(
+                result.threadContextStatus, SAFE_THREAD_CONTEXT_STATUSES)
+        }
         if (typeof result.stateUpdated === 'boolean') {
             safe.stateUpdated = result.stateUpdated
         }
@@ -134,6 +146,8 @@ function formatHeartbeatLog(result) {
         `gate=${safeDiagnostic(result.gateStatus, SAFE_GATE_STATUSES)}`,
         `wake=${safeWakeReasons(result.wakeReasons)?.join(',') || 'none'}`,
         `thread=${safeDiagnostic(result.threadStatus, SAFE_THREAD_STATUSES)}`,
+        `decision=${safeDiagnostic(result.threadDecision, SAFE_THREAD_DECISIONS)}`,
+        `thread_context=${safeDiagnostic(result.threadContextStatus, SAFE_THREAD_CONTEXT_STATUSES)}`,
         `state=${typeof result.stateUpdated !== 'boolean' ? 'unknown' :
             (result.stateUpdated ? 'updated' : 'failed')}`,
         `autonomous_wait_minutes=${Number.isSafeInteger(result.autonomousMinutesUntilDue) &&

@@ -219,6 +219,8 @@ test('first wake creates durable idea even when no ordinary Thought is stored', 
     assert.equal(first.executed, true)
     assert.equal(first.stored, false)
     assert.equal(first.threadStatus, 'created')
+    assert.equal(first.threadDecision, 'create')
+    assert.equal(first.threadContextStatus, 'empty')
     assert.equal(db.rows.agent_thought_threads.length, 1)
     assert.equal(db.rows.agent_thoughts.length, 0)
     const row = db.rows.agent_thought_threads[0]
@@ -304,6 +306,7 @@ test('none and unchanged do not modify unscheduled thread versions', async () =>
     const row = seedThread(db, { next_review_at: null })
     const first = await tick(db, async () => result(threadAction('none')))
     assert.equal(first.threadStatus, 'none')
+    assert.equal(first.threadDecision, 'explicit_none')
     assert.equal(row.version, 0)
     const second = await tick(db, async () => result(threadAction('update', {
         thread_id: row.id, current_draft: row.current_draft,
@@ -515,4 +518,16 @@ test('duplicate creation uses a stable dedupe key and does not erase subsequent 
     const conflict = await persistThreadAction(changed)
     assert.equal(conflict.status, 'created') // Existing revised record is returned without overwrite.
     assert.equal(db.rows.agent_thought_threads.length, 1)
+})
+
+test('missing optional thread_action is reported as omitted rather than explicit none', async () => {
+    const db = makeFakeDb(messages())
+    const answer = await tick(db, async () => ({ output_text: JSON.stringify({
+        should_store: false, thought: '', significance: 0.5,
+    }) }))
+    assert.equal(answer.executed, true)
+    assert.equal(answer.threadStatus, 'none')
+    assert.equal(answer.threadDecision, 'omitted')
+    assert.equal(answer.threadContextStatus, 'empty')
+    assert.equal(db.rows.agent_thought_threads.length, 0)
 })
