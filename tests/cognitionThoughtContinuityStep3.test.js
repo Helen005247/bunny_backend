@@ -370,6 +370,23 @@ test('read failure disables thread writes but preserves existing reflection', as
     assert.equal(db.rows.agent_thoughts.length, 1)
 })
 
+test('malformed Thread read is unavailable, not an empty but writable context', async () => {
+    const db = makeFakeDb(messages())
+    // A malformed PostgREST response has no error but also no data. An empty
+    // query must return [] rather than null; do not allow a Thread create.
+    db.failNext('agent_thought_threads', 'read', null)
+    let contextAvailable = true
+    const out = await tick(db, async ({ input }) => {
+        contextAvailable = modelTextInput(input).thoughtThreads.available
+        return result(draft(), { shouldStore: true,
+            thought: 'Could remember this detail without creating a draft.' })
+    })
+    assert.equal(contextAvailable, false)
+    assert.equal(out.threadStatus, 'unavailable')
+    assert.equal(out.stored, true)
+    assert.equal(db.rows.agent_thought_threads.length, 0)
+})
+
 test('optimistic write conflict never overwrites another worker\'s revision', async () => {
     const db = makeFakeDb(messages())
     const row = seedThread(db)

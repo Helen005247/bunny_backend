@@ -185,7 +185,18 @@ async function createThoughtThread({
     }
     const { data, error } = await supabase.from(TABLE)
         .insert(payload).select(COLUMNS).single()
-    if (!error) return data
+    if (!error) {
+        // The insert must return an acknowledged, owner-scoped row. A null
+        // response with no PostgREST error is not proof of a durable write.
+        if (!data || typeof data.id !== 'string' ||
+            data.user_id !== identity.userId ||
+            data.agent_id !== identity.agentId) {
+            const unexpected = new Error('Thread insert has no valid acknowledgement')
+            unexpected.code = 'THOUGHT_THREAD_WRITE_UNCONFIRMED'
+            throw unexpected
+        }
+        return data
+    }
 
     // An explicit stable idempotency key prevents duplicate threads when
     // an HTTP timeout or the next heartbeat repeats the SAME create request.
@@ -250,7 +261,15 @@ async function listThoughtThreads({
     }
     const { data, error } = await query.order('id', { ascending: true }).limit(limit)
     if (error) throw error
-    return data || []
+    // PostgREST returns [] when the query matches zero rows. `null` without
+    // an error is an invalid read response, not an empty Thread table.
+    // Treat it as unavailable so a broken read never masquerades as none.
+    if (!Array.isArray(data)) {
+        const unexpected = new Error('Thread list response is not an array')
+        unexpected.code = 'THOUGHT_THREAD_READ_INVALID'
+        throw unexpected
+    }
+    return data
 }
 
 function normalizePatch(patch, nowIso) {

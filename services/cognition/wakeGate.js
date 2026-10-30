@@ -20,7 +20,14 @@ async function hasDueThoughtThread({ supabase, userId, agentId, now }) {
         .lte('next_review_at', new Date(now).toISOString())
         .limit(1)
     if (error) throw error
-    return Array.isArray(data) && data.length > 0
+    // Empty [] means no due drafts; null data without an error means a
+    // malformed read, which the optional-probe caller will log and skip.
+    if (!Array.isArray(data)) {
+        const unexpected = new Error('Due Thread probe response is not an array')
+        unexpected.code = 'THOUGHT_THREAD_READ_INVALID'
+        throw unexpected
+    }
+    return data.length > 0
 }
 
 const HOUR_MS = 60 * 60 * 1000
