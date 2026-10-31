@@ -19,6 +19,7 @@ const {
     promptThreadContext,
 } = require('./thoughtThreadCognition')
 const { buildTimeContext } = require('../temporal/timeContext')
+const { summarizeCognitionContext } = require('./contextCoverage')
 
 const MODEL = 'gpt-5.6-sol'
 const COOLDOWN_MINUTES = 60
@@ -380,6 +381,14 @@ async function runCognitionTick({
         const relevantPreviousThoughts = selectPreviousThoughtsForWake(
             previousThoughts, wake.state, wake.reasons
         )
+        // Fixed categories show which sources made it into this tick's prompt.
+        // These are shape/presence checks, not claims that the facts are useful.
+        const contextCoverage = summarizeCognitionContext({
+            messages, memory, milestones,
+            previousThoughts: relevantPreviousThoughts, state: wake.state,
+            memoryConfigured: typeof getLatestMemory === 'function',
+            milestonesConfigured: typeof getMilestoneContext === 'function',
+        })
 
         phase = 'model_call'
         const response = await callModel({
@@ -498,13 +507,18 @@ async function runCognitionTick({
         console.info('[cognition] result:',
             `wake=${wake.reasons.join(',')}; thought=${savedThought ? 'saved' : 'skipped'}; ` +
             `thread=${threadResult.status}; state=${stateUpdated ? 'updated' : 'failed'}; ` +
-            `decision=${threadDecision}; thread_context=${threadContextStatus}`)
+            `decision=${threadDecision}; thread_context=${threadContextStatus}; ` +
+            `ctx_messages=${contextCoverage.messages}; ctx_memory=${contextCoverage.memory}; ` +
+            `ctx_milestones=${contextCoverage.milestones}; ` +
+            `ctx_previous=${contextCoverage.previousThoughts}; ` +
+            `ctx_pending=${contextCoverage.pendingTopic}`)
         return {
             executed: true, stored: !!savedThought,
             gateStatus: 'executed',
             threadStatus: threadResult.status,
             threadDecision,
             threadContextStatus,
+            contextCoverage,
             threadWakeStatus: ['not_due', 'not_applicable'].includes(dueDisposition.status)
                 ? null : dueDisposition.status,
             threadId: threadResult.threadId || null,

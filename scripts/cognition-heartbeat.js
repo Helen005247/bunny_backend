@@ -26,6 +26,23 @@ const SAFE_THREAD_DECISIONS = new Set([
     'complete', 'abandon',
 ])
 const SAFE_THREAD_CONTEXT_STATUSES = new Set(['empty', 'eligible', 'unavailable'])
+// Only structural presence flags are accepted; no prompt/data fragments.
+const SAFE_CONTEXT_COVERAGE = {
+    messages: new Set(['present', 'empty']),
+    memory: new Set(['present', 'empty', 'unwired', 'shape_mismatch']),
+    milestones: new Set(['present', 'empty', 'unwired', 'shape_mismatch']),
+    previousThoughts: new Set(['present', 'empty']),
+    pendingTopic: new Set(['present', 'empty']),
+}
+
+function safeContextCoverage(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const safe = {}
+    for (const [name, allowed] of Object.entries(SAFE_CONTEXT_COVERAGE)) {
+        safe[name] = safeDiagnostic(value[name], allowed)
+    }
+    return safe
+}
 
 function safeDiagnostic(value, allowed) {
     return typeof value === 'string' && allowed.has(value) ? value : 'unknown'
@@ -122,6 +139,9 @@ async function sendHeartbeat({ endpoint, userId, secret,
             safe.threadContextStatus = safeDiagnostic(
                 result.threadContextStatus, SAFE_THREAD_CONTEXT_STATUSES)
         }
+        if (Object.hasOwn(result, 'contextCoverage')) {
+            safe.contextCoverage = safeContextCoverage(result.contextCoverage)
+        }
         if (typeof result.stateUpdated === 'boolean') {
             safe.stateUpdated = result.stateUpdated
         }
@@ -150,6 +170,11 @@ function formatHeartbeatLog(result) {
         `thread_context=${safeDiagnostic(result.threadContextStatus, SAFE_THREAD_CONTEXT_STATUSES)}`,
         `state=${typeof result.stateUpdated !== 'boolean' ? 'unknown' :
             (result.stateUpdated ? 'updated' : 'failed')}`,
+        `ctx_messages=${safeContextCoverage(result.contextCoverage)?.messages || 'unknown'}`,
+        `ctx_memory=${safeContextCoverage(result.contextCoverage)?.memory || 'unknown'}`,
+        `ctx_milestones=${safeContextCoverage(result.contextCoverage)?.milestones || 'unknown'}`,
+        `ctx_previous=${safeContextCoverage(result.contextCoverage)?.previousThoughts || 'unknown'}`,
+        `ctx_pending=${safeContextCoverage(result.contextCoverage)?.pendingTopic || 'unknown'}`,
         `autonomous_wait_minutes=${Number.isSafeInteger(result.autonomousMinutesUntilDue) &&
             result.autonomousMinutesUntilDue >= 0 &&
             result.autonomousMinutesUntilDue <= 1440
