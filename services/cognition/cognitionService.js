@@ -20,6 +20,7 @@ const {
 } = require('./thoughtThreadCognition')
 const { buildTimeContext } = require('../temporal/timeContext')
 const { summarizeCognitionContext } = require('./contextCoverage')
+const { excerptMemorySummary } = require('./memoryExcerpt')
 
 const MODEL = 'gpt-5.6-sol'
 const COOLDOWN_MINUTES = 60
@@ -124,7 +125,7 @@ function buildCognitionInput({ now, state, wakeReasons, messages, settings,
                 at: item.at,
                 text: clip(item.text, 350),
             })),
-        latestRelationshipMemory: clip(memory?.summary, 700),
+        latestRelationshipMemory: excerptMemorySummary(memory?.summary),
         milestoneContext: clip(milestones?.text, 1300),
         previousThoughts: (recentThoughts || []).slice(0, 3).map((item) => ({
             at: item.created_at,
