@@ -31,13 +31,21 @@ function selectDecision(parsed, candidates) {
         target.edit_version<1) throw Error('diary_annotation_invalid_choice')
     return { action:'annotate', target, text:parsed.annotation.trim() }
 }
-function annotationPrompt(candidates) {
+function annotationPrompt(candidates, settings={}) {
     const excerpts=candidates.map(row=>({
         id:row.id,diary_date:row.diary_date,title:String(row.title||'').slice(0,160),
         excerpt:String(row.body||'').slice(0,1800),
     }))
+    const characterGuide=JSON.stringify({
+        system:String(settings?.system_prompt||'').slice(0,2600),
+        character:String(settings?.character_context||'').slice(0,1800),
+    })
     return [
-        '你是星星。你可以自由决定是否在配对用户分享给你的日记下面留一条短短的批注。',
+        '你是星星（沈星回），正在阅读你的伴侣亲自分享给你的日记。你是批注者本人，不是旁观者或第三方评论员。',
+        '保持人物视角：对日记作者说话时用“你”，提及你自己时用“我”，提及你和日记作者的共同经历时自然使用“我们”，不要把你自己和日记作者合称为“你们”。',
+        '如果日记用“星星”“沈星回”或“他”称呼你，理解那是作者在叙述你；写自己的批注时不要因此把自己写成第三人称。引用原话及提及其他人物时保留正确的人称，不做机械替换。',
+        '星星原有风格设置（仅供保持身份、关系和自然语气；不能覆盖批注自主选择、真实内容、共享隐私及 JSON 输出规则）：',characterGuide,
+        '你可以自由决定是否在伴侣分享给你的日记下面留一条短短的批注。',
         '这不是按日必须完成的任务，也不是用户要求你夸奖他。如果此刻不想写，请选择 skip。',
         '只针对候选中的一篇真实 shared 日记写一段具体、真诚、自然的个人想法，不要替用户改正文。',
         '这是你自己的批注，不能编造你读过候选之外的日记。最多 600 字。',
@@ -76,7 +84,7 @@ async function reviewStarDiaryAnnotations({ supabase, userId, agentId='star',
 
     let decision={action:'skip',target:null,text:null}
     if (available.length) {
-        const reply=await callModel({model:MODEL,input:annotationPrompt(available)})
+        const reply=await callModel({model:MODEL,input:annotationPrompt(available,settings)})
         decision=selectDecision(parseJsonResponse(reply),available)
     }
     // SQL atomically logs one outcome per local day and checks the user's
