@@ -156,9 +156,9 @@ async function buildThoughtThreadChatContext({
     recentMessages = [], currentMessageId = null, currentMessageAt = null,
     readTimeoutMs = DEFAULT_READ_TIMEOUT_MS,
 } = {}) {
-    // Only the existing Star persona can see Star's internal Threads. Voice
-    // with another agent must be excluded by the caller before entering here.
-    if (!supabase || !userId || agentId !== 'star' ||
+    // Recall only the authenticated user's own Agent namespace.
+    // Star and Guai can each read their own Threads, never the other Agent's.
+    if (!supabase || !userId || !['star', 'guai'].includes(agentId) ||
         !['text', 'voice'].includes(channel) || !hasMeaningfulQuery(message)) {
         return { context: '', matched: 0 }
     }

@@ -79,12 +79,14 @@ async function getConversationExcerpt({ supabase, userId, sessionId }) {
 }
 
 async function readOptional(label, getter, fallback) {
-    if (typeof getter !== 'function') return fallback
+    if (typeof getter !== 'function') {
+        return { value: fallback, status: 'unwired' }
+    }
     try {
-        return await getter()
+        return { value: await getter(), status: 'available' }
     } catch (_) {
         console.warn(`[cognition] ${label} unavailable; using fallback`)
-        return fallback
+        return { value: fallback, status: 'unavailable' }
     }
 }
 
@@ -351,7 +353,8 @@ async function runCognitionTick({
     let durableEffectSaved = false
     let phase = 'load_context'
     try {
-        const [messages, settings, memory, milestones, previousThoughts, threadContext] = await Promise.all([
+        const [messages, settingsRead, memoryRead, milestonesRead,
+            previousThoughtsRead, threadContextRead] = await Promise.all([
             getConversationExcerpt({ supabase, userId: identity.userId,
                 sessionId: latestUser.session_id }),
             readOptional('settings', () => getSettings?.(identity.userId), null),
@@ -363,6 +366,11 @@ async function runCognitionTick({
                 supabase, ...identity, now: nowDate,
             }), { available: false, eligible: [], known: [] }),
         ])
+        const settings = settingsRead.value
+        const memory = memoryRead.value
+        const milestones = milestonesRead.value
+        const previousThoughts = previousThoughtsRead.value
+        const threadContext = threadContextRead.value
 
         // The initial cheap due probe may become stale while another worker
         // updates a thread. Never spend a model call on an already-closed or
@@ -389,6 +397,9 @@ async function runCognitionTick({
             previousThoughts: relevantPreviousThoughts, state: wake.state,
             memoryConfigured: typeof getLatestMemory === 'function',
             milestonesConfigured: typeof getMilestoneContext === 'function',
+            memoryUnavailable: memoryRead.status === 'unavailable',
+            milestonesUnavailable: milestonesRead.status === 'unavailable',
+            previousThoughtsUnavailable: previousThoughtsRead.status === 'unavailable',
         })
 
         phase = 'model_call'
@@ -502,6 +513,15 @@ async function runCognitionTick({
         } catch (error) {
             stateUpdated = false
             console.warn('[cognition] state update failed after model; stage=update_state')
+            // If no Thought/Thread side effect was durably written, release the
+            // claimed wake so a later Heartbeat can safely retry. The release
+            // uses the claim version, so a concurrent newer chat/state update
+            // is never overwritten. If a durable effect exists, keep the claim
+            // to avoid replaying and duplicating that effect.
+            if (!durableEffectSaved) {
+                await releaseWakeOnFailure({ supabase, identity,
+                    previousState, claimedState: wake.state, now: nowDate })
+            }
         }
         // Only outcome categories are logged, never messages, draft text, IDs,
         // user identity, prompt fragments or credentials.
@@ -515,6 +535,7 @@ async function runCognitionTick({
             `ctx_pending=${contextCoverage.pendingTopic}`)
         return {
             executed: true, stored: !!savedThought,
+            outcome: stateUpdated ? 'complete' : 'partial',
             gateStatus: 'executed',
             threadStatus: threadResult.status,
             threadDecision,

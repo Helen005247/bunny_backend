@@ -24,6 +24,7 @@ const {
     bindImageToMessage, getSessionImageMap,
 } = require('./services/images/imageService')
 const { recordUserMessage } = require('./services/cognition/runtimeStateService')
+const { resolveAgentIdentity } = require('./services/agentIdentity')
 const { createCognitionModelCaller } = require('./services/cognition/modelCallPolicy')
 const { buildThoughtThreadChatContext } = require('./services/cognition/thoughtThreadChatContext')
 const { buildDiaryChatContext } = require('./services/diary/diaryRecall')
@@ -3337,6 +3338,7 @@ function buildModelContext({
     messages,
     characterLoreContext = '',
     storyLoreContext = '',
+    agentKey = 'xingxing',
 }) {
 
     const systemPrompt =
@@ -3365,9 +3367,8 @@ function buildModelContext({
     const sections = []
 
     if (systemPrompt) {
-
-        sections.push(
-            `【最高优先级：角色行为规则】
+        const roleRules = agentKey === 'xingxing'
+            ? `【最高优先级：角色行为规则】
 ${systemPrompt}
 
 【对“克制 / 自然 / 不油腻”的统一解释】
@@ -3375,8 +3376,10 @@ ${systemPrompt}
 当用户主动拉近距离、索要更多亲密或明显在调情时，可以自然顺势回应，不要为了“保持克制”而反复把互动锁死在同一层级，也不要自行发明“只能一次”“额度到了”“到此为止”“再多要涨价”之类的限制。
 但这里是手机即时聊天，不是小说创作。优先用短句、口语化、像聊天气泡一样的对白回应；不要连续写动作、环境、心理旁白。必要动作只用一句很短的聊天式表达带过。
 在模型和线路允许的范围内，亲密程度应跟随用户当前明确表达逐步推进；仍然保持沈星回本人的语气、尊重双方意愿，不需要突然变成夸张、油腻或模板化的情话机器。`
-        )
+            : `【最高优先级：角色行为规则】
+${systemPrompt}`
 
+        sections.push(roleRules)
     }
 
     if (characterContext) {
@@ -11945,36 +11948,15 @@ app.get(
 
 
 // ======================================================
-// App 内通话：当前登录账号对应的 AI key
-//
-// 妈妈账号 user_metadata.name = Mom -> guai
-// 其他账号 -> xingxing
+// Authenticated user -> canonical Hermit Agent identity.
+// Mapping is server-controlled by immutable Supabase user IDs;
+// never infer Agent identity from client input or editable display names.
+// HERMIT_STAR_USER_ID -> database agent_id=star, voice agent_key=xingxing
+// HERMIT_GUAI_USER_ID -> database agent_id=guai, voice agent_key=guai
 // ======================================================
 
-function getCallAgentKey(
-    user
-) {
-
-    const displayName =
-        String(
-            user
-                ?.user_metadata
-                ?.name ||
-            ''
-        )
-            .trim()
-            .toLowerCase()
-
-    if (
-        displayName ===
-        'mom' ||
-        displayName ===
-        '妈妈'
-    ) {
-        return 'guai'
-    }
-
-    return 'xingxing'
+function getCallAgentKey(userId) {
+    return resolveAgentIdentity(userId).agentKey
 }
 
 
@@ -14935,7 +14917,7 @@ app.post(
 
             const agentKey =
                 getCallAgentKey(
-                    req.user
+                    req.userId
                 )
 
             const agentVoiceSettings =
@@ -16914,6 +16896,17 @@ app.get(
                 return
             }
 
+            let agentIdentity
+            try {
+                agentIdentity = resolveAgentIdentity(req.userId)
+            } catch (_) {
+                return res.status(403).json({
+                    ok: false,
+                    code: 'AGENT_IDENTITY_NOT_CONFIGURED',
+                    error: '当前账号尚未配置对应的 Hermit Agent',
+                })
+            }
+
             const sessionId =
                 parsePositiveSessionId(
                     req.params.id
@@ -17049,6 +17042,8 @@ app.get(
                     storyLoreContext:
                         storyLore
                             .context,
+
+                    agentKey: agentIdentity.agentKey,
 
                 })
 
@@ -17641,6 +17636,17 @@ app.post(
                 return
             }
 
+            let agentIdentity
+            try {
+                agentIdentity = resolveAgentIdentity(req.userId)
+            } catch (_) {
+                return res.status(403).json({
+                    ok: false,
+                    code: 'AGENT_IDENTITY_NOT_CONFIGURED',
+                    error: '当前账号尚未配置对应的 Hermit Agent',
+                })
+            }
+
             const {
 
                 message,
@@ -17826,8 +17832,9 @@ app.post(
             let callSessionId =
                 null
 
+            // Text and voice messages use the same authenticated Agent identity.
             let callAgentKey =
-                null
+                agentIdentity.agentKey
 
             let sessionId =
                 null
@@ -18095,9 +18102,18 @@ app.post(
                         })
                 }
 
-                callAgentKey =
-                    activeCallSession.agent_key ||
-                    getCallAgentKey(req.user)
+                if (
+                    activeCallSession.agent_key &&
+                    activeCallSession.agent_key !== agentIdentity.agentKey
+                ) {
+                    return res.status(409).json({
+                        ok: false,
+                        code: 'CALL_AGENT_IDENTITY_MISMATCH',
+                        error: '当前通话的 Agent 身份与账号配置不一致，请重新开始通话',
+                    })
+                }
+
+                callAgentKey = agentIdentity.agentKey
             }
 
 
@@ -18542,7 +18558,7 @@ app.post(
                     .then(() => recordUserMessage({
                         supabase,
                         userId: req.userId,
-                        agentId: 'star',
+                        agentId: agentIdentity.agentId,
                         messageAt: userMessage.created_at,
                     }))
                     .catch((error) => {
@@ -18854,6 +18870,8 @@ app.post(
                         storyLore
                             .context,
 
+                    agentKey: callAgentKey,
+
                 })
 
 
@@ -18909,25 +18927,30 @@ app.post(
                 text: '',
             }
 
-            try {
-                milestoneContext =
-                    await getMilestoneContext({
-                        milestoneService,
-                        milestoneMemoryBridge,
-                        supabase,
-                        userId:
-                            req.userId,
-                        agentId:
-                            'star',
-                        days:
-                            365,
-                    })
-            } catch (milestoneError) {
-                // Milestone 是增强上下文，不应该因为数据库或检索异常阻断普通聊天。
-                console.error(
-                    '[milestone-context] failed softly:',
-                    milestoneError?.message || milestoneError
-                )
+            // The current Milestone integration has only been verified for Star.
+            // Do not inject Star milestones into Guai chats until the Guai path is
+            // separately audited and covered by its own tests.
+            if (agentIdentity.agentId === 'star') {
+                try {
+                    milestoneContext =
+                        await getMilestoneContext({
+                            milestoneService,
+                            milestoneMemoryBridge,
+                            supabase,
+                            userId:
+                                req.userId,
+                            agentId:
+                                'star',
+                            days:
+                                365,
+                        })
+                } catch (milestoneError) {
+                    // Milestone 是增强上下文，不应该因为数据库或检索异常阻断普通聊天。
+                    console.error(
+                        '[milestone-context] failed softly:',
+                        milestoneError?.message || milestoneError
+                    )
+                }
             }
 
 
@@ -18984,7 +19007,10 @@ app.post(
             // record or a Supabase error never breaks the ordinary chat path.
             // No image bytes/URLs are provided to the text model.
             let visualIdentityReplyContext = ''
-            if (detectVisualIdentityIntent(cleanMessage, { channel: messageChannel })) {
+            if (
+                agentIdentity.agentId === 'star' &&
+                detectVisualIdentityIntent(cleanMessage, { channel: messageChannel })
+            ) {
                 try {
                     const identityContextResult = await buildVisualIdentityChatContext({
                         supabase,
@@ -19007,12 +19033,12 @@ app.post(
             // working text. Other voice agents never receive Star's Threads.
             // A missing table or a slow DB must not interrupt ordinary chat.
             let thoughtThreadReplyContext = ''
-            if (messageChannel === 'text' || callAgentKey === 'xingxing') {
+            if (agentIdentity.agentId === 'star' || agentIdentity.agentId === 'guai') {
                 try {
                     const recall = await buildThoughtThreadChatContext({
                         supabase,
                         userId: req.userId,
-                        agentId: 'star',
+                        agentId: agentIdentity.agentId,
                         message: cleanMessage,
                         channel: messageChannel,
                         recentMessages: history,
@@ -19031,7 +19057,7 @@ app.post(
             // Diary v1: select only relevant archived notes. The Star diary is
             // never read by another voice persona and never blocks chat.
             let diaryReplyContext = ''
-            if (messageChannel === 'text' || callAgentKey === 'xingxing') {
+            if (agentIdentity.agentId === 'star') {
                 try {
                     const diaryRecall = await buildDiaryChatContext({
                         supabase,
@@ -19132,7 +19158,7 @@ app.post(
             const voicePresets =
                 messageChannel === 'voice'
                     ? await loadVoicePresets(
-                        callAgentKey || getCallAgentKey(req.user)
+                        callAgentKey || getCallAgentKey(req.userId)
                     )
                     : []
 
@@ -19140,7 +19166,7 @@ app.post(
                 buildVoiceStyleReplyContext(
                     messageChannel,
                     voicePresets,
-                    callAgentKey || getCallAgentKey(req.user)
+                    callAgentKey || getCallAgentKey(req.userId)
                 )
 
             if (
@@ -19327,7 +19353,7 @@ app.post(
                     resolveVoicePreset(
                         voicePresets,
                         'normal',
-                        callAgentKey || getCallAgentKey(req.user)
+                        callAgentKey || getCallAgentKey(req.userId)
                     )
 
                 let currentVoiceStyle = {
@@ -19356,7 +19382,7 @@ app.post(
 
                         return enabledVoicePresets(
                             voicePresets,
-                            callAgentKey || getCallAgentKey(req.user)
+                            callAgentKey || getCallAgentKey(req.userId)
                         )
                             .some(
                                 (
@@ -19383,7 +19409,7 @@ app.post(
                                 styleValue,
                                 intensityValue,
                                 voicePresets,
-                                callAgentKey || getCallAgentKey(req.user)
+                                callAgentKey || getCallAgentKey(req.userId)
                             )
 
                         if (!parsed) {
@@ -19394,7 +19420,7 @@ app.post(
                             resolveVoicePreset(
                                 voicePresets,
                                 parsed.style,
-                                callAgentKey || getCallAgentKey(req.user)
+                                callAgentKey || getCallAgentKey(req.userId)
                             )
 
                         currentVoiceStyle = {
@@ -19452,7 +19478,7 @@ app.post(
                                 extractLooseVoiceStyleHeader(
                                     speechBuffer,
                                     voicePresets,
-                                    callAgentKey || getCallAgentKey(req.user),
+                                    callAgentKey || getCallAgentKey(req.userId),
                                     {
                                         // 流还在继续时，不能因为只收到了
                                         // “comforting 0.4” 就过早认定头部完成。
@@ -19581,7 +19607,7 @@ app.post(
                                 resolveVoicePreset(
                                     voicePresets,
                                     styleKey,
-                                    callAgentKey || getCallAgentKey(req.user)
+                                    callAgentKey || getCallAgentKey(req.userId)
                                 )
 
                             applyStreamingVoiceStyle(
@@ -19649,7 +19675,7 @@ app.post(
                             resolveVoicePreset(
                                 voicePresets,
                                 styleKey,
-                                callAgentKey || getCallAgentKey(req.user)
+                                callAgentKey || getCallAgentKey(req.userId)
                             )
 
                         applyStreamingVoiceStyle(
@@ -19883,7 +19909,7 @@ app.post(
                                 extractLooseVoiceStyleHeader(
                                     candidate,
                                     voicePresets,
-                                    callAgentKey || getCallAgentKey(req.user)
+                                    callAgentKey || getCallAgentKey(req.userId)
                                 )
 
                             if (
@@ -20289,7 +20315,7 @@ app.post(
                                 cleanedRawReply,
                                 messageChannel,
                                 voicePresets,
-                                callAgentKey || getCallAgentKey(req.user)
+                                callAgentKey || getCallAgentKey(req.userId)
                             )
 
                     } else if (
@@ -20599,7 +20625,7 @@ app.post(
                     rawReply,
                     messageChannel,
                     voicePresets,
-                    callAgentKey || getCallAgentKey(req.user)
+                    callAgentKey || getCallAgentKey(req.userId)
                 )
 
 

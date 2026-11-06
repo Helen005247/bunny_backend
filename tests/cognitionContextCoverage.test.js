@@ -45,6 +45,18 @@ test('distinguishes empty summary from response shape mismatch', () => {
     assert.equal(wrong.milestones, 'shape_mismatch')
 })
 
+test('distinguishes unavailable reads from genuinely empty sources', () => {
+    const status = summarizeCognitionContext({
+        messages: [{ text: 'synthetic chat' }],
+        memory: null, memoryConfigured: true, memoryUnavailable: true,
+        milestones: null, milestonesConfigured: true, milestonesUnavailable: true,
+        previousThoughts: [], previousThoughtsUnavailable: true,
+    })
+    assert.equal(status.memory, 'unavailable')
+    assert.equal(status.milestones, 'unavailable')
+    assert.equal(status.previousThoughts, 'unavailable')
+})
+
 test('heartbeat sanitizes every context label and drops extra private fields', async () => {
     const PRIVATE = 'PRIVATE_CONTEXT_DO_NOT_ECHO'
     const safe = await sendHeartbeat({ ...AUTH, fetchImpl: async () => response({
@@ -63,6 +75,19 @@ test('heartbeat sanitizes every context label and drops extra private fields', a
     }) })
     assert.match(formatHeartbeatLog(invalid), /ctx_messages=unknown; ctx_memory=unknown/)
     assert.doesNotMatch(formatHeartbeatLog(invalid), /PRIVATE_CONTEXT_DO_NOT_ECHO/)
+})
+
+test('heartbeat preserves only the fixed unavailable diagnostic label', async () => {
+    const value = await sendHeartbeat({ ...AUTH, fetchImpl: async () => response({
+        ok: true, executed: true, stored: false, stateUpdated: true,
+        contextCoverage: { messages: 'present', memory: 'unavailable',
+            milestones: 'unavailable', previousThoughts: 'unavailable',
+            pendingTopic: 'empty' },
+    }) })
+    const line = formatHeartbeatLog(value)
+    assert.match(line, /ctx_memory=unavailable/)
+    assert.match(line, /ctx_milestones=unavailable/)
+    assert.match(line, /ctx_previous=unavailable/)
 })
 
 test('old backend and skipped wake still produce safe unknown labels', async () => {

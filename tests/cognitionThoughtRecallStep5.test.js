@@ -62,6 +62,22 @@ test('Step 5: completed relevant thought is available as prior fact', async () =
     assert.equal(db.seen.filter(x => x.method === 'eq' && x.k === 'agent_id').length, 2)
 })
 
+test('Step 5: Guai recalls only Guai Threads for the authenticated user', async () => {
+    const db = fakeDb([
+        row({ agent_id: 'guai', title: '生日朋友圈计划', result: '乖乖自己的思考进展。' }),
+        row({ agent_id: 'star', title: '生日朋友圈计划', result: 'STAR_ONLY_SECRET' }),
+    ])
+    const result = await buildThoughtThreadChatContext({
+        supabase: db, userId: A, agentId: 'guai', channel: 'text',
+        message: '之前的生日朋友圈计划你想好了吗？',
+    })
+    assert.equal(result.matched, 1)
+    assert.match(result.context, /乖乖自己的思考进展/)
+    assert.doesNotMatch(result.context, /STAR_ONLY_SECRET/)
+    assert.equal(db.seen.filter(x => x.method === 'eq' && x.k === 'user_id').length, 2)
+    assert.equal(db.seen.filter(x => x.method === 'eq' && x.k === 'agent_id').length, 2)
+})
+
 test('Step 5: no topic overlap or merely wishing happy birthday has no recall', async () => {
     const db = fakeDb([row()])
     assert.deepEqual(await recall(db, '今天中午吃什么？'), { context: '', matched: 0 })
@@ -173,6 +189,7 @@ test('Step 5: missing DB, wrong agent, failed DB, and slow reads fail open', asy
 
 test('Step 5: production chat is wired before BOTH streaming and normal response', () => {
     const src = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8')
+        .replace(/\r\n/g, '\n')
     const recallCall = src.indexOf('const recall = await buildThoughtThreadChatContext({')
     const recallPush = src.indexOf('modelInputSections.push(thoughtThreadReplyContext)')
     const inputJoin = src.indexOf('const modelInput =\n')
@@ -181,7 +198,10 @@ test('Step 5: production chat is wired before BOTH streaming and normal response
     assert.ok(recallPush > recallCall)
     assert.ok(inputJoin > recallPush && streaming > inputJoin)
     assert.match(src.slice(recallCall, recallPush), /userId: req\.userId/)
-    assert.match(src.slice(recallCall, recallPush), /agentId: 'star'/)
-    assert.match(src.slice(recallCall - 220, recallCall), /messageChannel === 'text' \|\| callAgentKey === 'xingxing'/)
+    assert.match(src.slice(recallCall, recallPush), /agentId: agentIdentity\.agentId/)
+    const guardStart = src.lastIndexOf('if (agentIdentity.agentId', recallCall)
+    assert.ok(guardStart >= 0)
+    assert.match(src.slice(guardStart, recallCall),
+        /agentIdentity\.agentId === 'star' \|\| agentIdentity\.agentId === 'guai'/)
     assert.match(src, /const \{ buildThoughtThreadChatContext \} = require\('\.\/services\/cognition\/thoughtThreadChatContext'\)/)
 })

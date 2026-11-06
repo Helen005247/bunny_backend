@@ -55,7 +55,7 @@ test('wake gate skip is successful, does not force thinking', async () => {
         ok: true, executed: false, reason: 'wake_gate_skipped', pendingReasons: [],
     }) })
     assert.deepEqual(result, {
-        executed: false, stored: false, reason: 'wake_gate_skipped',
+        executed: false, stored: false, reason: 'wake_gate_skipped', outcome: 'skipped',
     })
 })
 
@@ -123,10 +123,27 @@ test('V2 repair: Action diagnostics show fixed reason codes and never model text
     assert.match(log, /wake=periodic_autonomous/)
     assert.match(log, /thread=none/)
     assert.match(log, /state=updated/)
+    assert.match(log, /outcome=complete/)
     assert.equal(log.includes(PRIVATE), false)
     assert.equal(JSON.stringify(result).includes(PRIVATE), false)
     assert.equal(log.includes(SECRET), false)
     assert.equal(log.includes(UUID), false)
+})
+
+test('partial Cognition result is visible as partial and never retried as an HTTP failure', async () => {
+    let calls = 0
+    const result = await sendHeartbeat({ ...args, sleep: async () => {},
+        fetchImpl: async () => {
+            calls++
+            return jsonResponse({ ok: true, executed: true, stored: true,
+                outcome: 'partial', stateUpdated: false })
+        },
+    })
+    assert.equal(calls, 1)
+    assert.equal(result.outcome, 'partial')
+    assert.equal(result.stateUpdated, false)
+    assert.match(formatHeartbeatLog(result), /outcome=partial/)
+    assert.match(formatHeartbeatLog(result), /state=failed/)
 })
 
 test('V2 repair: skipped gate prints bounded time until next independent opportunity', async () => {

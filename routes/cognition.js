@@ -6,6 +6,7 @@
 const crypto = require('crypto')
 const express = require('express')
 const { runCognitionTick } = require('../services/cognition/cognitionService')
+const { matchesExpectedUserId } = require('../services/agentIdentity')
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -20,6 +21,7 @@ function secureEqual(actual, expected) {
 function createCognitionRouter({ supabase, callModel,
     getSettings, getLatestMemory, getMilestoneContext,
     runTick = runCognitionTick, expectedSecret = process.env.COGNITION_TICK_SECRET,
+    expectedUserId = process.env.HERMIT_STAR_USER_ID,
 } = {}) {
     const router = express.Router()
 
@@ -37,10 +39,21 @@ function createCognitionRouter({ supabase, callModel,
                     error: 'Cognition 数据库或模型尚未配置' })
             }
             const input = req.body || {}
-            if (!UUID_RE.test(input.userId || '') ||
-                (input.agentId != null && input.agentId !== 'star')) {
+            if (!UUID_RE.test(expectedUserId || '')) {
+                return res.status(503).json({ ok: false,
+                    error: '未配置有效的 HERMIT_STAR_USER_ID' })
+            }
+            if (!UUID_RE.test(input.userId || '')) {
                 return res.status(400).json({ ok: false,
-                    error: '请提供有效的 userId；Step 2 目前仅支持 agentId=star' })
+                    error: '请提供有效的 userId' })
+            }
+            if (!matchesExpectedUserId(input.userId, expectedUserId)) {
+                return res.status(403).json({ ok: false,
+                    error: '当前 Cognition 入口仅允许配置的 Star 用户' })
+            }
+            if (input.agentId != null && input.agentId !== 'star') {
+                return res.status(400).json({ ok: false,
+                    error: '当前 Cognition 入口仅支持 agentId=star' })
             }
             // Private callers may use heartbeat to check absence/review
             // checkpoints. Manual remains the Step 2 backwards-compatible default.

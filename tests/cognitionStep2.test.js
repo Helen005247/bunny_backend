@@ -245,8 +245,8 @@ test('private router refuses missing secret and bad token, calls service only wh
         const createRouter=require(routePath)
         let executions=0
         const secret='top-secret-1234567890-1234567890'
-        createRouter({expectedSecret:secret, supabase:{from(){return {}}},
-            callModel:async()=>response(),
+        createRouter({expectedSecret:secret, expectedUserId:USER_A,
+            supabase:{from(){return {}}}, callModel:async()=>response(),
             runTick:async({userId,agentId})=>{
                 executions++
                 assert.equal(userId,USER_A)
@@ -424,7 +424,7 @@ test('private cognition route accepts heartbeat and rejects unknown trigger type
         const secret='superlong-cognition-secret-for-testing'
         const invocations=[]
         router({supabase:{from(){return {}}},callModel:async()=>response(),
-            expectedSecret:secret,runTick:async args=>{
+            expectedSecret:secret,expectedUserId:USER_A,runTick:async args=>{
                 invocations.push(args.triggerType)
                 return {executed:false,reason:'wake_gate_skipped'}
             }})
@@ -487,11 +487,13 @@ test('pending review can wake without any new absence checkpoint', async () => {
 test('chat activity hook is present exactly after successful persisted user message', () => {
     const fs=require('node:fs')
     const server=fs.readFileSync(path.resolve(__dirname,'../server.js'),'utf8')
+        .replace(/\r\n/g, '\n')
     assert.equal((server.match(/\[cognition\] chat activity update skipped:/g)||[]).length,1)
     const from=server.indexOf('persistedUserMessage =\n                    userMessage\n            }')
     const next=server.indexOf('如果用户在真实聊天消息里提到“那个游戏”',from)
     assert.ok(from>0 && next>from)
     assert.match(server.slice(from,next), /recordUserMessage\(\{/)
+    assert.match(server.slice(from,next), /agentId: agentIdentity\.agentId/)
     assert.match(server.slice(from,next), /\.catch\(\(error\)/)
     assert.ok(!server.slice(from,next).includes('await recordUserMessage'))
 })

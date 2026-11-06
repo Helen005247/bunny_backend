@@ -26,12 +26,13 @@ const SAFE_THREAD_DECISIONS = new Set([
     'complete', 'abandon',
 ])
 const SAFE_THREAD_CONTEXT_STATUSES = new Set(['empty', 'eligible', 'unavailable'])
+const SAFE_OUTCOMES = new Set(['complete', 'partial', 'skipped'])
 // Only structural presence flags are accepted; no prompt/data fragments.
 const SAFE_CONTEXT_COVERAGE = {
     messages: new Set(['present', 'empty']),
-    memory: new Set(['present', 'empty', 'unwired', 'shape_mismatch']),
-    milestones: new Set(['present', 'empty', 'unwired', 'shape_mismatch']),
-    previousThoughts: new Set(['present', 'empty']),
+    memory: new Set(['present', 'empty', 'unwired', 'unavailable', 'shape_mismatch']),
+    milestones: new Set(['present', 'empty', 'unwired', 'unavailable', 'shape_mismatch']),
+    previousThoughts: new Set(['present', 'empty', 'unavailable']),
     pendingTopic: new Set(['present', 'empty']),
 }
 
@@ -121,6 +122,15 @@ async function sendHeartbeat({ endpoint, userId, secret,
                     'new_user_message_during_tick'].includes(result.reason)
                     ? result.reason : 'skipped'),
         }
+        if (SAFE_OUTCOMES.has(result.outcome)) {
+            safe.outcome = result.outcome
+        } else if (result.stateUpdated === false) {
+            safe.outcome = 'partial'
+        } else if (result.stateUpdated === true && result.executed === true) {
+            safe.outcome = 'complete'
+        } else if (result.executed === false) {
+            safe.outcome = 'skipped'
+        }
         // Optional fields are absent on older deployments. Validate *each*
         // string against fixed enums before allowing it into diagnostic logs.
         if (Object.hasOwn(result, 'gateStatus')) {
@@ -163,6 +173,7 @@ function formatHeartbeatLog(result) {
             'new_user_message_during_tick'].includes(result.reason)
             ? result.reason : 'skipped')
     const detail = [
+        `outcome=${safeDiagnostic(result.outcome, SAFE_OUTCOMES)}`,
         `gate=${safeDiagnostic(result.gateStatus, SAFE_GATE_STATUSES)}`,
         `wake=${safeWakeReasons(result.wakeReasons)?.join(',') || 'none'}`,
         `thread=${safeDiagnostic(result.threadStatus, SAFE_THREAD_STATUSES)}`,
@@ -191,6 +202,12 @@ async function main() {
         secret: process.env.COGNITION_TICK_SECRET,
     })
     console.log(formatHeartbeatLog(result))
+    // A 200 response means the request was handled, not necessarily that all
+    // durable state bookkeeping completed. Surface partial outcomes as a red
+    // Action without retrying the model request and duplicating saved work.
+    if (result.outcome === 'partial' || result.stateUpdated === false) {
+        throw new Error('Cognition Heartbeat partially completed: runtime state update failed')
+    }
 }
 
 if (require.main === module) {

@@ -26,6 +26,7 @@ function fakeDb() {
     let nextThought = 1
     const db = { rows, dueProbes: 0, onDueProbe: null,
         failProbe: false, failContext: false, failDeferredUpdate: false,
+        failCognitionStateUpdate: false,
         from(name) {
             if (!Object.hasOwn(rows, name)) throw Error(`Unexpected table ${name}`)
             return new Builder(name)
@@ -83,6 +84,13 @@ function fakeDb() {
                 db.failDeferredUpdate) {
                 return Promise.resolve({ data: null,
                     error: { code: 'PGRST500', message: 'update failed' } })
+            }
+            if (this.table === 'agent_runtime_state' && this.mode === 'update' &&
+                Object.hasOwn(this.payload, 'last_cognition_at') &&
+                db.failCognitionStateUpdate) {
+                db.failCognitionStateUpdate = false
+                return Promise.resolve({ data: null,
+                    error: { code: 'PGRST500', message: 'cognition state update failed' } })
             }
             if (this.mode === 'upsert') {
                 if (!rows[this.table].some((r) => r.user_id === this.payload.user_id &&
@@ -652,4 +660,61 @@ test('V2 repair: model exceptions are logged by fixed stage, not private error t
         assert.ok(logs.some((line) => line.includes('stage=model_call')))
         assert.equal(logs.join(' ').includes(PRIVATE), false)
     } finally { console.warn = warn }
+})
+
+test('V2 repair: failed state update is partial and releases wake when no durable effect was saved', async () => {
+    const db = fakeDb()
+    const previousWake = '2026-10-15T05:00:00.000Z'
+    db.rows.agent_runtime_state.push({ user_id: A, agent_id: 'star',
+        last_user_message_at: '2026-10-15T11:50:00.000Z',
+        last_wake_at: previousWake, last_cognition_at: previousWake,
+        absence_started_at: null, absence_checkpoint: 0, next_review_at: null,
+        metadata: {}, version: 0 })
+    db.failCognitionStateUpdate = true
+
+    const result = await run(db, async () => model())
+
+    assert.equal(result.executed, true)
+    assert.equal(result.outcome, 'partial')
+    assert.equal(result.stateUpdated, false)
+    assert.equal(db.rows.agent_thoughts.length, 0)
+    // With no durable Thought/Thread write, a later heartbeat may safely retry.
+    assert.equal(db.rows.agent_runtime_state[0].last_wake_at, previousWake)
+})
+
+test('V2 repair: failed state update keeps the wake claim after a durable Thought write', async () => {
+    const db = fakeDb()
+    const previousWake = '2026-10-15T05:00:00.000Z'
+    db.rows.agent_runtime_state.push({ user_id: A, agent_id: 'star',
+        last_user_message_at: '2026-10-15T11:50:00.000Z',
+        last_wake_at: previousWake, last_cognition_at: previousWake,
+        absence_started_at: null, absence_checkpoint: 0, next_review_at: null,
+        metadata: {}, version: 0 })
+    db.failCognitionStateUpdate = true
+
+    const result = await run(db, async () => model({ type: 'none' }, '一个值得保留的合成想法'))
+
+    assert.equal(result.outcome, 'partial')
+    assert.equal(result.stateUpdated, false)
+    assert.equal(db.rows.agent_thoughts.length, 1)
+    // Do not release/replay a wake after its Thought has already been saved.
+    assert.equal(db.rows.agent_runtime_state[0].last_wake_at, NOW)
+})
+
+test('V2 repair: optional context read errors are diagnosed as unavailable, not empty', async () => {
+    const db = fakeDb()
+    db.rows.agent_runtime_state.push({ user_id: A, agent_id: 'star',
+        last_user_message_at: '2026-10-15T11:50:00.000Z',
+        last_wake_at: '2026-10-15T05:00:00.000Z',
+        last_cognition_at: '2026-10-15T05:00:00.000Z',
+        absence_started_at: null, absence_checkpoint: 0, next_review_at: null,
+        metadata: {}, version: 0 })
+
+    const result = await run(db, async () => model(), NOW, {
+        getLatestMemory: async () => { throw new Error('synthetic memory outage') },
+        getMilestoneContext: async () => { throw new Error('synthetic milestone outage') },
+    })
+
+    assert.equal(result.contextCoverage.memory, 'unavailable')
+    assert.equal(result.contextCoverage.milestones, 'unavailable')
 })
