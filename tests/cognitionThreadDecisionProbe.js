@@ -49,8 +49,15 @@ function diagnose(modelOutput, now) {
     const decision = outcome.threadActionInvalid ? 'invalid' :
         !outcome.threadActionProvided ? 'omitted' :
             outcome.threadAction.type === 'none' ? 'explicit_none' : outcome.threadAction.type
-    return Object.freeze({ decision, shouldStore: outcome.shouldStore,
-        parseValid: true, context: 'empty' })
+    return Object.freeze({
+        decision,
+        thoughtDecision: outcome.shouldStore ? 'store' : 'none',
+        thoughtReason: outcome.thoughtReason,
+        threadReason: outcome.threadReason,
+        shouldStore: outcome.shouldStore,
+        parseValid: true,
+        context: 'empty',
+    })
 }
 
 function safeTimeout(value) {
@@ -84,7 +91,7 @@ async function run({ env = process.env, print = console.log } = {}) {
             }
             try {
                 const result = diagnose(output, now)
-                print(`${name}: response_format=valid; decision=${result.decision}; stored_intent=${result.shouldStore}; elapsed_ms=${Date.now() - started}`)
+                print(`${name}: response_format=valid; thought_decision=${result.thoughtDecision}; thought_reason=${result.thoughtReason}; thread_decision=${result.decision}; thread_reason=${result.threadReason}; elapsed_ms=${Date.now() - started}`)
             } catch (_) {
                 print(`${name}: response_format=invalid; decision=unknown; elapsed_ms=${Date.now() - started}`)
             }

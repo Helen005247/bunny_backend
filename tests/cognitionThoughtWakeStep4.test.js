@@ -616,7 +616,9 @@ test('V2 repair: invalid optional anchor is reseeded rather than blocking other 
     assert.equal(decision.patch.metadata.cognition_autonomous_anchor_at, NOW)
     const manual = evaluateWakeGate({ state, triggerType: 'manual', now: DATE(NOW) })
     assert.deepEqual(manual.reasons, ['manual'])
-    assert.equal(manual.patch.metadata, undefined)
+    assert.equal(manual.patch.last_wake_at, undefined)
+    assert.equal(manual.patch.metadata.cognition_manual_activity_at, NOW)
+    assert.equal(manual.patch.metadata.cognition_heartbeat_activity_at, null)
 })
 
 test('V2 repair: an optional due-thread DB probe failure cannot suppress autonomous wake', async () => {

@@ -36,6 +36,10 @@ const HOUR_MS = 60 * 60 * 1000
 const AUTONOMOUS_INTERVAL_HOURS = 6
 const AUTONOMOUS_INTERVAL_MS = AUTONOMOUS_INTERVAL_HOURS * HOUR_MS
 const AUTONOMOUS_ANCHOR_KEY = 'cognition_autonomous_anchor_at'
+// Keep the two trigger clocks separate without a schema migration. The
+// heartbeat key is seeded from legacy timestamps on the first manual claim.
+const HEARTBEAT_ACTIVITY_KEY = 'cognition_heartbeat_activity_at'
+const MANUAL_ACTIVITY_KEY = 'cognition_manual_activity_at'
 const ABSENCE_HOUR_THRESHOLDS = Object.freeze([
     6, 12, 18, 24, 36, 48, 72,
 ])
@@ -75,18 +79,15 @@ function getAbsenceCheckpoint(elapsedMs) {
     return checkpoints + Math.floor((hours - 72) / 24)
 }
 
-// Existing accounts use their last wake / cognition as the throttle anchor.
-// Brand-new accounts need a durable starting point that is NOT reset by chat.
-// The first heartbeat seeds it; a later heartbeat can wake after six hours.
-function autonomousOpportunity({ nowMs, lastUserMs, lastWakeMs, lastCognitionMs,
-    metadata }) {
+// Existing accounts fall back to legacy last-wake / last-cognition timestamps
+// until the separate heartbeat anchor is seeded. Manual activity never moves
+// the heartbeat's 60-minute throttle or six-hour autonomous opportunity.
+// Brand-new accounts still get a durable anchor that chat does not reset.
+function autonomousOpportunity({ nowMs, lastUserMs, lastActivityMs, metadata }) {
     if (lastUserMs === null || lastUserMs > nowMs) {
         return { due: false, minutesUntilDue: null, needsAnchor: false }
     }
-    const lastActivity = Math.max(
-        lastWakeMs === null ? -Infinity : lastWakeMs,
-        lastCognitionMs === null ? -Infinity : lastCognitionMs
-    )
+    const lastActivity = lastActivityMs
     if (lastActivity !== -Infinity) {
         const remaining = AUTONOMOUS_INTERVAL_MS - (nowMs - lastActivity)
         return { due: remaining <= 0,
@@ -197,13 +198,26 @@ function evaluateWakeGate({
     const lastCognitionMs = parsedMs(
         state.last_cognition_at, 'last_cognition_at'
     )
-    const lastActivityMs = Math.max(
+    const legacyActivityMs = Math.max(
         lastWakeMs === null ? -Infinity : lastWakeMs,
         lastCognitionMs === null ? -Infinity : lastCognitionMs
     )
+    const hasHeartbeatActivityAnchor = Object.hasOwn(metadata, HEARTBEAT_ACTIVITY_KEY)
+    const storedHeartbeatActivityMs = hasHeartbeatActivityAnchor
+        ? parsedMs(metadata[HEARTBEAT_ACTIVITY_KEY], HEARTBEAT_ACTIVITY_KEY)
+        : null
+    // A present null anchor means there has not yet been a heartbeat in the
+    // separated-clock era. Do not let a later manual last_cognition_at reset it.
+    const heartbeatActivityMs = hasHeartbeatActivityAnchor
+        ? (storedHeartbeatActivityMs === null ? -Infinity : storedHeartbeatActivityMs)
+        : legacyActivityMs
+    const manualActivityMs = parsedMs(metadata[MANUAL_ACTIVITY_KEY], MANUAL_ACTIVITY_KEY)
+    const cooldownActivityMs = triggerType === 'manual'
+        ? (manualActivityMs === null ? -Infinity : manualActivityMs)
+        : heartbeatActivityMs
     const autonomous = triggerType === 'heartbeat'
-        ? autonomousOpportunity({ nowMs, lastUserMs, lastWakeMs,
-            lastCognitionMs, metadata })
+        ? autonomousOpportunity({ nowMs, lastUserMs,
+            lastActivityMs: heartbeatActivityMs, metadata })
         : { due: false, minutesUntilDue: null, needsAnchor: false }
     // This is an additional reason, never a substitute for an existing one.
     // Active chatting does not reset the six-hour window.
@@ -218,8 +232,8 @@ function evaluateWakeGate({
             }
         }
     }
-    const inCooldown = lastActivityMs !== -Infinity &&
-        nowMs - lastActivityMs < cooldownMinutes * 60 * 1000
+    const inCooldown = cooldownActivityMs !== -Infinity &&
+        nowMs - cooldownActivityMs < cooldownMinutes * 60 * 1000
     const shouldWake = reasons.length > 0 && !inCooldown
 
     if (shouldWake) {
@@ -241,7 +255,23 @@ function evaluateWakeGate({
                 ].slice(-32),
             }
         }
-        patch.last_wake_at = new Date(nowMs).toISOString()
+        const activityAt = new Date(nowMs).toISOString()
+        if (triggerType === 'manual') {
+            const nextMetadata = { ...metadata, ...(patch.metadata || {}) }
+            if (!hasHeartbeatActivityAnchor) {
+                // Preserve the pre-change heartbeat throttle once, then keep
+                // manual runs from moving that independent clock.
+                nextMetadata[HEARTBEAT_ACTIVITY_KEY] = heartbeatActivityMs === -Infinity
+                    ? null : new Date(heartbeatActivityMs).toISOString()
+            }
+            nextMetadata[MANUAL_ACTIVITY_KEY] = activityAt
+            patch.metadata = nextMetadata
+        } else {
+            patch.last_wake_at = activityAt
+            const nextMetadata = { ...metadata, ...(patch.metadata || {}) }
+            nextMetadata[HEARTBEAT_ACTIVITY_KEY] = activityAt
+            patch.metadata = nextMetadata
+        }
     }
 
     return {
@@ -324,6 +354,8 @@ async function processWakeGate({
 module.exports = {
     ABSENCE_HOUR_THRESHOLDS,
     AUTONOMOUS_INTERVAL_HOURS,
+    HEARTBEAT_ACTIVITY_KEY,
+    MANUAL_ACTIVITY_KEY,
     evaluateWakeGate,
     getAbsenceCheckpoint,
     hasDueThoughtThread,

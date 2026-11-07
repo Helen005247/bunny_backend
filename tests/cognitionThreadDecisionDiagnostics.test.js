@@ -13,6 +13,26 @@ const opts = {
 }
 const response = value => ({ ok: true, status: 200, json: async () => value })
 
+test('decision reason fields accept only fixed labels and remain optional for old outputs', () => {
+    const legacy = parseCognitionOutput(JSON.stringify(common), NOW)
+    assert.equal(legacy.thoughtReason, 'unreported')
+    assert.equal(legacy.threadReason, 'unreported')
+
+    const labelled = parseCognitionOutput(JSON.stringify({ ...common,
+        thought_reason: 'no_new_information',
+        thread_reason: 'no_continuation_value',
+    }), NOW)
+    assert.equal(labelled.thoughtReason, 'no_new_information')
+    assert.equal(labelled.threadReason, 'no_continuation_value')
+
+    const untrusted = parseCognitionOutput(JSON.stringify({ ...common,
+        thought_reason: 'PRIVATE_MESSAGE_MUST_NOT_BE_LOGGED',
+        thread_reason: 'arbitrary model explanation',
+    }), NOW)
+    assert.equal(untrusted.thoughtReason, 'unreported')
+    assert.equal(untrusted.threadReason, 'unreported')
+})
+
 test('parsing distinguishes missing and explicit none without changing stored behavior', () => {
     const missing = parseCognitionOutput(JSON.stringify(common), NOW)
     assert.equal(missing.threadAction.type, 'none')

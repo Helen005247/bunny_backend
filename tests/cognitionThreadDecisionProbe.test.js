@@ -6,10 +6,12 @@ const { syntheticFixture, diagnose, safeTimeout, CASES } = require('./cognitionT
 const { buildCognitionInput } = require('../services/cognition/cognitionService')
 
 const FIXED = new Date('2026-10-31T12:00:00.000Z')
-const wrap = (action, shouldStore = false) => JSON.stringify({
+const wrap = (action, shouldStore = false, reasons = {}) => JSON.stringify({
     should_store: shouldStore, thought: shouldStore ? '值得记住的一点' : '',
+    thought_reason: reasons.thought || (shouldStore ? 'worth_recording' : 'no_new_information'),
     emotion: '平静', significance: 0.5, pending_topic: null, review_after: null,
     thread_action: action,
+    thread_reason: reasons.thread || (action.type === 'none' ? 'no_continuation_value' : 'worth_continuing'),
 })
 
 test('two synthetic fixtures provide distinct meaningful scenarios and empty Thread context', () => {
@@ -26,13 +28,24 @@ test('two synthetic fixtures provide distinct meaningful scenarios and empty Thr
 
 test('decision diagnostics distinguish explicit none, omission, invalid and create', () => {
     assert.equal(diagnose(wrap({ type: 'none' }), FIXED).decision, 'explicit_none')
+    assert.equal(diagnose(wrap({ type: 'none' }), FIXED).thoughtReason, 'no_new_information')
+    assert.equal(diagnose(wrap({ type: 'none' }), FIXED).threadReason, 'no_continuation_value')
     const omitted = JSON.parse(wrap({ type: 'none' }))
     delete omitted.thread_action
     assert.equal(diagnose(JSON.stringify(omitted), FIXED).decision, 'omitted')
     assert.equal(diagnose(wrap({ type: 'unknown' }), FIXED).decision, 'invalid')
-    assert.equal(diagnose(wrap({ type: 'create', title: '生日祝福的构思',
+    const create = diagnose(wrap({ type: 'create', title: '生日祝福的构思',
         current_draft: '祝福开头从一件共同经历开始',
-        next_step: '过两天再考虑结尾', next_review_at: null }), FIXED).decision, 'create')
+        next_step: '过两天再考虑结尾', next_review_at: null }, true), FIXED)
+    assert.equal(create.decision, 'create')
+    assert.equal(create.thoughtDecision, 'store')
+    assert.equal(create.thoughtReason, 'worth_recording')
+    assert.equal(create.threadReason, 'worth_continuing')
+    const untrustedReason = diagnose(wrap({ type: 'none' }, false, {
+        thought: '把私人内容放进日志', thread: '自由文本不允许',
+    }), FIXED)
+    assert.equal(untrustedReason.thoughtReason, 'unreported')
+    assert.equal(untrustedReason.threadReason, 'unreported')
 })
 
 test('default timeout is bounded and cannot accidentally stretch to minutes', () => {
