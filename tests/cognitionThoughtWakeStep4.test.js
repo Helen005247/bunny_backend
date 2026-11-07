@@ -720,3 +720,35 @@ test('V2 repair: optional context read errors are diagnosed as unavailable, not 
     assert.equal(result.contextCoverage.memory, 'unavailable')
     assert.equal(result.contextCoverage.milestones, 'unavailable')
 })
+
+test('Context V2 reviews one historical chunk per tick and persists a resumable per-session cursor', async () => {
+    const db = fakeDb()
+    db.rows.messages = Array.from({ length: 200 }, (_, index) => ({
+        id: index + 1,
+        user_id: A,
+        session_id: 2,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        visible: index % 7 !== 0,
+        channel: 'text',
+        content: `历史消息 ${index + 1} ` + 'x'.repeat(1700),
+        created_at: new Date(Date.parse('2026-10-15T10:00:00.000Z') + index * 1000).toISOString(),
+    }))
+    addThread(db, { next_review_at: NOW })
+    let calls = 0
+    const result = await run(db, async ({ input }) => {
+        calls++
+        assert.match(input, /你是 Hermit 的聊天回顾助手/)
+        return { output_text: JSON.stringify({ observations: ['正在推进的历史主题'] }) }
+    })
+
+    assert.equal(calls, 1)
+    assert.equal(result.executed, false)
+    assert.equal(result.reason, 'context_review_partial')
+    assert.equal(result.contextReview.status, 'partial')
+    assert.equal(db.rows.agent_thoughts.length, 0)
+    const state = db.rows.agent_runtime_state.find((row) => row.user_id === A && row.agent_id === 'star')
+    const sessionReview = state.metadata.cognition_context_v2.sessions['2']
+    assert.ok(sessionReview.reviewedThrough)
+    assert.deepEqual(sessionReview.summary, ['正在推进的历史主题'])
+    assert.equal(state.last_cognition_at, null)
+})
