@@ -21,16 +21,26 @@ test('only reports fixed presence labels for real prompt fields', () => {
         previousThoughts: [{ content: '虚构的旧想法' }],
         state: { pending_topic: '稍后再考虑' },
     })
-    assert.deepEqual(status, { messages: 'present', memory: 'present',
-        milestones: 'present', previousThoughts: 'present', pendingTopic: 'present' })
+    assert.deepEqual(status, {
+        messages: 'present', memory: 'present', milestones: 'present',
+        previousThoughts: 'present', pendingTopic: 'present',
+        systemPrompt: 'empty', characterContext: 'empty',
+        characterLore: 'empty', storyLore: 'empty', historySummary: 'empty',
+        historySummaryItems: 0, historySummaryChars: 0,
+        recentMessageCount: 1, recentMessageChars: 0,
+        characterLoreItems: 0, storyLoreItems: 0,
+    })
     assert.doesNotMatch(JSON.stringify(status), /旅行|日程|虚构/)
 })
 
 test('detects an unwired provider without inventing a missing database fact', () => {
     const status = summarizeCognitionContext({ messages: [],
         memoryConfigured: false, milestonesConfigured: false })
-    assert.deepEqual(status, { messages: 'empty', memory: 'unwired',
-        milestones: 'unwired', previousThoughts: 'empty', pendingTopic: 'empty' })
+    assert.equal(status.messages, 'empty')
+    assert.equal(status.memory, 'unwired')
+    assert.equal(status.milestones, 'unwired')
+    assert.equal(status.previousThoughts, 'empty')
+    assert.equal(status.pendingTopic, 'empty')
 })
 
 test('distinguishes empty summary from response shape mismatch', () => {
@@ -99,6 +109,49 @@ test('old backend and skipped wake still produce safe unknown labels', async () 
         ok: true, executed: false, stored: false, reason: 'wake_gate_skipped',
     }) })
     assert.match(formatHeartbeatLog(skipped), /ctx_messages=unknown/)
+})
+
+
+test('reports dynamic role and reviewed-history coverage without exposing source content', () => {
+    const status = summarizeCognitionContext({
+        messages: [{ text: 'synthetic chat' }],
+        settings: { system_prompt: 'private role prompt', character_context: 'private character context' },
+        characterLore: { status: 'present', context: 'private lore', selected: [{ id: 'private-id' }] },
+        storyLore: { status: 'present', context: 'private story', selected: [{ id: 'private-story-id' }] },
+        conversationReviewSummary: ['private summary one', 'private summary two'],
+        recentMessageCount: 60,
+        recentMessageChars: 2800,
+        settingsReadStatus: 'available',
+        characterLoreReadStatus: 'available',
+        storyLoreReadStatus: 'available',
+    })
+    assert.equal(status.systemPrompt, 'present')
+    assert.equal(status.characterContext, 'present')
+    assert.equal(status.characterLore, 'present')
+    assert.equal(status.storyLore, 'present')
+    assert.equal(status.historySummary, 'present')
+    assert.equal(status.historySummaryItems, 2)
+    assert.equal(status.recentMessageCount, 60)
+    assert.equal(status.recentMessageChars, 2800)
+    assert.equal(status.characterLoreItems, 1)
+    assert.equal(status.storyLoreItems, 1)
+    assert.doesNotMatch(JSON.stringify(status), /private|synthetic/)
+})
+
+test('role diagnostics distinguish unwired, unavailable and empty references', () => {
+    const status = summarizeCognitionContext({
+        messages: [], settingsReadStatus: 'unwired',
+        characterLoreReadStatus: 'unavailable', storyLoreReadStatus: 'available',
+        settings: null,
+        characterLore: { status: 'unavailable', context: '' },
+        storyLore: { status: 'empty', context: '', selected: [] },
+        conversationReviewSummary: [],
+    })
+    assert.equal(status.systemPrompt, 'unwired')
+    assert.equal(status.characterContext, 'unwired')
+    assert.equal(status.characterLore, 'unavailable')
+    assert.equal(status.storyLore, 'empty')
+    assert.equal(status.historySummary, 'empty')
 })
 
 test('actual prompt builder uses the same documented fields and per-source truncation', () => {

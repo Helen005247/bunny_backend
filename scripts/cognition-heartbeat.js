@@ -34,6 +34,19 @@ const SAFE_CONTEXT_COVERAGE = {
     milestones: new Set(['present', 'empty', 'unwired', 'unavailable', 'shape_mismatch']),
     previousThoughts: new Set(['present', 'empty', 'unavailable']),
     pendingTopic: new Set(['present', 'empty']),
+    systemPrompt: new Set(['present', 'empty', 'unwired', 'unavailable', 'shape_mismatch']),
+    characterContext: new Set(['present', 'empty', 'unwired', 'unavailable', 'shape_mismatch']),
+    characterLore: new Set(['present', 'empty', 'unwired', 'unavailable', 'shape_mismatch']),
+    storyLore: new Set(['present', 'empty', 'unwired', 'unavailable', 'shape_mismatch']),
+    historySummary: new Set(['present', 'empty']),
+}
+const SAFE_CONTEXT_COUNTS = {
+    historySummaryItems: 18,
+    historySummaryChars: 2880,
+    recentMessageCount: 60,
+    recentMessageChars: 3000,
+    characterLoreItems: 10,
+    storyLoreItems: 3,
 }
 
 function safeContextCoverage(value) {
@@ -41,6 +54,10 @@ function safeContextCoverage(value) {
     const safe = {}
     for (const [name, allowed] of Object.entries(SAFE_CONTEXT_COVERAGE)) {
         safe[name] = safeDiagnostic(value[name], allowed)
+    }
+    for (const [name, max] of Object.entries(SAFE_CONTEXT_COUNTS)) {
+        safe[name] = Number.isSafeInteger(value[name]) && value[name] >= 0 && value[name] <= max
+            ? value[name] : null
     }
     return safe
 }
@@ -186,6 +203,15 @@ function formatHeartbeatLog(result) {
         `ctx_milestones=${safeContextCoverage(result.contextCoverage)?.milestones || 'unknown'}`,
         `ctx_previous=${safeContextCoverage(result.contextCoverage)?.previousThoughts || 'unknown'}`,
         `ctx_pending=${safeContextCoverage(result.contextCoverage)?.pendingTopic || 'unknown'}`,
+        `ctx_system=${safeContextCoverage(result.contextCoverage)?.systemPrompt || 'unknown'}`,
+        `ctx_character=${safeContextCoverage(result.contextCoverage)?.characterContext || 'unknown'}`,
+        `ctx_lore=${safeContextCoverage(result.contextCoverage)?.characterLore || 'unknown'}`,
+        `ctx_story=${safeContextCoverage(result.contextCoverage)?.storyLore || 'unknown'}`,
+        `ctx_history_items=${safeContextCoverage(result.contextCoverage)?.historySummaryItems ?? 'unknown'}`,
+        `ctx_recent_count=${safeContextCoverage(result.contextCoverage)?.recentMessageCount ?? 'unknown'}`,
+        `ctx_recent_chars=${safeContextCoverage(result.contextCoverage)?.recentMessageChars ?? 'unknown'}`,
+        `ctx_lore_items=${safeContextCoverage(result.contextCoverage)?.characterLoreItems ?? 'unknown'}`,
+        `ctx_story_items=${safeContextCoverage(result.contextCoverage)?.storyLoreItems ?? 'unknown'}`,
         `autonomous_wait_minutes=${Number.isSafeInteger(result.autonomousMinutesUntilDue) &&
             result.autonomousMinutesUntilDue >= 0 &&
             result.autonomousMinutesUntilDue <= 1440

@@ -20,6 +20,7 @@ function secureEqual(actual, expected) {
 
 function createCognitionRouter({ supabase, callModel,
     getSettings, getLatestMemory, getMilestoneContext,
+    getCharacterLoreContext, getStoryLoreContext,
     runTick = runCognitionTick, expectedSecret = process.env.COGNITION_TICK_SECRET,
     expectedUserId = process.env.HERMIT_STAR_USER_ID,
 } = {}) {
@@ -72,6 +73,7 @@ function createCognitionRouter({ supabase, callModel,
                 supabase, userId: input.userId, agentId: 'star',
                 triggerType,
                 callModel, getSettings, getLatestMemory, getMilestoneContext,
+                getCharacterLoreContext, getStoryLoreContext,
             })
             return res.json({ ok: true, ...result })
         } catch (error) {

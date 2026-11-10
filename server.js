@@ -263,6 +263,28 @@ app.use(
         callModel: createCognitionModelCaller({ callModelWithRetry }),
         getSettings: getGlobalSettings,
         getLatestMemory,
+        getCharacterLoreContext: ({ userId, currentMessage, recentMessages }) =>
+            getCharacterLoreContext({
+                userId,
+                currentMessage,
+                recentMessages: (recentMessages || []).map((item) => ({
+                    role: item.role,
+                    content: item.text,
+                    created_at: item.at,
+                })),
+            }),
+        getStoryLoreContext: ({ currentMessage, recentMessages, characterLore }) =>
+            getLoreChunksContext({
+                currentMessage,
+                recentMessages: (recentMessages || []).map((item) => ({
+                    role: item.role,
+                    content: item.text,
+                    created_at: item.at,
+                })),
+                // Match ordinary chat: raw lore_chunks are available only when
+                // this user has selected an active Xingxing character_lore row.
+                enabled: userHasLumiereLore(characterLore),
+            }),
         getMilestoneContext: ({ userId, agentId }) => getMilestoneContext({
             milestoneService,
             milestoneMemoryBridge,
@@ -1586,6 +1608,7 @@ async function getCharacterLoreContext({
         return {
             context: '',
             selected: [],
+            status: 'unavailable',
         }
     }
 
@@ -1593,6 +1616,7 @@ async function getCharacterLoreContext({
         return {
             context: '',
             selected: [],
+            status: 'empty',
         }
     }
 
@@ -1694,6 +1718,7 @@ async function getCharacterLoreContext({
         return {
             context: '',
             selected: [],
+            status: 'empty',
         }
     }
 
@@ -1703,6 +1728,7 @@ async function getCharacterLoreContext({
 
     return {
         selected: budgeted,
+        status: 'present',
         context: `【按当前对话动态选取的原作参考素材】
 下面只是一小组与当前聊天相关的原作参考，不是要逐句复述的台词库。
 
@@ -2794,6 +2820,8 @@ async function getLoreChunksContext({
                 '',
             selected:
                 [],
+            status:
+                'empty',
         }
     }
 
@@ -2819,6 +2847,8 @@ async function getLoreChunksContext({
                 '',
             selected:
                 [],
+            status:
+                'unavailable',
         }
     }
 
@@ -2832,6 +2862,8 @@ async function getLoreChunksContext({
                 '',
             selected:
                 [],
+            status:
+                'empty',
         }
     }
 
@@ -2942,6 +2974,8 @@ async function getLoreChunksContext({
                 '',
             selected:
                 [],
+            status:
+                'empty',
         }
     }
 
@@ -3040,6 +3074,8 @@ async function getLoreChunksContext({
                 '',
             selected:
                 [],
+            status:
+                'empty',
         }
     }
 
@@ -3081,6 +3117,8 @@ async function getLoreChunksContext({
     return {
         triggered:
             true,
+        status:
+            'present',
 
         selected:
             selectedItems,

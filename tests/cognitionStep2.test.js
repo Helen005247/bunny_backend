@@ -111,6 +111,50 @@ function opts(db, callModel) { return {
     getMilestoneContext:async()=>({text:'演讲日 2 天后'}),
 } }
 
+
+test('Cognition loads per-user dynamic character lore and relevant story lore into the real model input', async () => {
+    const db = createFakeSupabase(baseMessages())
+    let characterArgs = null
+    let storyArgs = null
+    let modelInput = ''
+    const result = await runCognitionTick({
+        ...opts(db, async ({ input }) => {
+            modelInput = input
+            return response(false)
+        }),
+        getCharacterLoreContext: async (args) => {
+            characterArgs = args
+            return {
+                status: 'present',
+                selected: [{ id: 'voice-1', character_name: '沈星回', type: 'voice_sample' }],
+                context: 'DYNAMIC_XINGXING_BEHAVIOR_AND_VOICE',
+            }
+        },
+        getStoryLoreContext: async (args) => {
+            storyArgs = args
+            return {
+                status: 'present',
+                selected: [{ id: 'story-1' }],
+                context: 'RELEVANT_ORIGINAL_STORY_CONTEXT',
+            }
+        },
+    })
+
+    assert.equal(result.executed, true)
+    assert.equal(characterArgs.userId, USER_A)
+    assert.equal(characterArgs.agentId, 'star')
+    assert.equal(characterArgs.currentMessage, '我明天还有一个重要的演讲。')
+    assert.equal(characterArgs.recentMessages.some((item) => item.role === 'user' && item.content === '我明天还有一个重要的演讲。'), true)
+    assert.equal(storyArgs.userId, USER_A)
+    assert.equal(storyArgs.characterLore.selected[0].character_name, '沈星回')
+    assert.match(modelInput, /DYNAMIC_XINGXING_BEHAVIOR_AND_VOICE/)
+    assert.match(modelInput, /RELEVANT_ORIGINAL_STORY_CONTEXT/)
+    assert.equal(result.contextCoverage.characterLore, 'present')
+    assert.equal(result.contextCoverage.storyLore, 'present')
+    assert.equal(result.contextCoverage.characterLoreItems, 1)
+    assert.equal(result.contextCoverage.storyLoreItems, 1)
+})
+
 test('wake gate checkpoints 6/12/18/24/36/48/72h and after',()=>{
     const h=3600000
     for(const [hours,expected] of [[0,0],[5,0],[6,1],[7,1],[12,2],
