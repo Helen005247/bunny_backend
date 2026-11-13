@@ -177,3 +177,46 @@ test('V2 repair: corrupted upstream diagnostics cannot inject sensitive text int
     assert.equal(formatHeartbeatLog({ executed: true, stored: true,
         gateStatus: BAD, threadStatus: BAD, wakeReasons: [BAD] }).includes(BAD), false)
 })
+
+test('Context partial is a successful checkpoint, and runner resumes until final once', async () => {
+    const { runAutoResume } = require('../scripts/cognition-heartbeat')
+    let calls = 0
+    const lines = []
+    const result = await runAutoResume({ ...args,
+        send: async () => {
+            calls++
+            if (calls < 3) return {
+                executed: false, stored: false, outcome: 'context_review_partial',
+                reason: 'context_review_partial', stateUpdated: true,
+                reviewStatus: 'partial', reviewedMessages: 40,
+                remainingMessages: 80 - 40 * calls, wakeReasons: ['context_review_pending'],
+            }
+            return { executed: true, stored: false, outcome: 'complete',
+                stateUpdated: true, wakeReasons: ['context_review_pending'] }
+        },
+        sleep: async () => {},
+        log: (line) => lines.push(line),
+    })
+    assert.equal(calls, 3)
+    assert.equal(result.status, 'finished')
+    assert.equal(lines.filter(line => line.includes('context auto-resume; next_round=')).length, 2)
+    assert.ok(lines.some(line => line.includes('outcome=context_review_partial')))
+})
+
+test('Context auto-resume is bounded and rejects failed checkpoint', async () => {
+    const { runAutoResume } = require('../scripts/cognition-heartbeat')
+    let calls = 0
+    const deferred = await runAutoResume({ ...args,
+        send: async () => { calls++; return { executed: false, stored: false,
+            outcome: 'context_review_partial', reason: 'context_review_partial',
+            stateUpdated: true, reviewStatus: 'partial' } },
+        sleep: async () => {}, log: () => {},
+    })
+    assert.equal(deferred.status, 'deferred')
+    assert.equal(calls, 14)
+    await assert.rejects(() => runAutoResume({ ...args,
+        send: async () => ({ executed: false, outcome: 'context_review_partial',
+            stateUpdated: false, reviewStatus: 'partial' }),
+        log: () => {},
+    }), /runtime state update failed/)
+})

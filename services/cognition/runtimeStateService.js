@@ -222,16 +222,22 @@ async function recordUserMessage({
         }
 
         try {
+            const patch = {
+                last_user_message_at: timestamp,
+                absence_started_at: null,
+                absence_checkpoint: 0,
+            }
+            if (state.metadata && Object.hasOwn(state.metadata, 'cognition_context_resume')) {
+                const metadata = { ...state.metadata }
+                delete metadata.cognition_context_resume
+                patch.metadata = metadata
+            }
             return await saveRuntimeStatePatch({
                 supabase,
                 ...identity,
                 expectedVersion: state.version,
                 now: new Date(),
-                patch: {
-                    last_user_message_at: timestamp,
-                    absence_started_at: null,
-                    absence_checkpoint: 0,
-                },
+                patch,
             })
         } catch (error) {
             if (error.code !== 'RUNTIME_STATE_CONFLICT' ||

@@ -10,7 +10,7 @@ const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
 const SAFE_WAKE_REASONS = new Set([
     'continued_absence', 'pending_review', 'thought_thread_due',
     'periodic_autonomous', 'manual', 'chat_finished',
-    'milestone_transition', 'external_event',
+    'milestone_transition', 'external_event', 'context_review_pending',
 ])
 const SAFE_GATE_STATUSES = new Set([
     'executed', 'no_wake_signal', 'cooldown', 'stale_due_thread',
@@ -26,7 +26,10 @@ const SAFE_THREAD_DECISIONS = new Set([
     'complete', 'abandon',
 ])
 const SAFE_THREAD_CONTEXT_STATUSES = new Set(['empty', 'eligible', 'unavailable'])
-const SAFE_OUTCOMES = new Set(['complete', 'partial', 'skipped'])
+const SAFE_OUTCOMES = new Set(['complete', 'partial', 'skipped', 'context_review_partial'])
+const MAX_AUTO_RESUME_ROUNDS = 14
+const MAX_AUTO_RESUME_MS = 20 * 60 * 1000
+const AUTO_RESUME_DELAY_MS = 5000
 // Only structural presence flags are accepted; no prompt/data fragments.
 const SAFE_CONTEXT_COVERAGE = {
     messages: new Set(['present', 'empty']),
@@ -92,9 +95,12 @@ function assertConfig({ endpoint, userId, secret }) {
 
 async function sendHeartbeat({ endpoint, userId, secret,
     fetchImpl = globalThis.fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    requestTimeoutMs = 170000,
 } = {}) {
     const url = assertConfig({ endpoint, userId, secret })
     if (typeof fetchImpl !== 'function') throw new Error('Node fetch 不可用')
+    if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1000 ||
+        requestTimeoutMs > 170000) throw new Error('Heartbeat timeout 无效')
     const body = JSON.stringify({ userId, agentId: 'star', triggerType: 'heartbeat' })
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
         let response
@@ -106,7 +112,7 @@ async function sendHeartbeat({ endpoint, userId, secret,
                     'x-cognition-secret': secret,
                 },
                 body,
-                signal: AbortSignal.timeout(170000),
+                signal: AbortSignal.timeout(requestTimeoutMs),
             })
         } catch (error) {
             if (attempt === MAX_ATTEMPTS) {
@@ -136,7 +142,7 @@ async function sendHeartbeat({ endpoint, userId, secret,
             stored: result.stored === true,
             reason: result.executed ? null : (
                 ['cooldown', 'wake_gate_skipped', 'no_user_messages',
-                    'new_user_message_during_tick'].includes(result.reason)
+                    'new_user_message_during_tick', 'context_review_partial'].includes(result.reason)
                     ? result.reason : 'skipped'),
         }
         if (SAFE_OUTCOMES.has(result.outcome)) {
@@ -172,6 +178,17 @@ async function sendHeartbeat({ endpoint, userId, secret,
         if (typeof result.stateUpdated === 'boolean') {
             safe.stateUpdated = result.stateUpdated
         }
+        if (result.contextReview && typeof result.contextReview === 'object' &&
+            !Array.isArray(result.contextReview)) {
+            const review = result.contextReview
+            safe.reviewStatus = safeDiagnostic(review.status,
+                new Set(['partial', 'reviewed', 'recent_only', 'up_to_date']))
+            for (const key of ['reviewedMessages', 'remainingMessages',
+                'reviewedChunks', 'totalChunks']) {
+                if (Number.isSafeInteger(review[key]) && review[key] >= 0 &&
+                    review[key] <= 5000) safe[key] = review[key]
+            }
+        }
         if (Number.isSafeInteger(result.autonomousMinutesUntilDue) &&
             result.autonomousMinutesUntilDue >= 0 &&
             result.autonomousMinutesUntilDue <= 1440) {
@@ -187,7 +204,7 @@ function formatHeartbeatLog(result) {
     // they are called directly with an untrusted object.
     const reason = result.executed === true ? 'none' : (
         ['cooldown', 'wake_gate_skipped', 'no_user_messages',
-            'new_user_message_during_tick'].includes(result.reason)
+            'new_user_message_during_tick', 'context_review_partial'].includes(result.reason)
             ? result.reason : 'skipped')
     const detail = [
         `outcome=${safeDiagnostic(result.outcome, SAFE_OUTCOMES)}`,
@@ -212,6 +229,14 @@ function formatHeartbeatLog(result) {
         `ctx_recent_chars=${safeContextCoverage(result.contextCoverage)?.recentMessageChars ?? 'unknown'}`,
         `ctx_lore_items=${safeContextCoverage(result.contextCoverage)?.characterLoreItems ?? 'unknown'}`,
         `ctx_story_items=${safeContextCoverage(result.contextCoverage)?.storyLoreItems ?? 'unknown'}`,
+        `review=${safeDiagnostic(result.reviewStatus,
+            new Set(['partial', 'reviewed', 'recent_only', 'up_to_date']))}`,
+        `reviewed=${Number.isSafeInteger(result.reviewedMessages) &&
+            result.reviewedMessages >= 0 && result.reviewedMessages <= 5000
+            ? result.reviewedMessages : 'unknown'}`,
+        `remaining=${Number.isSafeInteger(result.remainingMessages) &&
+            result.remainingMessages >= 0 && result.remainingMessages <= 5000
+            ? result.remainingMessages : 'unknown'}`,
         `autonomous_wait_minutes=${Number.isSafeInteger(result.autonomousMinutesUntilDue) &&
             result.autonomousMinutesUntilDue >= 0 &&
             result.autonomousMinutesUntilDue <= 1440
@@ -221,19 +246,49 @@ function formatHeartbeatLog(result) {
         `stored=${result.stored === true}; reason=${reason}; ` + detail.join('; ')
 }
 
+async function runAutoResume({
+    endpoint, userId, secret,
+    send = sendHeartbeat,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    nowMs = () => Date.now(),
+    log = (line) => console.log(line),
+} = {}) {
+    const started = nowMs()
+    for (let round = 1; round <= MAX_AUTO_RESUME_ROUNDS; round++) {
+        const remaining = MAX_AUTO_RESUME_MS - (nowMs() - started)
+        // Leave enough time for one slow HTTP request and workflow cleanup.
+        if (remaining < 190000) {
+            log('[cognition] context auto-resume deferred; reason=time_budget')
+            return { status: 'deferred', rounds: round - 1 }
+        }
+        const result = await send({ endpoint, userId, secret,
+            requestTimeoutMs: Math.min(170000, remaining - 20000) })
+        log(formatHeartbeatLog(result))
+        if (result.outcome === 'partial' || result.stateUpdated === false) {
+            throw new Error('Cognition Heartbeat partially completed: runtime state update failed')
+        }
+        if (result.outcome !== 'context_review_partial') {
+            return { status: 'finished', rounds: round, result }
+        }
+        if (result.stateUpdated !== true || result.executed !== false ||
+            result.reviewStatus !== 'partial') {
+            throw new Error('Cognition Context checkpoint 未确认，停止自动续跑')
+        }
+        if (round === MAX_AUTO_RESUME_ROUNDS) {
+            log('[cognition] context auto-resume deferred; reason=round_budget')
+            return { status: 'deferred', rounds: round }
+        }
+        log(`[cognition] context auto-resume; next_round=${round + 1}`)
+        await sleep(AUTO_RESUME_DELAY_MS)
+    }
+}
+
 async function main() {
-    const result = await sendHeartbeat({
+    return runAutoResume({
         endpoint: process.env.COGNITION_ENDPOINT,
         userId: process.env.COGNITION_USER_ID,
         secret: process.env.COGNITION_TICK_SECRET,
     })
-    console.log(formatHeartbeatLog(result))
-    // A 200 response means the request was handled, not necessarily that all
-    // durable state bookkeeping completed. Surface partial outcomes as a red
-    // Action without retrying the model request and duplicating saved work.
-    if (result.outcome === 'partial' || result.stateUpdated === false) {
-        throw new Error('Cognition Heartbeat partially completed: runtime state update failed')
-    }
 }
 
 if (require.main === module) {
@@ -244,4 +299,4 @@ if (require.main === module) {
     })
 }
 
-module.exports = { assertConfig, sendHeartbeat, formatHeartbeatLog }
+module.exports = { assertConfig, sendHeartbeat, formatHeartbeatLog, runAutoResume }

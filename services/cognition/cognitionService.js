@@ -12,7 +12,7 @@ const {
     saveRuntimeStatePatch,
 } = require('./runtimeStateService')
 const { getRecentThoughts, createThought } = require('./thoughtService')
-const { processWakeGate } = require('./wakeGate')
+const { processWakeGate, CONTEXT_RESUME_KEY } = require('./wakeGate')
 const { getCognitionCooldownMinutes } = require('./cooldownPolicy')
 const {
     deferUnadvancedDueThread, isDueThread, loadThreadContext,
@@ -478,10 +478,21 @@ async function runCognitionTick({
         phase = 'context_review'
         const contextReview = await prepareConversationReview({
             conversation, callModel, model: MODEL, now: nowDate,
-            persistMetadata: async (metadata) => {
+            persistMetadata: async (metadata, { status } = {}) => {
+                // The pending marker and successful chunk cursor share one
+                // versioned write. No marker is published for failed chunks.
+                const nextMetadata = { ...metadata }
+                if (status === 'partial') {
+                    nextMetadata[CONTEXT_RESUME_KEY] = {
+                        status: 'pending', sessionId: conversation.sessionKey,
+                        dueAt: nowDate.toISOString(), leaseUntil: null,
+                    }
+                } else {
+                    delete nextMetadata[CONTEXT_RESUME_KEY]
+                }
                 workingState = await saveRuntimeStatePatch({
                     supabase, ...identity, expectedVersion: workingState.version,
-                    now: nowDate, patch: { metadata },
+                    now: nowDate, patch: { metadata: nextMetadata },
                 })
                 durableEffectSaved = true
                 return workingState
@@ -489,6 +500,17 @@ async function runCognitionTick({
         })
         const messages = contextReview.recentMessages
         const conversationReviewSummary = contextReview.summary
+        // If another deploy left an obsolete marker but no historical chunks,
+        // clear it *before* any non-idempotent Thought / Thread model work.
+        if (contextReview.status !== 'partial' &&
+            Object.hasOwn(workingState.metadata || {}, CONTEXT_RESUME_KEY)) {
+            const metadata = { ...workingState.metadata }
+            delete metadata[CONTEXT_RESUME_KEY]
+            workingState = await saveRuntimeStatePatch({
+                supabase, ...identity, expectedVersion: workingState.version,
+                now: nowDate, patch: { metadata },
+            })
+        }
         if (contextReview.status === 'partial') {
             console.info('[cognition] context review partial; ' +
                 `reviewed=${contextReview.reviewedMessages}; ` +
@@ -775,10 +797,13 @@ async function runCognitionTick({
         // A fixed phase code identifies failure without logging database rows,
         // the model response, private messages, IDs, API secrets or prompts.
         console.warn(`[cognition] tick failed; stage=${phase}`)
-        if (!durableEffectSaved) {
+        if (!durableEffectSaved &&
+            !wake.reasons.includes('context_review_pending')) {
             await releaseWakeOnFailure({ supabase, identity,
                 previousState, claimedState: workingState, now: nowDate })
         }
+        // A failed resumed chunk retains its short lease so the next run
+        // retries after backoff rather than immediately hammering the model.
         throw error
     }
 }

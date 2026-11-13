@@ -752,3 +752,87 @@ test('Context V2 reviews one historical chunk per tick and persists a resumable 
     assert.deepEqual(sessionReview.summary, ['正在推进的历史主题'])
     assert.equal(state.last_cognition_at, null)
 })
+
+test('auto-resume: checkpointed multi-chunk history bypasses cooldown only until one final Cognition', async () => {
+    const db = fakeDb()
+    db.rows.messages = Array.from({ length: 82 }, (_, index) => ({
+        id: index + 1, user_id: A, session_id: 2,
+        role: index % 2 === 0 ? 'user' : 'assistant', visible: true,
+        channel: 'text', content: `context ${index} ` + 'x'.repeat(1700),
+        created_at: new Date(Date.parse('2026-10-15T10:00:00.000Z') + index * 1000).toISOString(),
+    }))
+    db.rows.agent_runtime_state.push({
+        user_id: A, agent_id: 'star', last_user_message_at: null,
+        last_wake_at: '2026-10-15T05:00:00.000Z',
+        last_cognition_at: '2026-10-15T05:00:00.000Z',
+        absence_started_at: null, absence_checkpoint: 0, next_review_at: null,
+        metadata: {}, version: 0,
+    })
+    let reviewCalls = 0
+    let finalCalls = 0
+    const callModel = async ({ input }) => {
+        if (typeof input === 'string' && input.includes('回顾片段')) {
+            reviewCalls++
+            return { output_text: JSON.stringify({ observations: [`reviewed ${reviewCalls}`] }) }
+        }
+        finalCalls++
+        return model({ type: 'none' }, '完成历史整理之后才保存的一条想法')
+    }
+    const results = []
+    for (let i = 0; i < 12; i++) {
+        const result = await run(db, callModel)
+        results.push(result)
+        if (result.executed) break
+        assert.equal(result.outcome, 'context_review_partial')
+        assert.equal(result.stateUpdated, true)
+        const state = db.rows.agent_runtime_state[0]
+        assert.equal(state.metadata.cognition_context_resume.status, 'pending')
+        assert.equal(state.metadata.cognition_context_resume.leaseUntil, null)
+        assert.equal(db.rows.agent_thoughts.length, 0)
+    }
+    assert.ok(reviewCalls >= 2)
+    assert.equal(finalCalls, 1)
+    assert.equal(results.at(-1).executed, true)
+    assert.equal(results.at(-1).stored, true)
+    assert.equal(db.rows.agent_thoughts.length, 1)
+    assert.equal(db.rows.agent_runtime_state[0].metadata.cognition_context_resume, undefined)
+    assert.ok(results.slice(1, -1).every(r => r.wakeReasons.includes('context_review_pending')))
+    const after = await run(db, async () => { throw Error('duplicate cognition forbidden') })
+    assert.equal(after.executed, false)
+})
+
+test('auto-resume: pending lease serializes concurrent claims and does not move ordinary activity clock', () => {
+    const { CONTEXT_RESUME_KEY } = require('../services/cognition/wakeGate')
+    const state = { last_user_message_at: '2026-10-15T11:50:00.000Z',
+        last_wake_at: '2026-10-15T11:55:00.000Z',
+        last_cognition_at: '2026-10-15T11:55:00.000Z',
+        metadata: { [CONTEXT_RESUME_KEY]: { status: 'pending', sessionId: '2',
+            dueAt: '2026-10-15T11:59:00.000Z', leaseUntil: null } } }
+    const claim = evaluateWakeGate({ state, now: DATE(NOW), triggerType: 'heartbeat' })
+    assert.equal(claim.shouldWake, true)
+    assert.deepEqual(claim.reasons, ['context_review_pending'])
+    assert.equal(claim.patch.last_wake_at, undefined)
+    assert.equal(claim.patch.metadata.cognition_heartbeat_activity_at, undefined)
+    const leased = { ...state, ...claim.patch }
+    assert.equal(evaluateWakeGate({ state: leased, now: DATE(NOW) }).shouldWake, false)
+    assert.equal(evaluateWakeGate({ state: leased, now: DATE(NOW), triggerType: 'manual' }).shouldWake, false)
+    assert.equal(evaluateWakeGate({ state: leased,
+        now: DATE('2026-10-15T12:03:11.000Z') }).shouldWake, true)
+})
+
+test('auto-resume: new user activity cancels only the pending resume marker', async () => {
+    const db = fakeDb()
+    const { CONTEXT_RESUME_KEY } = require('../services/cognition/wakeGate')
+    const earlier = '2026-10-15T10:00:00.000Z'
+    db.rows.agent_runtime_state.push({
+        user_id: A, agent_id: 'star', version: 0,
+        last_user_message_at: earlier,
+        metadata: { other: 'keep', [CONTEXT_RESUME_KEY]: {
+            status: 'pending', sessionId: '2', dueAt: earlier, leaseUntil: null,
+        } },
+    })
+    await recordUserMessage({ supabase: db, userId: A,
+        messageAt: '2026-10-15T10:01:00.000Z' })
+    assert.equal(db.rows.agent_runtime_state[0].metadata[CONTEXT_RESUME_KEY], undefined)
+    assert.equal(db.rows.agent_runtime_state[0].metadata.other, 'keep')
+})

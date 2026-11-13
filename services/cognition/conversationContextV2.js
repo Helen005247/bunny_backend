@@ -443,9 +443,10 @@ async function prepareConversationReview({
     const metadata = buildContextMetadata(
         conversation.metadata || {}, sessionKey, nextReviewState, now
     )
-    await persistMetadata(metadata)
-
     const moreChunksRemain = chunks.length > 1
+    await persistMetadata(metadata, {
+        status: moreChunksRemain ? 'partial' : 'reviewed',
+    })
     return {
         status: moreChunksRemain ? 'partial' : 'reviewed',
         recentMessages,

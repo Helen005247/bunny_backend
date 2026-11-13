@@ -40,6 +40,22 @@ const AUTONOMOUS_ANCHOR_KEY = 'cognition_autonomous_anchor_at'
 // heartbeat key is seeded from legacy timestamps on the first manual claim.
 const HEARTBEAT_ACTIVITY_KEY = 'cognition_heartbeat_activity_at'
 const MANUAL_ACTIVITY_KEY = 'cognition_manual_activity_at'
+// A separate, versioned lease for finishing a previously checkpointed review.
+// It is never created by an external request and does not move the regular
+// heartbeat activity clock. One request owns one chunk at a time.
+const CONTEXT_RESUME_KEY = 'cognition_context_resume'
+const CONTEXT_RESUME_LEASE_MS = 190000
+
+function pendingContextResume(metadata, nowMs) {
+    const resume = metadata?.[CONTEXT_RESUME_KEY]
+    if (!resume || typeof resume !== 'object' || Array.isArray(resume) ||
+        resume.status !== 'pending' || typeof resume.sessionId !== 'string' ||
+        !resume.sessionId || resume.sessionId.length > 128) return null
+    const dueMs = Date.parse(resume.dueAt)
+    const leaseMs = resume.leaseUntil == null ? -Infinity : Date.parse(resume.leaseUntil)
+    if (!Number.isFinite(dueMs) || Number.isNaN(leaseMs)) return null
+    return { resume, due: nowMs >= dueMs, leased: nowMs < leaseMs }
+}
 const ABSENCE_HOUR_THRESHOLDS = Object.freeze([
     6, 12, 18, 24, 36, 48, 72,
 ])
@@ -151,6 +167,23 @@ function evaluateWakeGate({
     const patch = {}
     const metadata = state.metadata && typeof state.metadata === 'object' &&
         !Array.isArray(state.metadata) ? state.metadata : {}
+    const pendingResume = pendingContextResume(metadata, nowMs)
+    // A live lease prevents both manual and scheduled calls from reviewing the
+    // same chunk concurrently. CAS in processWakeGate grants the next lease.
+    if (pendingResume?.leased) {
+        return { shouldWake: false, reasons: [], pendingReasons: [],
+            inCooldown: false, patch: {}, autonomousMinutesUntilDue: null }
+    }
+    if (triggerType === 'heartbeat' && pendingResume?.due) {
+        return {
+            shouldWake: true, reasons: ['context_review_pending'], pendingReasons: [],
+            inCooldown: false, autonomousMinutesUntilDue: null,
+            patch: { metadata: { ...metadata,
+                [CONTEXT_RESUME_KEY]: { ...pendingResume.resume,
+                    leaseUntil: new Date(nowMs + CONTEXT_RESUME_LEASE_MS).toISOString() },
+            } },
+        }
+    }
 
     // A newer user message closes the previous absence episode immediately.
     // recordUserMessage() also closes this episode at write time.
@@ -356,6 +389,7 @@ module.exports = {
     AUTONOMOUS_INTERVAL_HOURS,
     HEARTBEAT_ACTIVITY_KEY,
     MANUAL_ACTIVITY_KEY,
+    CONTEXT_RESUME_KEY,
     evaluateWakeGate,
     getAbsenceCheckpoint,
     hasDueThoughtThread,
