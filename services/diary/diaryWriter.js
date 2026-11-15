@@ -178,6 +178,52 @@ function classifyModelError(error) {
     return 'model_unavailable'
 }
 
+// Emit only allowlisted, bounded metadata from the upstream error. Never log
+// error.message, response bodies, prompts, source messages, or API credentials.
+function safeDiagnosticField(value, maxLength = 120) {
+    if (typeof value !== 'string' && typeof value !== 'number') return ''
+    const text = String(value).trim()
+    if (!text) return ''
+    return text.replace(/[^A-Za-z0-9_.:/-]/g, '_').slice(0, maxLength)
+}
+
+function readHeader(headers, name) {
+    try {
+        if (typeof headers?.get === 'function') return headers.get(name) || ''
+        if (headers && typeof headers === 'object') {
+            return headers[name] || headers[name.toLowerCase()] || ''
+        }
+    } catch (_) { /* Diagnostic metadata is best-effort only. */ }
+    return ''
+}
+
+function logModelRequestFailure(error, { phase, shape, inputChars, context = {} } = {}) {
+    const nested = error?.error || error?.response?.data?.error || {}
+    const statusValue = error?.status ?? error?.response?.status ?? error?.cause?.status
+    const status = Number(statusValue)
+    const headers = error?.headers || error?.response?.headers
+    const requestId = error?.request_id || error?.requestId ||
+        readHeader(headers, 'x-request-id') || readHeader(headers, 'request-id')
+    const fields = [
+        '[diary-model-diagnostic]',
+        `phase=${safeDiagnosticField(phase || 'unknown') || 'unknown'}`,
+        `shape=${safeDiagnosticField(shape || 'unknown') || 'unknown'}`,
+        `status=${Number.isInteger(status) ? status : 'unknown'}`,
+        `provider_code=${safeDiagnosticField(error?.code || nested?.code || 'unknown') || 'unknown'}`,
+        `provider_type=${safeDiagnosticField(error?.type || nested?.type || 'unknown') || 'unknown'}`,
+        `provider_param=${safeDiagnosticField(error?.param || nested?.param || 'unknown') || 'unknown'}`,
+        `request_id=${safeDiagnosticField(requestId || 'unknown') || 'unknown'}`,
+        `input_chars=${Number.isFinite(inputChars) ? Math.max(0, Math.min(1000000, Math.floor(inputChars))) : 'unknown'}`,
+    ]
+    if (Number.isInteger(context.chunkIndex) && Number.isInteger(context.chunkTotal)) {
+        fields.push(`chunk=${context.chunkIndex}/${context.chunkTotal}`)
+    }
+    if (Number.isInteger(context.groupIndex) && Number.isInteger(context.groupTotal)) {
+        fields.push(`group=${context.groupIndex}/${context.groupTotal}`)
+    }
+    console.warn(fields.join('; '))
+}
+
 // One bounded retry for quick, transient upstream failures. Do not repeat
 // slow timeouts, authorization failures, bad requests or unavailable models.
 const QUICK_RETRYABLE_ERRORS = new Set([
@@ -187,6 +233,7 @@ async function modelText(callModel, input, {
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     nowMs = () => Date.now(),
     shape = 'any',
+    diagnosticContext = {},
 } = {}) {
     if (typeof callModel !== 'function') throw new DiaryModelError('model_not_configured')
     let response
@@ -197,6 +244,7 @@ async function modelText(callModel, input, {
             break
         } catch (error) {
             if (error?.code === 'review_budget_exhausted') throw error
+            logModelRequestFailure(error, { phase: 'primary', shape, inputChars: input.length, context: diagnosticContext })
             const code = classifyModelError(error)
             const quick = nowMs() - start < 8000
             if (attempt === 0 && quick && QUICK_RETRYABLE_ERRORS.has(code)) {
@@ -241,6 +289,7 @@ async function modelText(callModel, input, {
             text: { format: { type: 'json_object' } } })
     } catch (error) {
         if (error?.code === 'review_budget_exhausted') throw error
+        logModelRequestFailure(error, { phase: 'json_format_repair', shape, inputChars: repairInput.length, context: diagnosticContext })
         const status = Number(error?.status ?? error?.response?.status ?? error?.cause?.status)
         if (status !== 400 && status !== 422) {
             throw new DiaryModelError(classifyModelError(error))
@@ -250,6 +299,7 @@ async function modelText(callModel, input, {
             repaired = await callModel({ model: MODEL, input: repairInput })
         } catch (fallbackError) {
             if (fallbackError?.code === 'review_budget_exhausted') throw fallbackError
+            logModelRequestFailure(fallbackError, { phase: 'fallback_without_format', shape, inputChars: repairInput.length, context: diagnosticContext })
             throw new DiaryModelError(classifyModelError(fallbackError))
         }
     }

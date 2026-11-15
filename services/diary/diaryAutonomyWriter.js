@@ -306,7 +306,10 @@ async function planAutonomousDiary({supabase,userId,agentId='star',callModel,
             JSON.stringify(chunks[i]),
         ].join('\n')
         let answer
-        try { answer=await modelText(invokeModel,prompt,{shape:'review'}) }
+        try { answer=await modelText(invokeModel,prompt,{
+            shape:'review',
+            diagnosticContext:{chunkIndex:i+1,chunkTotal:chunks.length},
+        }) }
         catch(e){
             if(e?.code==='review_budget_exhausted' || pauseForTransientModelError(e,'review'))
                 return diagnosticPartial({phase:'review',
