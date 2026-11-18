@@ -19,6 +19,9 @@ const {
     parseThreadAction, persistThreadAction, preflightThreadAction,
     promptThreadContext,
 } = require('./thoughtThreadCognition')
+const {
+    evaluateOpportunity, persistOpportunity, discoveryMetadata, modeFromEnv,
+} = require('./thoughtThreadDiscoveryP0')
 const { buildTimeContext } = require('../temporal/timeContext')
 const { summarizeCognitionContext } = require('./contextCoverage')
 const { excerptMemorySummary } = require('./memoryExcerpt')
@@ -405,6 +408,7 @@ async function runCognitionTick({
         throw new Error('cognition Step 3 只支持 manual 和 heartbeat 触发')
     }
     // Validate the selected throttle before reading or mutating runtime state.
+    const cognitionTickStartedAt = Date.now()
     const cooldownMinutes = getCognitionCooldownMinutes(triggerType)
     const identity = normalizeIdentity({ userId, agentId })
     const nowDate = parseNow(now)
@@ -643,6 +647,22 @@ async function runCognitionTick({
         const threadContextStatus = !threadContext.available ? 'unavailable' :
             threadContext.eligible.length > 0 ? 'eligible' : 'empty'
 
+        // P0 discovery is OFF by default. In shadow it only logs categories;
+        // staging_write requires two explicit environment settings.
+        // Do not allow this optional model task to affect Thought validity.
+        const discoveryMode = modeFromEnv()
+        const discovery = invalidThreadAction ||
+            outcome.threadAction.type === 'none'
+            ? await evaluateOpportunity({
+                supabase, ...identity, now: nowDate,
+                triggerType, wakeReasons: wake.reasons,
+                context: threadContext, metadata: workingState.metadata,
+                callModel, mode: discoveryMode,
+                elapsedMs: Date.now() - cognitionTickStartedAt,
+            })
+            : { status: 'native_thread_action', attempted: false,
+                mode: discoveryMode }
+
         // Don't store a reflection about old context if the user just returned.
         phase = 'freshness_check'
         const latestAfter = await getLatestUserMessage({ supabase,
@@ -671,6 +691,16 @@ async function runCognitionTick({
             threadResult.status = 'invalid_action'
         }
         durableEffectSaved ||= threadResult.persisted
+
+        // The secondary reviewer must not replace an existing/native action.
+        // A potential write is allowed ONLY in explicitly acknowledged staging.
+        const discoveryResult = threadResult.status === 'none'
+            ? await persistOpportunity({
+                supabase, ...identity, now: nowDate,
+                evaluated: discovery, mode: discoveryMode,
+            })
+            : { status: 'native_action_priority', persisted: false }
+        durableEffectSaved ||= discoveryResult.persisted
 
         // A due review with no progress must not keep waking every heartbeat.
         // Versioned CAS only postpones the earliest unchanged due draft; it
@@ -712,9 +742,11 @@ async function runCognitionTick({
         try {
             const latestConversationCursor = conversation.latestUnreadCursor ||
                 conversation.latestRecentCursor
-            const metadata = commitLatestConversationCursor(
-                workingState.metadata, conversation.sessionKey,
-                latestConversationCursor, nowDate
+            const metadata = discoveryMetadata(
+                commitLatestConversationCursor(
+                    workingState.metadata, conversation.sessionKey,
+                    latestConversationCursor, nowDate
+                ), discovery
             )
             workingState = await saveRuntimeStatePatch({ supabase, ...identity,
                 expectedVersion: workingState.version, now: nowDate,
@@ -745,6 +777,7 @@ async function runCognitionTick({
             `wake=${wake.reasons.join(',')}; thought=${savedThought ? 'saved' : 'skipped'}; ` +
             `thought_decision=${outcome.shouldStore ? 'store' : 'none'}; ` +
             `thought_reason=${outcome.thoughtReason}; thread=${threadResult.status}; ` +
+            `discovery=${discovery.status}; discovery_write=${discoveryResult.status}; ` +
             `state=${stateUpdated ? 'updated' : 'failed'}; decision=${threadDecision}; ` +
             `thread_reason=${outcome.threadReason}; thread_context=${threadContextStatus}; ` +
             `ctx_messages=${contextCoverage.messages}; ctx_memory=${contextCoverage.memory}; ` +
@@ -773,6 +806,8 @@ async function runCognitionTick({
             threadDecision,
             threadReason: outcome.threadReason,
             threadContextStatus,
+            threadDiscoveryStatus: discovery.status,
+            threadDiscoveryWriteStatus: discoveryResult.status,
             contextCoverage,
             contextReview: {
                 status: contextReview.status,

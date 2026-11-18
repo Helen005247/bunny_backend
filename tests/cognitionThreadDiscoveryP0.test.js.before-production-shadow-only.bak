@@ -1,0 +1,216 @@
+'use strict'
+const test=require('node:test')
+const assert=require('node:assert/strict')
+const {
+    modeFromEnv,canEvaluate,buildDiscoveryPrompt,parseDiscoveryOutput,
+    evaluateOpportunity,persistOpportunity,discoveryMetadata,
+    sameSourceCluster,sourceDedupeKey,
+}=require('../services/cognition/thoughtThreadDiscoveryP0')
+
+const USER_A='11111111-1111-4111-8111-111111111111'
+const USER_B='22222222-2222-4222-8222-222222222222'
+const NOW=new Date('2026-11-15T12:00:00.000Z')
+const rows=[
+    {id:'101',created_at:'2026-11-12T00:00:00.000Z',
+      expires_at:'2026-11-20T00:00:00.000Z',content:'我还在思考如何尊重边界同时表达爱意'},
+    {id:'102',created_at:'2026-11-13T00:00:00.000Z',
+      expires_at:'2026-11-20T00:00:00.000Z',content:'表达喜欢时应该给对方自由的空间'},
+    {id:'103',created_at:'2026-11-14T00:00:00.000Z',
+      expires_at:'2026-11-20T00:00:00.000Z',content:'主动表达不是逼迫回应'},
+]
+const ctx={available:true,known:[],eligible:[]}
+const basis=(opts={})=>({
+  userId:USER_A,agentId:'star',now:NOW,triggerType:'heartbeat',
+  wakeReasons:['periodic_autonomous'],
+  context:ctx,metadata:{},
+  ...opts,
+})
+const createResult=(ids=['101','102'])=>JSON.stringify({
+ decision:'create',thread_reason:'worth_continuing',
+ source_thought_ids:ids,title:'在尊重边界里表达喜欢',
+ current_draft:'想在表达喜欢时保留对方的选择空间',
+ next_step:'有合适的新经历再重新考虑表达方式',
+})
+const model=(body)=>async()=>({output_text:body})
+const get=async()=>rows
+const failModel=async()=>{throw Error('API broke')}
+
+test('mode is opt-in and staging write needs two flags',()=>{
+  assert.equal(modeFromEnv({}),'off')
+  assert.equal(modeFromEnv({THREAD_DISCOVERY_MODE:'shadow'}),'shadow')
+  assert.equal(modeFromEnv({THREAD_DISCOVERY_MODE:'staging_write'}),'off')
+  assert.equal(modeFromEnv({
+    THREAD_DISCOVERY_MODE:'staging_write',
+    THREAD_DISCOVERY_STAGING_WRITE_ACK:'isolated-test-db'
+  }),'staging_write')
+})
+test('only periodic heartbeat without open thread may evaluate',()=>{
+ const x=basis()
+ assert.equal(canEvaluate({...x,mode:'shadow'}),null)
+ assert.equal(canEvaluate({...x,mode:'off'}),'disabled')
+ assert.equal(canEvaluate({...x,mode:'shadow',triggerType:'manual'}),'not_periodic')
+ assert.equal(canEvaluate({...x,mode:'shadow',context:{...ctx,known:[{status:'open'}]}}),'open_thread_exists')
+ assert.equal(canEvaluate({...x,mode:'shadow',metadata:{
+   thread_discovery_p0:{lastAttemptAt:new Date(NOW.getTime()-3600000).toISOString()}
+ }}),'review_cooldown')
+})
+test('prompt respects evidence and allows none',()=>{
+ const input=buildDiscoveryPrompt({now:NOW,thoughts:rows,known:[]})
+ assert.match(input,/输出 none/)
+ assert.match(input,/来源id/)
+ assert(!input.includes('测试通过'))
+})
+test('valid none and candidate are different decisions',()=>{
+ const none=parseDiscoveryOutput(JSON.stringify({
+  decision:'none',thread_reason:'no_continuation_value',
+  source_thought_ids:[],title:'',current_draft:'',next_step:''
+ }),rows,[],NOW)
+ assert.equal(none.decision,'none')
+ const candidate=parseDiscoveryOutput(createResult(),rows,[],NOW)
+ assert.equal(candidate.decision,'create')
+ assert.equal(candidate.sourceIds.length,2)
+ assert.equal(candidate.action.title,'在尊重边界里表达喜欢')
+})
+test('reject unsupported, expired, duplicate sources',()=>{
+ assert.throws(()=>parseDiscoveryOutput(createResult(['999']),rows,[],NOW),/expired_or_unknown/)
+ assert.throws(()=>parseDiscoveryOutput(createResult(['101','101']),rows,[],NOW),/duplicate_discovery/)
+ assert.throws(()=>parseDiscoveryOutput(createResult(['101','102']),rows,
+  [{title:'在尊重边界里表达喜欢',status:'completed'}],NOW),/duplicate_discovery_topic/)
+ assert.throws(()=>parseDiscoveryOutput(createResult(['101','102']),rows,
+  [{title:'另一个标题',status:'abandoned',metadata:{source_thought_ids:['101','102']}}],NOW),
+ /duplicate_discovery_topic/)
+})
+test('no active thought, empty thought set do not call model',async()=>{
+ let n=0
+ const s=await evaluateOpportunity({
+    ...basis(),mode:'shadow',fetchThoughts:async()=>[],
+    callModel:async()=>{n++}
+ })
+ assert.equal(s.status,'insufficient_active_thoughts')
+ assert.equal(n,0)
+})
+test('shadow creates candidate in memory and never writes',async()=>{
+ let n=0
+ const evaluated=await evaluateOpportunity({
+  ...basis(),mode:'shadow',fetchThoughts:get,
+  callModel:async()=>{n++;return {output_text:createResult()}}
+ })
+ assert.equal(n,1)
+ assert.equal(evaluated.at,NOW.toISOString())
+ assert.equal(evaluated.status,'candidate')
+ const output=await persistOpportunity({
+  userId:USER_A,agentId:'star',evaluated,mode:'shadow',
+  createThread:async()=>{throw Error('should never write')}
+ })
+ assert.equal(output.status,'shadow_candidate')
+ assert.equal(output.persisted,false)
+ const m=discoveryMetadata({other:3},evaluated)
+ assert.equal(m.thread_discovery_p0.lastAttemptAt,NOW.toISOString())
+ assert.equal(m.other,3)
+})
+test('model errors do not stop Cognition and are rate limited',async()=>{
+ const e=await evaluateOpportunity({...basis(),mode:'shadow',
+  fetchThoughts:get,callModel:failModel})
+ assert.equal(e.status,'discovery_error')
+ assert.equal(e.attempted,true)
+ assert.equal(canEvaluate({...basis({metadata:discoveryMetadata({},e)}),mode:'shadow'}),'review_cooldown')
+})
+test('source-based key deterministic across title differences',()=>{
+ const keyA=sourceDedupeKey({userId:USER_A,agentId:'star',ids:['101','102']})
+ const keyB=sourceDedupeKey({userId:USER_A,agentId:'star',ids:['102','101']})
+ const keyC=sourceDedupeKey({userId:USER_B,agentId:'star',ids:['101','102']})
+ assert.equal(keyA,keyB)
+ assert.notEqual(keyA,keyC)
+ assert.equal(sameSourceCluster(['101','102'],{source_thought_ids:['102','103']}),false)
+ assert.equal(sameSourceCluster(['101','102'],{source_thought_ids:['101','102']}),true)
+})
+test('write cannot run without isolated test user allowlist',async()=>{
+ const evaluated={status:'candidate',mode:'staging_write',candidate:parseDiscoveryOutput(createResult(),rows,[],NOW)}
+ const old=process.env.THREAD_DISCOVERY_TEST_USER_ID
+ const oldMode=process.env.THREAD_DISCOVERY_MODE
+ const oldAck=process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK
+ delete process.env.THREAD_DISCOVERY_TEST_USER_ID
+ process.env.THREAD_DISCOVERY_MODE='staging_write'
+ process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK='isolated-test-db'
+ try {
+  const r=await persistOpportunity({
+    userId:USER_A,agentId:'star',evaluated,mode:'staging_write',
+    createThread:async()=>{throw Error('MUST NOT WRITE')},
+  })
+  assert.equal(r.status,'not_allowlisted')
+ } finally {
+  if(old===undefined) delete process.env.THREAD_DISCOVERY_TEST_USER_ID
+  else process.env.THREAD_DISCOVERY_TEST_USER_ID=old
+  if(oldMode===undefined) delete process.env.THREAD_DISCOVERY_MODE
+  else process.env.THREAD_DISCOVERY_MODE=oldMode
+  if(oldAck===undefined) delete process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK
+  else process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK=oldAck
+ }
+})
+test('on isolated staging, source expiry or known open Thread blocks write',async()=>{
+ const old=process.env.THREAD_DISCOVERY_TEST_USER_ID
+ const oldMode=process.env.THREAD_DISCOVERY_MODE
+ const oldAck=process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK
+ process.env.THREAD_DISCOVERY_TEST_USER_ID=USER_A
+ process.env.THREAD_DISCOVERY_MODE='staging_write'
+ process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK='isolated-test-db'
+ try{
+  const evaluated={status:'candidate',mode:'staging_write',candidate:parseDiscoveryOutput(createResult(),rows,[],NOW)}
+  let writes=0
+  const noSource=await persistOpportunity({
+   userId:USER_A,agentId:'star',evaluated,mode:'staging_write',
+   fetchThoughts:async()=>rows.slice(1),fetchThreads:async()=>[],
+   createThread:async()=>{writes++}
+  })
+  assert.equal(noSource.status,'source_no_longer_active')
+  const haveOpen=await persistOpportunity({
+   userId:USER_A,agentId:'star',evaluated,mode:'staging_write',
+   fetchThoughts:get,fetchThreads:async()=>[{status:'open'}],
+   createThread:async()=>{writes++}
+  })
+  assert.equal(haveOpen.status,'open_thread_exists')
+  assert.equal(writes,0)
+ }finally{
+  if(old===undefined) delete process.env.THREAD_DISCOVERY_TEST_USER_ID
+  else process.env.THREAD_DISCOVERY_TEST_USER_ID=old
+  if(oldMode===undefined) delete process.env.THREAD_DISCOVERY_MODE
+  else process.env.THREAD_DISCOVERY_MODE=oldMode
+  if(oldAck===undefined) delete process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK
+  else process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK=oldAck
+ }
+})
+test('staging write uses existing storage service with source-backed dedupe',async()=>{
+ const old=process.env.THREAD_DISCOVERY_TEST_USER_ID
+ const oldMode=process.env.THREAD_DISCOVERY_MODE
+ const oldAck=process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK
+ process.env.THREAD_DISCOVERY_TEST_USER_ID=USER_A
+ process.env.THREAD_DISCOVERY_MODE='staging_write'
+ process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK='isolated-test-db'
+ try{
+  const evaluated={status:'candidate',mode:'staging_write',candidate:parseDiscoveryOutput(createResult(),rows,[],NOW)}
+  let captured
+  const r=await persistOpportunity({
+   userId:USER_A,agentId:'star',evaluated,mode:'staging_write',
+   fetchThoughts:get,fetchThreads:async()=>[],
+   createThread:async(x)=>{captured=x;return {id:'test-only-id',status:'open'}}
+  })
+  assert.equal(r.status,'created')
+  assert.equal(r.persisted,true)
+  assert.deepEqual(captured.metadata.source_thought_ids,['101','102'])
+  assert.match(captured.dedupeKey,/^thread-discovery-p0:/)
+  assert.equal(captured.nextReviewAt,null)
+ }finally{
+  if(old===undefined) delete process.env.THREAD_DISCOVERY_TEST_USER_ID
+  else process.env.THREAD_DISCOVERY_TEST_USER_ID=old
+  if(oldMode===undefined) delete process.env.THREAD_DISCOVERY_MODE
+  else process.env.THREAD_DISCOVERY_MODE=oldMode
+  if(oldAck===undefined) delete process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK
+  else process.env.THREAD_DISCOVERY_STAGING_WRITE_ACK=oldAck
+ }
+})
+
+test('slow first Cognition call skips optional discovery to protect Heartbeat budget',()=>{
+ const x=basis()
+ assert.equal(canEvaluate({...x,mode:'shadow',elapsedMs:31000}),'time_budget_exceeded')
+ assert.equal(canEvaluate({...x,mode:'shadow',elapsedMs:30000}),null)
+})
