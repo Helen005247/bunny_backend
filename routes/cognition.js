@@ -9,6 +9,7 @@ const { runCognitionTick } = require('../services/cognition/cognitionService')
 const { matchesExpectedUserId } = require('../services/agentIdentity')
 const { enqueueCognitionEvent, dispatchOneCognitionEvent } =
     require('../services/cognition/cognitionEventQueue')
+const { scanIdle } = require('../services/cognition/phase4bIdleService')
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -26,6 +27,7 @@ function createCognitionRouter({ supabase, callModel,
     runTick = runCognitionTick,
     enqueueEvent = enqueueCognitionEvent,
     dispatchEvent = dispatchOneCognitionEvent,
+    scanConversation = scanIdle,
     expectedSecret = process.env.COGNITION_TICK_SECRET,
     expectedUserId = process.env.HERMIT_STAR_USER_ID,
 } = {}) {
@@ -151,6 +153,32 @@ function createCognitionRouter({ supabase, callModel,
         }
     })
 
+    // Phase 4B scanning and dispatch are one private operation.  This is
+    // only invoked by the scheduled GitHub Action (or an explicit test).
+    if (process.env.COGNITION_PHASE4B_ENABLED === 'true') {
+        router.post('/phase4b/scan-dispatch', async (req,res)=>{
+            if (!checkEventAccess(req,res)) return
+            if (typeof callModel !== 'function') return res.status(503)
+                .json({ok:false,error:'MODEL_UNAVAILABLE'})
+            try {
+                const scan=await scanConversation({supabase,userId:req.body.userId,agentId:'star'})
+                // Never start any event cognition while a conversation is active.
+                if (scan.status==='voice_active' || scan.status==='not_idle') {
+                    return res.json({ok:true,scan:scan.status,dispatch:'skipped_active'})
+                }
+                const dispatched=await dispatchEvent({
+                    supabase,userId:req.body.userId,agentId:'star',runTick,callModel,
+                    getSettings,getLatestMemory,getMilestoneContext,
+                    getCharacterLoreContext,getStoryLoreContext,
+                })
+                return res.json({ok:true,scan:scan.status,dispatch:dispatched.status,
+                    executed:dispatched.executed===true})
+            } catch (_) {
+                console.warn('[cognition] phase4b scan-dispatch failed')
+                return res.status(500).json({ok:false,error:'PHASE4B_SCAN_DISPATCH_FAILED'})
+            }
+        })
+    }
     } // End optional Phase 4A event endpoints.
 
     return router

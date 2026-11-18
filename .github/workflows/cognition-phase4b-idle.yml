@@ -1,0 +1,32 @@
+name: Hermit Cognition Phase4B Idle
+run-name: Phase4B idle check (${{ github.event_name }})
+on:
+  workflow_dispatch:
+  schedule:
+    # Scan every five minutes; GitHub Actions cron may be delayed.
+    - cron: '*/5 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: hermit-phase4b-idle
+  cancel-in-progress: false
+jobs:
+  scan-and-dispatch:
+    # Opt-in: this scheduled job stays disabled until deliberately enabled.
+    if: ${{ vars.COGNITION_PHASE4B_AUTO_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Scan idle and dispatch one eligible event
+        env:
+          # Must match the *actual* backend URL used by existing heartbeat.
+          COGNITION_PHASE4B_ENDPOINT: https://bunny-backend-19g1.onrender.com/internal/cognition/phase4b/scan-dispatch
+          COGNITION_USER_ID: ${{ secrets.COGNITION_USER_ID }}
+          COGNITION_TICK_SECRET: ${{ secrets.COGNITION_TICK_SECRET }}
+        run: node scripts/cognition-phase4b.js

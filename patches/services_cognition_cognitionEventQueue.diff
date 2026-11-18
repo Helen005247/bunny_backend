@@ -1,0 +1,35 @@
+--- a/services/cognition/cognitionEventQueue.js
++++ b/services/cognition/cognitionEventQueue.js
+@@ -4,6 +4,7 @@
+ // No Cognition state, Diary, chat, Thought or Thread write happens here.
+ const EVENT_TYPES = Object.freeze(['chat_finished', 'milestone_transition', 'external_event'])
+ const EVENT_TYPE_SET = new Set(EVENT_TYPES)
++const { guardClaim } = require('./phase4bIdleService')
+ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+ 
+ function validateIdentity(userId, agentId) {
+@@ -86,6 +87,24 @@
+     if (typeof runTick !== 'function') throw new Error('MISSING_RUN_TICK')
+     const claim=await eventQueue.claimCognitionEvent({supabase,userId,agentId})
+     if (claim.status!=='claimed') return {status:claim.status,executed:false}
++    // Phase 4B: queued chat endings are revocable if conversation resumed.
++    // Every claimed event is preflighted before any model call; non-Phase4B
++    // event types and manually queued chat_finished remain unchanged in SQL.
++    if (claim.event_type === 'chat_finished' &&
++        typeof claim.event_key === 'string' &&
++        claim.event_key.startsWith('phase4b-chat:')) {
++        let guard
++        try {
++            guard=await guardClaim({supabase,eventId:claim.id,leaseToken:claim.lease_token})
++        } catch (_) {
++            await eventQueue.settleCognitionEvent({
++                supabase,eventId:claim.id,leaseToken:claim.lease_token,result:'uncertain'
++            })
++            return {status:'uncertain',executed:false}
++        }
++        if (guard.status === 'skipped') return {status:'superseded',executed:false}
++        if (guard.status === 'stale') return {status:'stale',executed:false}
++    }
+     const task={
+         supabase,userId,agentId,callModel,getSettings,getLatestMemory,
+         getMilestoneContext,getCharacterLoreContext,getStoryLoreContext,
