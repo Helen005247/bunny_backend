@@ -197,13 +197,14 @@ function evaluateWakeGate({
     let checkpoint = 0
     if (lastUserMs !== null && !userReturned && nowMs >= lastUserMs) {
         checkpoint = getAbsenceCheckpoint(nowMs - lastUserMs)
-        if (checkpoint > previousCheckpoint) {
+        if (!EVENT_TRIGGERS.has(triggerType) && checkpoint > previousCheckpoint) {
             reasons.push('continued_absence')
         }
     }
 
     const reviewAtMs = parsedMs(state.next_review_at, 'next_review_at')
-    if (reviewAtMs !== null && reviewAtMs <= nowMs) {
+    // An event cannot consume an unrelated pending review.
+    if (!EVENT_TRIGGERS.has(triggerType) && reviewAtMs !== null && reviewAtMs <= nowMs) {
         reasons.push('pending_review')
     }
 
@@ -270,7 +271,7 @@ function evaluateWakeGate({
     const shouldWake = reasons.length > 0 && !inCooldown
 
     if (shouldWake) {
-        if (checkpoint > previousCheckpoint) {
+        if (!EVENT_TRIGGERS.has(triggerType) && checkpoint > previousCheckpoint) {
             patch.absence_started_at = new Date(lastUserMs).toISOString()
             patch.absence_checkpoint = checkpoint
         }
@@ -299,10 +300,20 @@ function evaluateWakeGate({
             }
             nextMetadata[MANUAL_ACTIVITY_KEY] = activityAt
             patch.metadata = nextMetadata
-        } else {
+        } else if (triggerType === 'heartbeat') {
             patch.last_wake_at = activityAt
             const nextMetadata = { ...metadata, ...(patch.metadata || {}) }
             nextMetadata[HEARTBEAT_ACTIVITY_KEY] = activityAt
+            patch.metadata = nextMetadata
+        } else {
+            // Event claims are independently cooled down by the SQL queue.
+            // Seed the old heartbeat anchor once so subsequent Cognition
+            // writes cannot move the heartbeat's six-hour clock.
+            const nextMetadata = { ...metadata, ...(patch.metadata || {}) }
+            if (!hasHeartbeatActivityAnchor) {
+                nextMetadata[HEARTBEAT_ACTIVITY_KEY] = heartbeatActivityMs === -Infinity
+                    ? null : new Date(heartbeatActivityMs).toISOString()
+            }
             patch.metadata = nextMetadata
         }
     }

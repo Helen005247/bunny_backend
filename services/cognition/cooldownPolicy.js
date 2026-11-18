@@ -28,6 +28,8 @@ function getManualCooldownMinutes(env = process.env) {
 function getCognitionCooldownMinutes(triggerType, env = process.env) {
     if (triggerType === 'heartbeat') return HEARTBEAT_COOLDOWN_MINUTES
     if (triggerType === 'manual') return getManualCooldownMinutes(env)
+    // Phase 4A queue applies its own durable 60-minute event cooldown.
+    if (['chat_finished','milestone_transition','external_event'].includes(triggerType)) return 0
     throw new Error('不支持的 Cognition cooldown trigger')
 }
 

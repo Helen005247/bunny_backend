@@ -398,14 +398,18 @@ async function runCognitionTick({
     supabase, userId, agentId = 'star', callModel,
     getSettings, getLatestMemory, getMilestoneContext,
     getCharacterLoreContext, getStoryLoreContext,
-    triggerType = 'manual', now = new Date(),
+    triggerType = 'manual', triggerKey = null, now = new Date(),
 } = {}) {
     if (!supabase || typeof supabase.from !== 'function' ||
         typeof callModel !== 'function') {
         throw new Error('cognition 缺少 Supabase 或模型调用函数')
     }
-    if (triggerType !== 'manual' && triggerType !== 'heartbeat') {
-        throw new Error('cognition Step 3 只支持 manual 和 heartbeat 触发')
+    if (!['manual','heartbeat','chat_finished','milestone_transition','external_event'].includes(triggerType)) {
+        throw new Error('INVALID_COGNITION_TRIGGER')
+    }
+    if (['chat_finished','milestone_transition','external_event'].includes(triggerType) &&
+        (typeof triggerKey !== 'string' || !triggerKey.trim() || triggerKey.length > 256)) {
+        throw new Error('INVALID_EVENT_TRIGGER_KEY')
     }
     // Validate the selected throttle before reading or mutating runtime state.
     const cognitionTickStartedAt = Date.now()
@@ -437,7 +441,7 @@ async function runCognitionTick({
         throw error
     })
     const wake = await processWakeGate({
-        supabase, ...identity, now: nowDate, triggerType,
+        supabase, ...identity, now: nowDate, triggerType, triggerKey,
         cooldownMinutes,
     }).catch((error) => {
         console.warn('[cognition] tick failed; stage=wake_gate')

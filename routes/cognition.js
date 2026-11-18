@@ -7,6 +7,8 @@ const crypto = require('crypto')
 const express = require('express')
 const { runCognitionTick } = require('../services/cognition/cognitionService')
 const { matchesExpectedUserId } = require('../services/agentIdentity')
+const { enqueueCognitionEvent, dispatchOneCognitionEvent } =
+    require('../services/cognition/cognitionEventQueue')
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -21,7 +23,10 @@ function secureEqual(actual, expected) {
 function createCognitionRouter({ supabase, callModel,
     getSettings, getLatestMemory, getMilestoneContext,
     getCharacterLoreContext, getStoryLoreContext,
-    runTick = runCognitionTick, expectedSecret = process.env.COGNITION_TICK_SECRET,
+    runTick = runCognitionTick,
+    enqueueEvent = enqueueCognitionEvent,
+    dispatchEvent = dispatchOneCognitionEvent,
+    expectedSecret = process.env.COGNITION_TICK_SECRET,
     expectedUserId = process.env.HERMIT_STAR_USER_ID,
 } = {}) {
     const router = express.Router()
@@ -84,6 +89,69 @@ function createCognitionRouter({ supabase, callModel,
                 error: 'Cognition 执行失败，请查看后端日志（不会影响聊天）' })
         }
     })
+
+    // Phase 4A is dormant unless explicitly enabled after migration.
+    // Neither endpoint accepts a raw Thought or prompt from the caller.
+    function checkEventAccess(req,res) {
+        if (process.env.COGNITION_PHASE4_EVENTS_ENABLED !== 'true') {
+            res.status(503).json({ok:false,error:'EVENT_QUEUE_DISABLED'})
+            return false
+        }
+        if (!expectedSecret || expectedSecret.length < 24 ||
+            !secureEqual(req.get('x-cognition-secret'),expectedSecret)) {
+            res.status(401).json({ok:false,error:'Unauthorized'})
+            return false
+        }
+        if (!supabase || !UUID_RE.test(expectedUserId || '')) {
+            res.status(503).json({ok:false,error:'EVENT_QUEUE_UNAVAILABLE'})
+            return false
+        }
+        const input=req.body || {}
+        if (!UUID_RE.test(input.userId || '') ||
+            !matchesExpectedUserId(input.userId,expectedUserId) ||
+            (input.agentId != null && input.agentId !== 'star')) {
+            res.status(403).json({ok:false,error:'EVENT_USER_NOT_ALLOWED'})
+            return false
+        }
+        return true
+    }
+
+    // Do not register new endpoints until an operator enables Phase 4A.
+    // This also preserves the legacy single-route contract by default.
+    if (process.env.COGNITION_PHASE4_EVENTS_ENABLED === 'true') {
+    router.post('/events/enqueue', async (req,res)=>{
+        if (!checkEventAccess(req,res)) return
+        try {
+            const input=req.body || {}
+            const result=await enqueueEvent({
+                supabase,userId:input.userId,agentId:'star',
+                eventType:input.eventType,eventKey:input.eventKey
+            })
+            return res.json({ok:true,status:result.status,eventId:result.id})
+        } catch (_) {
+            return res.status(400).json({ok:false,error:'EVENT_ENQUEUE_FAILED'})
+        }
+    })
+
+    router.post('/events/dispatch', async (req,res)=>{
+        if (!checkEventAccess(req,res)) return
+        if (typeof callModel!=='function') return res.status(503)
+            .json({ok:false,error:'MODEL_UNAVAILABLE'})
+        try {
+            const result=await dispatchEvent({
+                supabase,userId:req.body.userId,agentId:'star',runTick,callModel,
+                getSettings,getLatestMemory,getMilestoneContext,
+                getCharacterLoreContext,getStoryLoreContext
+            })
+            // Do not expose the Thought body or raw event details.
+            return res.json({ok:true,status:result.status,executed:result.executed})
+        } catch (_) {
+            console.warn('[cognition] event dispatch failed; stage=dispatch')
+            return res.status(500).json({ok:false,error:'EVENT_DISPATCH_FAILED'})
+        }
+    })
+
+    } // End optional Phase 4A event endpoints.
 
     return router
 }
